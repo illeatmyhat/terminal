@@ -25,6 +25,18 @@ namespace winrt::TerminalApp::implementation
         InitializeComponent();
     }
 
+    // Flip from classic-tabs presentation to workspace-chrome presentation.
+    // The TabView is collapsed (still in the visual tree, still strongly held
+    // by `_tabs`/`_tabView` in TerminalPage so its children survive); the
+    // WorkspaceChromeRoot Grid containing the hamburger button, +New Workspace
+    // SplitButton, and centered title is made visible. TerminalPage owns the
+    // wire-up of click handlers and title text from here.
+    void TabRowControl::EnableWorkspacesMode()
+    {
+        TabView().Visibility(WUX::Visibility::Collapsed);
+        WorkspaceChromeRoot().Visibility(WUX::Visibility::Visible);
+    }
+
     // Method Description:
     // - Bound in the Xaml editor to the [+] button.
     // Arguments:

@@ -11,6 +11,7 @@ namespace Microsoft.Terminal.Settings.Model
         IgnoredDeprecatedEntry = 0,
         CloseOnExitInfo,
         KeyboardServiceWarning,
+        CorruptStateRecovered,
     };
 
     runtimeclass WindowLayout
@@ -24,6 +25,24 @@ namespace Microsoft.Terminal.Settings.Model
         Windows.Foundation.IReference<LaunchPosition> InitialPosition;
         Windows.Foundation.IReference<Windows.Foundation.Size> InitialSize;
         Windows.Foundation.IReference<LaunchMode> LaunchMode;
+
+        // Workspaces feature (gated by experimental.workspaces.enabled).
+        // SidebarWidth is the persisted width of the workspace sidebar, in
+        // device-independent pixels. WorkspaceLayout is the workspace-shape
+        // action-replay JSON described by WorkspacePersistence — it
+        // round-trips through state.json verbatim and is parsed at the app
+        // layer when workspace mode is active.
+        Windows.Foundation.IReference<Double> SidebarWidth;
+        String WorkspaceLayout;
+
+        // Forward-migration trigger: if WorkspaceLayout is empty and
+        // TabLayout is in the legacy newTab shape, populate WorkspaceLayout
+        // with the migrated workspace-shape action JSON. Idempotent and a
+        // no-op when WorkspaceLayout is already set or when TabLayout is
+        // empty/already workspace-shaped. Returns true iff a migration ran.
+        // Caller is responsible for the experimental.workspaces.enabled
+        // flag check; this method does not consult settings.
+        Boolean MigrateLegacyTabLayoutToWorkspaceLayout();
     };
 
     [default_interface] runtimeclass ApplicationState {
@@ -35,6 +54,12 @@ namespace Microsoft.Terminal.Settings.Model
         void AppendPersistedWindowLayout(WindowLayout layout);
         Boolean DismissBadge(String badgeId);
         Boolean BadgeDismissed(String badgeId);
+
+        // True when state.json was unparseable on the most recent read and
+        // its contents were moved aside with a `.corrupt.<timestamp>` suffix.
+        // Transient: cleared after the consumer (TerminalPage) acknowledges.
+        Boolean RecoveredFromCorruption { get; };
+        void AcknowledgeCorruptionRecovery();
 
         String SettingsHash;
         Windows.Foundation.Collections.IVector<WindowLayout> PersistedWindowLayouts;

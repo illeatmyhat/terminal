@@ -9,5 +9,11 @@ namespace TerminalApp
         TabRowControl();
         Microsoft.UI.Xaml.Controls.TabView TabView { get; };
         Boolean ShowElevationShield;
+
+        // Workspace chrome accessors (visible only after EnableWorkspacesMode()).
+        Windows.UI.Xaml.Controls.Button HamburgerButton { get; };
+        Microsoft.UI.Xaml.Controls.SplitButton NewWorkspaceButton { get; };
+        Windows.UI.Xaml.Controls.TextBlock WorkspaceTitleText { get; };
+        void EnableWorkspacesMode();
     }
 }

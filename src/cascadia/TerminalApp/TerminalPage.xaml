@@ -54,15 +54,75 @@
                             Click="_CloseOnExitInfoDismissHandler" />
                 </mux:InfoBar.ActionButton>
             </mux:InfoBar>
+
+            <mux:InfoBar x:Name="CorruptStateRecoveredInfoBar"
+                         x:Uid="CorruptStateRecoveredInfoBar"
+                         x:Load="False"
+                         CornerRadius="0"
+                         IsClosable="True"
+                         IsIconVisible="True"
+                         IsOpen="False"
+                         Severity="Warning">
+                <mux:InfoBar.ActionButton>
+                    <Button x:Uid="InfoBarOkButton"
+                            Click="_CorruptStateRecoveredInfoDismissHandler" />
+                </mux:InfoBar.ActionButton>
+            </mux:InfoBar>
         </StackPanel>
 
-        <Grid x:Name="TabContent"
+        <Grid x:Name="WorkspaceContentRoot"
               Grid.Row="2"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch">
-            <Grid.Background>
-                <ImageBrush />
-            </Grid.Background>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="WorkspaceSidebarColumn"
+                                  Width="0" />
+                <ColumnDefinition x:Name="WorkspaceSplitterColumn"
+                                  Width="0" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <!--
+                Workspaces sidebar (gated by experimental.workspaces.enabled).
+                Sized by WorkspaceSidebarColumn at runtime in TerminalPage::Create
+                so flag-off users get a 0-width column and see no visual change.
+                Rows are populated imperatively from `_workspaces` by
+                TerminalPage::_RebuildWorkspaceSidebar.
+            -->
+            <Border x:Name="WorkspaceSidebar"
+                    Grid.Column="0"
+                    Background="{ThemeResource TabViewBackground}"
+                    Visibility="Collapsed">
+                <StackPanel x:Name="WorkspaceRowsHost"
+                            Orientation="Vertical" />
+            </Border>
+
+            <!--
+                Splitter Thumb between sidebar and content. Width is set at
+                runtime alongside the sidebar column so layout-off mode
+                doesn't reserve space.
+            -->
+            <Thumb x:Name="WorkspaceSplitter"
+                   Grid.Column="1"
+                   HorizontalAlignment="Stretch"
+                   VerticalAlignment="Stretch"
+                   DragDelta="_WorkspaceSplitterDragDelta"
+                   Visibility="Collapsed">
+                <Thumb.Template>
+                    <ControlTemplate TargetType="Thumb">
+                        <Rectangle Fill="#3D3D3D" />
+                    </ControlTemplate>
+                </Thumb.Template>
+            </Thumb>
+
+            <Grid x:Name="TabContent"
+                  Grid.Column="2"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch">
+                <Grid.Background>
+                    <ImageBrush />
+                </Grid.Background>
+            </Grid>
         </Grid>
 
         <!--
@@ -96,7 +156,11 @@
                        x:Uid="CloseAllDialog"
                        Grid.Row="2"
                        x:Load="False"
-                       DefaultButton="Primary" />
+                       DefaultButton="Primary">
+            <TextBlock x:Name="CloseAllDialogContentText"
+                       Visibility="Collapsed"
+                       TextWrapping="Wrap" />
+        </ContentDialog>
 
         <ContentDialog x:Name="CloseReadOnlyDialog"
                        x:Uid="CloseReadOnlyDialog"

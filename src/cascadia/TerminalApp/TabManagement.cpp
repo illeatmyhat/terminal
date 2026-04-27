@@ -17,6 +17,7 @@
 
 #include "TabRowControl.h"
 #include "DebugTapConnection.h"
+#include "WorkspaceList.h"
 #include "..\TerminalSettingsModel\FileUtils.h"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
 
@@ -238,6 +239,17 @@ namespace winrt::TerminalApp::implementation
     // - Handle changes in tab layout.
     void TerminalPage::_UpdateTabView()
     {
+        // In workspaces mode, the chrome strip owns TabRow's visibility and
+        // the legacy TabView is permanently collapsed (set by
+        // TabRowControl::EnableWorkspacesMode). _OnTabItemsChanged calls us
+        // every time a tab is added/removed, which would otherwise re-show
+        // the tab strip on top of the chrome and produce a transparent
+        // overlap where TabView's content slot renders.
+        if (_workspaces)
+        {
+            return;
+        }
+
         // The tab row should only be visible if:
         // - we're not in focus mode
         // - we're not in full screen, or the user has enabled fullscreen tabs
@@ -1039,6 +1051,31 @@ namespace winrt::TerminalApp::implementation
             {
                 const auto tab{ _tabs.GetAt(selectedIndex) };
                 _UpdatedSelectedTab(tab);
+
+                // Workspaces mode reverse-sync: legacy-strip clicks must
+                // bring the sidebar's active marker along. WorkspaceList
+                // de-dups same-index activates, so this is a no-op when
+                // selection was driven from the sidebar in the first place.
+                if (_workspaces)
+                {
+                    for (const auto& [id, wsTab] : _workspaceTabs)
+                    {
+                        if (wsTab == tab)
+                        {
+                            for (size_t i = 0; i < _workspaces->Count(); ++i)
+                            {
+                                if (_workspaces->At(i).id == id)
+                                {
+                                    _workspaces->Activate(i);
+                                    _QueueSidebarRebuild();
+                                    _UpdateWorkspaceTitleInChrome();
+                                    return;
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -1184,5 +1221,77 @@ namespace winrt::TerminalApp::implementation
     bool TerminalPage::_HasMultipleTabs() const
     {
         return _tabs.Size() > 1;
+    }
+
+    // The close-confirmation gate. In legacy mode this is just _HasMultipleTabs.
+    // In workspaces mode, fire when there is more than one workspace OR when a
+    // single workspace has split panes (since the user is about to lose all of
+    // them). The 1-workspace/1-pane case stays silent — same as today's
+    // 1-tab/1-pane behavior.
+    bool TerminalPage::_ShouldConfirmCloseWindow() const
+    {
+        if (!_workspaces)
+        {
+            return _HasMultipleTabs();
+        }
+        return _workspaces->Count() > 1 || _CountAllPanesAcrossWorkspaces() > 1;
+    }
+
+    // Sums leaf-pane counts across every workspace, materialized or not.
+    // Materialized workspaces (those that have been activated in the
+    // session and have an entry in `_workspaceTabs`) report their live
+    // leaf count via `Tab::GetLeafPaneCount()`. Dormant workspaces — most
+    // commonly persisted-but-never-clicked since restore — don't have a
+    // tab yet, so we estimate by counting pane-creating actions
+    // (`newTab`, `splitPane`) in the persisted paneTree. Without that
+    // dormant fallback, the close-confirmation dialog under-reports
+    // panes after a fresh launch where the user hasn't clicked into
+    // every restored workspace.
+    size_t TerminalPage::_CountAllPanesAcrossWorkspaces() const
+    {
+        size_t total = 0;
+        if (!_workspaces)
+        {
+            return total;
+        }
+
+        for (size_t i = 0; i < _workspaces->Count(); ++i)
+        {
+            const auto& ws = _workspaces->At(i);
+            if (const auto it = _workspaceTabs.find(ws.id); it != _workspaceTabs.end() && it->second)
+            {
+                if (const auto impl = _GetTabImpl(it->second))
+                {
+                    total += static_cast<size_t>(impl->GetLeafPaneCount());
+                    continue;
+                }
+            }
+
+            // Dormant: count pane-creating actions in the persisted
+            // paneTree. `newTab` / `splitPane` each produce one leaf;
+            // `focusPane`, `selectWorkspace`, etc. don't.
+            if (!ws.paneTree.isArray())
+            {
+                continue;
+            }
+            for (const auto& step : ws.paneTree)
+            {
+                if (!step.isObject())
+                {
+                    continue;
+                }
+                const auto& actionVal = step["action"];
+                if (!actionVal.isString())
+                {
+                    continue;
+                }
+                const auto name = actionVal.asString();
+                if (name == "newTab" || name == "splitPane")
+                {
+                    ++total;
+                }
+            }
+        }
+        return total;
     }
 }

@@ -13,6 +13,7 @@
 #include "WindowProperties.g.cpp"
 
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
+#include "WorkspaceList.h"
 
 using namespace winrt::Windows::ApplicationModel;
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
@@ -165,6 +166,25 @@ namespace winrt::TerminalApp::implementation
             // layout will only ever be non-null if there were >0 tabs persisted in
             // .TabLayout(). We can re-evaluate that as a part of TODO: GH#12633
             _root->SetStartupActions(wil::to_vector(layout.TabLayout()));
+            if (const auto sidebarWidth = layout.SidebarWidth())
+            {
+                _root->SetPersistedSidebarWidth(sidebarWidth.Value());
+            }
+
+            // Workspaces mode: hand the deserialized workspace state over to
+            // TerminalPage so it can hydrate `_workspaces` instead of
+            // bootstrapping a fresh default. Parse failures (corrupted blob,
+            // schema drift) deliberately fall through silently — TerminalPage
+            // sees no persisted state and the cascade-endpoint
+            // (`_BootstrapDefaultWorkspace`) takes over per the contract on
+            // its definition.
+            if (_settings.GlobalSettings().WorkspacesEnabled() && !layout.WorkspaceLayout().empty())
+            {
+                if (auto state = ::TerminalApp::DeserializeWorkspaceLayoutBlob(layout.WorkspaceLayout()))
+                {
+                    _root->SetPersistedWorkspaceState(std::move(*state));
+                }
+            }
         }
         else if (_appArgs)
         {
@@ -1168,6 +1188,19 @@ namespace winrt::TerminalApp::implementation
             if (layouts && layouts.Size() > i)
             {
                 auto layout = layouts.GetAt(i);
+
+                // Forward-migrate legacy tab layouts when the workspaces
+                // experimental flag is on. This is the runtime trigger path
+                // for the structural transformation already implemented in
+                // WorkspaceMigration: a no-op when the layout was already
+                // workspace-shaped (or the WorkspaceLayout field was already
+                // populated by an earlier session). The flag is checked here
+                // so flag-off users never accumulate a workspaceLayout key
+                // in their state.json.
+                if (_settings.GlobalSettings().WorkspacesEnabled())
+                {
+                    layout.MigrateLegacyTabLayoutToWorkspaceLayout();
+                }
 
                 // TODO: GH#12633: Right now, we're manually making sure that we
                 // have at least one tab to restore. If we ever want to come

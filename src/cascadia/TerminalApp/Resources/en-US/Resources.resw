@@ -514,6 +514,14 @@
   <data name="CloseAllDialog.Title" xml:space="preserve">
     <value>Do you want to close all tabs?</value>
   </data>
+  <data name="CloseAllDialog_WorkspacesContent_Single" xml:space="preserve">
+    <value>This window has 1 workspace with {0} panes. Are you sure you want to close it?</value>
+    <comment>{0} is the total pane count across the single workspace (always &gt;= 2 when this string is shown).</comment>
+  </data>
+  <data name="CloseAllDialog_WorkspacesContent_Multi" xml:space="preserve">
+    <value>This window has {0} workspaces with {1} panes across them. Are you sure you want to close them all?</value>
+    <comment>{0} is the workspace count (always &gt;= 2). {1} is the total pane count across all workspaces.</comment>
+  </data>
   <data name="CloseReadOnlyDialog.CloseButtonText" xml:space="preserve">
     <value>Cancel</value>
   </data>
@@ -763,8 +771,29 @@
   <data name="CloseOnExitInfoBar.Message" xml:space="preserve">
     <value>Termination behavior can be configured in advanced profile settings.</value>
   </data>
+  <data name="CorruptStateRecoveredInfoBar.Title" xml:space="preserve">
+    <value>Recovered from corrupt state</value>
+  </data>
+  <data name="CorruptStateRecoveredInfoBar.Message" xml:space="preserve">
+    <value>Saved window and workspace state could not be read and was moved aside. Started a fresh window.</value>
+  </data>
   <data name="InfoBarDismissButton.Content" xml:space="preserve">
     <value>Don't show again</value>
+  </data>
+  <data name="InfoBarOkButton.Content" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="WorkspaceChromeSwitchMenuItem" xml:space="preserve">
+    <value>Switch Workspace…</value>
+    <comment>Hamburger menu entry that opens the command palette in workspace-switcher mode. Disabled in slice 1 because palette workspace mode is not yet built.</comment>
+  </data>
+  <data name="WorkspaceChromeCloseAllMenuItem" xml:space="preserve">
+    <value>Close All Workspaces in This Window</value>
+    <comment>Hamburger menu entry that closes the entire window (which closes all workspaces in it).</comment>
+  </data>
+  <data name="WorkspaceChromeNewWorkspaceLabel.Text" xml:space="preserve">
+    <value>+ New Workspace</value>
+    <comment>Label of the SplitButton in the workspace chrome strip that creates a new workspace.</comment>
   </data>
   <data name="ElevationShield.[using:Windows.UI.Xaml.Controls]ToolTipService.ToolTip" xml:space="preserve">
     <value>This Terminal window is running as administrator</value>

@@ -24,6 +24,9 @@
         tab row.
     -->
 
+    <Grid x:Name="ChromeRoot"
+          HorizontalAlignment="Stretch">
+
     <mux:TabView x:Name="TabView"
                  VerticalAlignment="Bottom"
                  HorizontalContentAlignment="Stretch"
@@ -136,5 +139,58 @@
         </mux:TabView.TabStripFooter>
 
     </mux:TabView>
+
+    <!--
+        Workspace chrome strip (gated by experimental.workspaces.enabled).
+        Toggled visible by TabRowControl::EnableWorkspacesMode(); the TabView
+        above is collapsed in the same call. Layout is left controls auto-sized,
+        title in a stretchy * column centered within TabRow's allocated width.
+        Slice 1 deviation: the Auto column TabRow occupies inside TitlebarControl
+        means the title is centered within TabRow's preferred width, not the
+        window strip's middle. Strip-centering is a follow-up.
+    -->
+    <Grid x:Name="WorkspaceChromeRoot"
+          HorizontalAlignment="Stretch"
+          Visibility="Collapsed">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <Button x:Name="HamburgerButton"
+                Grid.Column="0"
+                Height="31"
+                Margin="0,0,0,0"
+                Padding="10,0"
+                VerticalAlignment="Stretch"
+                Background="Transparent"
+                BorderThickness="0"
+                Content="&#xE700;"
+                FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                FontSize="14" />
+
+        <mux:SplitButton x:Name="NewWorkspaceButton"
+                         Grid.Column="1"
+                         Height="31"
+                         Margin="0,0,0,0"
+                         Padding="10,0,4,0"
+                         VerticalAlignment="Stretch"
+                         BorderThickness="0">
+            <TextBlock x:Uid="WorkspaceChromeNewWorkspaceLabel"
+                       VerticalAlignment="Center" />
+        </mux:SplitButton>
+
+        <TextBlock x:Name="WorkspaceTitleText"
+                   Grid.Column="2"
+                   Margin="12,0,12,0"
+                   HorizontalAlignment="Center"
+                   VerticalAlignment="Center"
+                   FontWeight="SemiBold"
+                   IsHitTestVisible="False"
+                   TextTrimming="CharacterEllipsis" />
+    </Grid>
+
+    </Grid>
 
 </ContentPresenter>

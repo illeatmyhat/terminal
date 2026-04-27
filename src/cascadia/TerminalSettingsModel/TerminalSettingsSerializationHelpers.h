@@ -258,6 +258,15 @@ JSON_ENUM_MAPPER(::winrt::Microsoft::Terminal::Settings::Model::NewTabPosition)
     };
 };
 
+JSON_ENUM_MAPPER(::winrt::Microsoft::Terminal::Settings::Model::WorkspacePlacementPolicy)
+{
+    JSON_MAPPINGS(3) = {
+        pair_type{ "top", ValueType::Top },
+        pair_type{ "afterCurrent", ValueType::AfterCurrent },
+        pair_type{ "end", ValueType::End },
+    };
+};
+
 JSON_ENUM_MAPPER(::winrt::Microsoft::Terminal::Settings::Model::FirstWindowPreference)
 {
     JSON_MAPPINGS(4) = {

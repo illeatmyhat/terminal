@@ -9,6 +9,7 @@
 #include "ActionAndArgs.h"
 #include "JsonUtils.h"
 #include "FileUtils.h"
+#include "WorkspaceMigration.h"
 #include "../../types/inc/utils.hpp"
 
 #include <til/io.h>
@@ -20,6 +21,8 @@ static constexpr std::string_view TabLayoutKey{ "tabLayout" };
 static constexpr std::string_view InitialPositionKey{ "initialPosition" };
 static constexpr std::string_view InitialSizeKey{ "initialSize" };
 static constexpr std::string_view LaunchModeKey{ "launchMode" };
+static constexpr std::string_view SidebarWidthKey{ "sidebarWidth" };
+static constexpr std::string_view WorkspaceLayoutKey{ "workspaceLayout" };
 
 namespace Microsoft::Terminal::Settings::Model::JsonUtils
 {
@@ -36,6 +39,8 @@ namespace Microsoft::Terminal::Settings::Model::JsonUtils
             GetValueForKey(json, InitialPositionKey, layout->_InitialPosition);
             GetValueForKey(json, LaunchModeKey, layout->_LaunchMode);
             GetValueForKey(json, InitialSizeKey, layout->_InitialSize);
+            GetValueForKey(json, SidebarWidthKey, layout->_SidebarWidth);
+            GetValueForKey(json, WorkspaceLayoutKey, layout->_WorkspaceLayout);
 
             return *layout;
         }
@@ -53,6 +58,13 @@ namespace Microsoft::Terminal::Settings::Model::JsonUtils
             SetValueForKey(json, InitialPositionKey, val.InitialPosition());
             SetValueForKey(json, LaunchModeKey, val.LaunchMode());
             SetValueForKey(json, InitialSizeKey, val.InitialSize());
+            SetValueForKey(json, SidebarWidthKey, val.SidebarWidth());
+            // Only emit the workspace layout if it's non-empty so non-workspace
+            // users don't carry around an empty key.
+            if (!val.WorkspaceLayout().empty())
+            {
+                SetValueForKey(json, WorkspaceLayoutKey, val.WorkspaceLayout());
+            }
 
             return json;
         }
@@ -91,6 +103,33 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         }
         JsonUtils::ConversionTrait<Model::WindowLayout> trait;
         return trait.FromJson(root);
+    }
+
+    bool WindowLayout::MigrateLegacyTabLayoutToWorkspaceLayout()
+    {
+        if (!_WorkspaceLayout.empty())
+        {
+            return false;
+        }
+        if (!_TabLayout || _TabLayout.Size() == 0)
+        {
+            return false;
+        }
+
+        JsonUtils::ConversionTrait<Windows::Foundation::Collections::IVector<Model::ActionAndArgs>> tabLayoutTrait;
+        const auto tabLayoutJson = tabLayoutTrait.ToJson(_TabLayout);
+
+        if (!WorkspaceMigration::IsLegacyShape(tabLayoutJson))
+        {
+            return false;
+        }
+
+        const auto migrated = WorkspaceMigration::MigrateLegacyTabLayout(tabLayoutJson);
+
+        Json::StreamWriterBuilder wbuilder;
+        const auto serialized = Json::writeString(wbuilder, migrated);
+        _WorkspaceLayout = winrt::hstring{ til::u8u16(serialized) };
+        return true;
     }
 
     ApplicationState::ApplicationState(const std::filesystem::path& stateRoot) noexcept :
@@ -146,50 +185,112 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
     // elevated) into this ApplicationState.
     // * ANY errors during app state will result in the creation of a new empty state.
     // * ANY errors during runtime will result in changes being partially ignored.
+    // * On a JSON parse failure, the corrupt file is moved aside with a
+    //   `.corrupt.<timestamp>` suffix so the next launch starts fresh, and
+    //   `_recoveredFromCorruption` is set so the consumer can surface a
+    //   one-time toast.
     void ApplicationState::_read() const noexcept
-    try
     {
         std::string errs;
         std::unique_ptr<Json::CharReader> reader{ Json::CharReaderBuilder{}.newCharReader() };
 
         // First get shared state out of `state.json`.
-        const auto sharedData = _readSharedContents();
+        std::string sharedData;
+        try
+        {
+            sharedData = _readSharedContents();
+        }
+        CATCH_LOG();
         if (!sharedData.empty())
         {
             Json::Value root;
             if (!reader->parse(sharedData.data(), sharedData.data() + sharedData.size(), &root, &errs))
             {
-                throw winrt::hresult_error(WEB_E_INVALID_JSON_STRING, winrt::to_hstring(errs));
-            }
-
-            // - If we're elevated, we want to only load the Shared properties
-            //   from state.json. We'll then load the Local props from
-            //   `elevated-state.json`
-            // - If we're unelevated, then load _everything_ from state.json.
-            if (::Microsoft::Console::Utils::IsRunningElevated())
-            {
-                // Only load shared properties if we're elevated
-                FromJson(root, FileSource::Shared);
-
-                // Then, try and get anything in elevated-state
-                if (const auto localData{ _readLocalContents() }; !localData.empty())
-                {
-                    Json::Value root;
-                    if (!reader->parse(localData.data(), localData.data() + localData.size(), &root, &errs))
-                    {
-                        throw winrt::hresult_error(WEB_E_INVALID_JSON_STRING, winrt::to_hstring(errs));
-                    }
-                    FromJson(root, FileSource::Local);
-                }
+                LOG_HR_MSG(WEB_E_INVALID_JSON_STRING, "shared state.json parse failed: %hs", errs.c_str());
+                _quarantineCorruptFile(_sharedPath);
+                _recoveredFromCorruption.store(true, std::memory_order_release);
             }
             else
             {
-                // If we're unelevated, then load everything.
-                FromJson(root, FileSource::Shared | FileSource::Local);
+                try
+                {
+                    // - If we're elevated, we want to only load the Shared
+                    //   properties from state.json. We'll then load the Local
+                    //   props from `elevated-state.json`.
+                    // - If we're unelevated, then load _everything_ from
+                    //   state.json.
+                    if (::Microsoft::Console::Utils::IsRunningElevated())
+                    {
+                        FromJson(root, FileSource::Shared);
+
+                        std::string localData;
+                        try
+                        {
+                            localData = _readLocalContents();
+                        }
+                        CATCH_LOG();
+                        if (!localData.empty())
+                        {
+                            Json::Value localRoot;
+                            if (!reader->parse(localData.data(), localData.data() + localData.size(), &localRoot, &errs))
+                            {
+                                LOG_HR_MSG(WEB_E_INVALID_JSON_STRING, "elevated-state.json parse failed: %hs", errs.c_str());
+                                _quarantineCorruptFile(_elevatedPath);
+                                _recoveredFromCorruption.store(true, std::memory_order_release);
+                            }
+                            else
+                            {
+                                FromJson(localRoot, FileSource::Local);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        // If we're unelevated, then load everything.
+                        FromJson(root, FileSource::Shared | FileSource::Local);
+                    }
+                }
+                CATCH_LOG();
             }
         }
     }
+
+    void ApplicationState::_quarantineCorruptFile(const std::filesystem::path& path) const noexcept
+    try
+    {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec) || ec)
+        {
+            return;
+        }
+
+        // Build a sibling path with a `.corrupt.<unix-time>` suffix so
+        // multiple recoveries don't collide.
+        const auto stamp = std::chrono::duration_cast<std::chrono::seconds>(
+                               std::chrono::system_clock::now().time_since_epoch())
+                               .count();
+        auto destination = path;
+        destination += L".corrupt." + std::to_wstring(stamp);
+
+        std::filesystem::rename(path, destination, ec);
+        if (ec)
+        {
+            // If rename fails, fall back to a best-effort delete so we don't
+            // get stuck failing to parse the same blob next launch.
+            LOG_LAST_ERROR_IF(!DeleteFile(path.c_str()));
+        }
+    }
     CATCH_LOG()
+
+    bool ApplicationState::RecoveredFromCorruption() const noexcept
+    {
+        return _recoveredFromCorruption.load(std::memory_order_acquire);
+    }
+
+    void ApplicationState::AcknowledgeCorruptionRecovery() noexcept
+    {
+        _recoveredFromCorruption.store(false, std::memory_order_release);
+    }
 
     // Serialized this ApplicationState (in `context`) into the state.json at _path.
     // * Errors are only logged.

@@ -114,6 +114,9 @@
     <ClInclude Include="WslDistroGenerator.h" />
     <ClInclude Include="SshHostGenerator.h" />
     <ClInclude Include="ModelSerializationHelpers.h" />
+    <ClInclude Include="WorkspaceState.h" />
+    <ClInclude Include="WorkspacePersistence.h" />
+    <ClInclude Include="WorkspaceMigration.h" />
   </ItemGroup>
   <!-- ========================= Cpp Files ======================== -->
   <ItemGroup>
@@ -208,6 +211,8 @@
     <ClCompile Include="WslDistroGenerator.cpp" />
     <ClCompile Include="SshHostGenerator.cpp" />
     <ClCompile Include="TestHooks.cpp" />
+    <ClCompile Include="WorkspacePersistence.cpp" />
+    <ClCompile Include="WorkspaceMigration.cpp" />
     <ClCompile Include="$(GeneratedFilesDir)module.g.cpp" />
   </ItemGroup>
   <!-- ========================= idl Files ======================== -->

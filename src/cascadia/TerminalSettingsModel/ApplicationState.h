@@ -49,10 +49,14 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         static winrt::hstring ToJson(const Model::WindowLayout& layout);
         static Model::WindowLayout FromJson(const winrt::hstring& json);
 
+        bool MigrateLegacyTabLayoutToWorkspaceLayout();
+
         WINRT_PROPERTY(Windows::Foundation::Collections::IVector<Model::ActionAndArgs>, TabLayout, nullptr);
         WINRT_PROPERTY(winrt::Windows::Foundation::IReference<Model::LaunchPosition>, InitialPosition, nullptr);
         WINRT_PROPERTY(winrt::Windows::Foundation::IReference<winrt::Windows::Foundation::Size>, InitialSize, nullptr);
         WINRT_PROPERTY(winrt::Windows::Foundation::IReference<Model::LaunchMode>, LaunchMode, nullptr);
+        WINRT_PROPERTY(winrt::Windows::Foundation::IReference<double>, SidebarWidth, nullptr);
+        WINRT_PROPERTY(winrt::hstring, WorkspaceLayout, L"");
 
         friend ::Microsoft::Terminal::Settings::Model::JsonUtils::ConversionTrait<Model::WindowLayout>;
     };
@@ -75,6 +79,9 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         bool DismissBadge(const hstring& badgeId);
         bool BadgeDismissed(const hstring& badgeId) const;
 
+        bool RecoveredFromCorruption() const noexcept;
+        void AcknowledgeCorruptionRecovery() noexcept;
+
         // State getters/setters
 #define MTSM_APPLICATION_STATE_GEN(source, type, name, key, ...) \
     type name() const noexcept;                                  \
@@ -92,7 +99,10 @@ namespace winrt::Microsoft::Terminal::Settings::Model::implementation
         til::shared_mutex<state_t> _state;
         std::filesystem::path _sharedPath;
         std::filesystem::path _elevatedPath;
+        mutable std::atomic<bool> _recoveredFromCorruption{ false };
         til::throttled_func<> _throttler;
+
+        void _quarantineCorruptFile(const std::filesystem::path& path) const noexcept;
 
         void _write() const noexcept;
         void _read() const noexcept;

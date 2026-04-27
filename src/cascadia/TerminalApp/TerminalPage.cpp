@@ -23,6 +23,7 @@
 #include "SnippetsPaneContent.h"
 #include "TabRowControl.h"
 #include "TerminalSettingsCache.h"
+#include "WorkspaceList.h"
 
 #include "LaunchPositionRequest.g.cpp"
 #include "RenameWindowRequestedArgs.g.cpp"
@@ -225,6 +226,10 @@ namespace winrt::TerminalApp::implementation
         InitializeComponent();
         _WindowProperties.PropertyChanged({ get_weak(), &TerminalPage::_windowPropertyChanged });
     }
+
+    // Out-of-line so ~unique_ptr<::TerminalApp::WorkspaceList> sees the
+    // complete type (the include is in this TU, not in the header).
+    TerminalPage::~TerminalPage() = default;
 
     // Method Description:
     // - implements the IInitializeWithWindow interface from shobjidl_core.
@@ -436,6 +441,64 @@ namespace winrt::TerminalApp::implementation
 
         _isAlwaysOnTop = _settings.GlobalSettings().AlwaysOnTop();
         _showTabsFullscreen = _settings.GlobalSettings().ShowTabsFullscreen();
+
+        // Workspaces sidebar shell (gated by experimental.workspaces.enabled).
+        // Slice 1 step A: render an empty sidebar + a thin draggable splitter,
+        // restoring the persisted width when present so the layout survives
+        // restart. Live workspace rows land in subsequent steps.
+        if (_settings.GlobalSettings().WorkspacesEnabled())
+        {
+            constexpr double kDefaultSidebarWidth = 240.0;
+            constexpr double kMinSidebarWidth = 120.0;
+            constexpr double kMaxSidebarWidth = 600.0;
+            const auto width = std::clamp(_persistedSidebarWidth.value_or(kDefaultSidebarWidth), kMinSidebarWidth, kMaxSidebarWidth);
+            WorkspaceSidebarColumn().Width(GridLengthHelper::FromPixels(width));
+            WorkspaceSplitterColumn().Width(GridLengthHelper::FromPixels(4.0));
+            WorkspaceSidebar().Visibility(Visibility::Visible);
+            WorkspaceSplitter().Visibility(Visibility::Visible);
+
+            // Re-clamp on window-size changes so a too-narrow window can't
+            // push the splitter past the content edge.
+            WorkspaceContentRoot().SizeChanged([weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->_ClampWorkspaceSidebarWidth();
+                }
+            });
+
+            // Take ownership of the structural workspace state for this
+            // window. Restore from the persisted `workspaceLayout` blob when
+            // TerminalWindow handed one over; otherwise (no prior state, or
+            // a parse-failure that the TerminalWindow side suppressed)
+            // bootstrap one default-profile workspace via the cascade
+            // endpoint. The two paths converge on a non-empty `_workspaces`.
+            _workspaces = std::make_unique<::TerminalApp::WorkspaceList>();
+            if (_persistedWorkspaceState.has_value())
+            {
+                _HydrateWorkspacesFromPersistedState();
+            }
+            if (_workspaces->Count() == 0)
+            {
+                _BootstrapDefaultWorkspace();
+            }
+            _RebuildWorkspaceSidebar();
+
+            // Slice 1 step #4: hide the legacy top tab strip and integrate
+            // a workspace chrome strip in its place. The chrome (hamburger,
+            // +New Workspace SplitButton, centered title) lives inside the
+            // existing TabRowControl — same control, swapped contents — so
+            // its placement in the titlebar via SetTitleBarContent and the
+            // surrounding DragBar/MinMaxClose wiring stay unchanged.
+            //
+            // EnableWorkspacesMode (which collapses the TabView) is deferred
+            // to _OnFirstLayout, AFTER _MaterializeWorkspace creates the
+            // first tab and its SelectionChanged-driven content mount runs.
+            // Collapsing TabView before its initial layout/selection cycle
+            // skips the pane mount into _tabContent — symptom: chrome
+            // visible but pane area stays transparent.
+            _BuildWorkspaceChromeMenus();
+            _UpdateWorkspaceTitleInChrome();
+        }
 
         // DON'T set up Toasts/TeachingTips here. They should be loaded and
         // initialized the first time they're opened, in whatever method opens
@@ -669,6 +732,24 @@ namespace winrt::TerminalApp::implementation
             {
                 CreateTabFromConnection(std::move(_startupConnection));
             }
+            else if (_workspaces)
+            {
+                // Workspaces mode owns the initial-content path. Materialize
+                // the active workspace's tab via the workspace pipeline and
+                // skip legacy startup-actions replay; persistence-restore
+                // for `_workspaces` is a separate (unlanded) step.
+                if (const auto active = _workspaces->ActiveIndex())
+                {
+                    _MaterializeWorkspace(*active);
+                }
+
+                // Now that the first tab is in place and its initial
+                // SelectionChanged has mounted the pane into _tabContent,
+                // it's safe to collapse the legacy tab strip and let the
+                // workspace chrome take over TabRow's appearance. Doing
+                // this before _MaterializeWorkspace skips the pane mount.
+                _tabRow.EnableWorkspacesMode();
+            }
             else if (!_startupActions.empty())
             {
                 ProcessStartupActions(std::move(_startupActions));
@@ -843,6 +924,8 @@ namespace winrt::TerminalApp::implementation
             // initialization is finished. However, there are still a few frames
             // after the frame is displayed before the XAML content first draws,
             // so that didn't actually resolve any issues.
+            _ShowCorruptStateRecoveredInfoBarIfNeeded();
+
             Dispatcher().RunAsync(CoreDispatcherPriority::Low, [weak = get_weak()]() {
                 if (auto self{ weak.get() })
                 {
@@ -903,6 +986,27 @@ namespace winrt::TerminalApp::implementation
     //   when this is called, nothing happens. See _ShowDialog for details
     winrt::Windows::Foundation::IAsyncOperation<ContentDialogResult> TerminalPage::_ShowCloseWarningDialog()
     {
+        // Force-load the deferred dialog so the named TextBlock child exists
+        // before we set its text. Same pattern as MultiLinePasteDialog.
+        std::ignore = FindName(L"CloseAllDialog");
+
+        if (_workspaces)
+        {
+            const auto wsCount = _workspaces->Count();
+            const auto paneCount = _CountAllPanesAcrossWorkspaces();
+            const auto fmtTemplate = wsCount == 1
+                ? RS_(L"CloseAllDialog_WorkspacesContent_Single")
+                : RS_(L"CloseAllDialog_WorkspacesContent_Multi");
+            const auto body = wsCount == 1
+                ? fmt::format(fmt::runtime(std::wstring{ fmtTemplate }), paneCount)
+                : fmt::format(fmt::runtime(std::wstring{ fmtTemplate }), wsCount, paneCount);
+            CloseAllDialogContentText().Text(body);
+            CloseAllDialogContentText().Visibility(Visibility::Visible);
+        }
+        else
+        {
+            CloseAllDialogContentText().Visibility(Visibility::Collapsed);
+        }
         return _ShowDialogHelper(L"CloseAllDialog");
     }
 
@@ -2283,6 +2387,140 @@ namespace winrt::TerminalApp::implementation
         WindowLayout layout;
         layout.TabLayout(winrt::single_threaded_vector<ActionAndArgs>(std::move(actions)));
 
+        // Workspaces mode: serialize `workspaceLayout` directly from
+        // `_workspaces` in sidebar order. The earlier
+        // `MigrateLegacyTabLayoutToWorkspaceLayout()` bridging path derived
+        // workspaceLayout from `_tabs`, which is in *materialization*
+        // order (workspace tabs are appended as the user clicks each row),
+        // not sidebar order. That made the sidebar shuffle on restart
+        // because materialization order rarely matches the user's chosen
+        // sidebar arrangement. Iterating `_workspaces` instead keeps the
+        // persisted order canonical.
+        //
+        // For materialized workspaces, capture session edits (splits made
+        // after restore) by calling `Tab::BuildStartupActions(Persist)` on
+        // the live tab. For dormant workspaces (never clicked, so
+        // `_workspaceTabs` has no entry), emit `ws.paneTree` verbatim —
+        // those actions came from the previous session's persisted state
+        // and round-trip exactly.
+        if (_settings.GlobalSettings().WorkspacesEnabled() && _workspaces && _workspaces->Count() > 0)
+        {
+            // First, flatten every materialized workspace's live actions
+            // into one IVector and round-trip through the projected
+            // `ActionAndArgs::Serialize` once, then parse back. This is
+            // the only path that converts the impl-namespace
+            // `ActionAndArgs::ToJson` output into a usable `Json::Value` —
+            // calling it directly from TerminalApp would leave us with
+            // unresolved-external link errors (same constraint
+            // `WorkspaceList::DeserializeWorkspaceLayoutBlob` is built
+            // around). Slice boundaries below remember where each
+            // workspace's chunk ends in the merged JSON array.
+            std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> mergedLive;
+            std::vector<size_t> sliceEnds;
+            sliceEnds.reserve(_workspaces->Count());
+            constexpr size_t kDormantMarker = std::numeric_limits<size_t>::max();
+
+            for (size_t i = 0; i < _workspaces->Count(); ++i)
+            {
+                const auto& ws = _workspaces->At(i);
+                const auto it = _workspaceTabs.find(ws.id);
+                if (it != _workspaceTabs.end() && it->second)
+                {
+                    auto tabImpl = winrt::get_self<implementation::Tab>(it->second);
+                    auto live = tabImpl->BuildStartupActions(BuildStartupKind::Persist);
+                    mergedLive.insert(mergedLive.end(),
+                                      std::make_move_iterator(live.begin()),
+                                      std::make_move_iterator(live.end()));
+                    sliceEnds.push_back(mergedLive.size());
+                }
+                else
+                {
+                    sliceEnds.push_back(kDormantMarker);
+                }
+            }
+
+            Json::Value liveActionsJson{ Json::arrayValue };
+            if (!mergedLive.empty())
+            {
+                auto liveVec = winrt::single_threaded_vector<Microsoft::Terminal::Settings::Model::ActionAndArgs>(std::move(mergedLive));
+                const auto serialized = Microsoft::Terminal::Settings::Model::ActionAndArgs::Serialize(liveVec);
+                const auto serializedUtf8 = winrt::to_string(serialized);
+                Json::CharReaderBuilder rb;
+                std::string errs;
+                Json::Value parsedRoot;
+                std::unique_ptr<Json::CharReader> reader{ rb.newCharReader() };
+                if (reader->parse(serializedUtf8.data(), serializedUtf8.data() + serializedUtf8.size(), &parsedRoot, &errs)
+                    && parsedRoot.isObject())
+                {
+                    if (auto& arr = parsedRoot["actions"]; arr.isArray())
+                    {
+                        liveActionsJson = std::move(arr);
+                    }
+                }
+            }
+
+            Json::Value wsArray{ Json::arrayValue };
+            size_t liveSliceStart = 0;
+            for (size_t i = 0; i < _workspaces->Count(); ++i)
+            {
+                const auto& ws = _workspaces->At(i);
+
+                Json::Value header{ Json::objectValue };
+                header["action"] = "newWorkspace";
+                if (!ws.title.empty())
+                {
+                    header["title"] = winrt::to_string(winrt::hstring{ ws.title });
+                }
+                if (ws.runtimeColor.has_value())
+                {
+                    const auto& c = *ws.runtimeColor;
+                    header["color"] = fmt::format("#{:02X}{:02X}{:02X}", c.R, c.G, c.B);
+                }
+                if (!ws.customDescription.empty())
+                {
+                    header["description"] = winrt::to_string(winrt::hstring{ ws.customDescription });
+                }
+                if (ws.pinned)
+                {
+                    header["pinned"] = true;
+                }
+                wsArray.append(std::move(header));
+
+                if (sliceEnds[i] != kDormantMarker)
+                {
+                    for (size_t j = liveSliceStart;
+                         j < sliceEnds[i] && j < liveActionsJson.size();
+                         ++j)
+                    {
+                        wsArray.append(liveActionsJson[static_cast<Json::ArrayIndex>(j)]);
+                    }
+                    liveSliceStart = sliceEnds[i];
+                }
+                else if (ws.paneTree.isArray())
+                {
+                    for (const auto& step : ws.paneTree)
+                    {
+                        wsArray.append(step);
+                    }
+                }
+            }
+
+            if (const auto active = _workspaces->ActiveIndex(); active.has_value())
+            {
+                Json::Value selectMarker{ Json::objectValue };
+                selectMarker["action"] = "selectWorkspace";
+                selectMarker["index"] = static_cast<Json::UInt>(*active);
+                wsArray.append(std::move(selectMarker));
+            }
+
+            Json::StreamWriterBuilder wb;
+            const auto blob = Json::writeString(wb, wsArray);
+            layout.WorkspaceLayout(winrt::hstring{ til::u8u16(blob) });
+
+            const auto sidebarWidth = WorkspaceSidebarColumn().Width().Value;
+            layout.SidebarWidth(winrt::Windows::Foundation::IReference<double>{ sidebarWidth });
+        }
+
         auto mode = LaunchMode::DefaultMode;
         WI_SetFlagIf(mode, LaunchMode::FullscreenMode, _isFullscreen);
         WI_SetFlagIf(mode, LaunchMode::FocusMode, _isInFocusMode);
@@ -2291,9 +2529,23 @@ namespace winrt::TerminalApp::implementation
         layout.LaunchMode({ mode });
 
         // Only save the content size because the tab size will be added on load.
-        const auto contentWidth = static_cast<float>(_tabContent.ActualWidth());
-        const auto contentHeight = static_cast<float>(_tabContent.ActualHeight());
-        const winrt::Windows::Foundation::Size windowSize{ contentWidth, contentHeight };
+        // Use WorkspaceContentRoot rather than TabContent — TabContent is the
+        // right-hand column inside the sidebar wrapper and excludes the
+        // sidebar+splitter columns, which would shrink the persisted size by
+        // ~sidebar width every save.
+        //
+        // Clamp to sensible minimums so a transient layout state during
+        // shutdown can't persist a tiny size that becomes unrecoverable on
+        // next launch (the sidebar would consume all space and grab pointer
+        // input intended for the window edge).
+        constexpr float kMinPersistedWidth = 400.0f;
+        constexpr float kMinPersistedHeight = 200.0f;
+        const auto rawWidth = static_cast<float>(WorkspaceContentRoot().ActualWidth());
+        const auto rawHeight = static_cast<float>(WorkspaceContentRoot().ActualHeight());
+        const winrt::Windows::Foundation::Size windowSize{
+            std::max(rawWidth, kMinPersistedWidth),
+            std::max(rawHeight, kMinPersistedHeight)
+        };
 
         layout.InitialSize(windowSize);
 
@@ -2311,7 +2563,7 @@ namespace winrt::TerminalApp::implementation
     //   than one tab opened, show a warning dialog.
     safe_void_coroutine TerminalPage::CloseWindow()
     {
-        if (_HasMultipleTabs() &&
+        if (_ShouldConfirmCloseWindow() &&
             _settings.GlobalSettings().ConfirmCloseAllTabs() &&
             !_displayingCloseDialog)
         {
@@ -3998,6 +4250,22 @@ namespace winrt::TerminalApp::implementation
         _startupConnection = std::move(connection);
     }
 
+    void TerminalPage::SetPersistedSidebarWidth(double width)
+    {
+        _persistedSidebarWidth = width;
+    }
+
+    // Receives the workspace list state already deserialized by
+    // TerminalWindow from the persisted `workspaceLayout` blob. Consumed once
+    // by `_HydrateWorkspacesFromPersistedState()` during `Create()`. If
+    // TerminalWindow couldn't parse the blob (corruption, schema drift), it
+    // simply doesn't call this — and Create() falls through to
+    // `_BootstrapDefaultWorkspace()`, the cascade endpoint.
+    void TerminalPage::SetPersistedWorkspaceState(::TerminalApp::WorkspaceListState state)
+    {
+        _persistedWorkspaceState = std::move(state);
+    }
+
     winrt::TerminalApp::IDialogPresenter TerminalPage::DialogPresenter() const
     {
         return _dialogPresenter.get();
@@ -4885,6 +5153,644 @@ namespace winrt::TerminalApp::implementation
         if (const auto infoBar = FindName(L"KeyboardServiceWarningInfoBar").try_as<MUX::Controls::InfoBar>())
         {
             infoBar.IsOpen(false);
+        }
+    }
+
+    // The corruption-recovery InfoBar is a transient, one-shot surface: it
+    // fires when ApplicationState quarantined a malformed state.json on
+    // startup, and is acknowledged on dismiss so it never reappears for the
+    // same recovery. Unlike CloseOnExit/KeyboardService, we do NOT plumb
+    // through DismissedMessages — the underlying flag is per-recovery, not
+    // per-user-preference.
+    void TerminalPage::_ShowCorruptStateRecoveredInfoBarIfNeeded() const
+    {
+        if (!ApplicationState::SharedInstance().RecoveredFromCorruption())
+        {
+            return;
+        }
+        if (const auto infoBar = FindName(L"CorruptStateRecoveredInfoBar").try_as<MUX::Controls::InfoBar>())
+        {
+            infoBar.IsOpen(true);
+        }
+    }
+
+    void TerminalPage::_CorruptStateRecoveredInfoDismissHandler(const IInspectable& /*sender*/, const IInspectable& /*args*/) const
+    {
+        ApplicationState::SharedInstance().AcknowledgeCorruptionRecovery();
+        if (const auto infoBar = FindName(L"CorruptStateRecoveredInfoBar").try_as<MUX::Controls::InfoBar>())
+        {
+            infoBar.IsOpen(false);
+        }
+    }
+
+    // Splitter drag handler: clamps the sidebar column to a usable range and
+    // applies the per-event horizontal delta from the Thumb.
+    void TerminalPage::_WorkspaceSplitterDragDelta(const IInspectable& /*sender*/,
+                                                   const Windows::UI::Xaml::Controls::Primitives::DragDeltaEventArgs& args)
+    {
+        const auto current = WorkspaceSidebarColumn().Width().Value;
+        const auto next = current + args.HorizontalChange();
+        WorkspaceSidebarColumn().Width(GridLengthHelper::FromPixels(next));
+        _ClampWorkspaceSidebarWidth();
+    }
+
+    // Keep the sidebar width within a usable range relative to the wrapper
+    // grid's actual width. Without this, a saved-too-wide sidebar (or a window
+    // shrunk smaller than the sidebar+splitter) would push the splitter past
+    // the visible content edge and steal pointer events meant for the window
+    // chrome.
+    void TerminalPage::_ClampWorkspaceSidebarWidth()
+    {
+        constexpr double kMinSidebarWidth = 120.0;
+        constexpr double kMaxSidebarWidth = 600.0;
+        // Never let sidebar+splitter exceed this fraction of the wrapping grid
+        // — leaves room for at least one usable terminal pane.
+        constexpr double kMaxFractionOfWrapper = 0.6;
+        constexpr double kSplitterWidth = 4.0;
+
+        const auto wrapperWidth = WorkspaceContentRoot().ActualWidth();
+        const auto fractionalCap = std::max(kMinSidebarWidth, wrapperWidth * kMaxFractionOfWrapper - kSplitterWidth);
+        const auto effectiveCap = std::min(kMaxSidebarWidth, fractionalCap);
+
+        const auto current = WorkspaceSidebarColumn().Width().Value;
+        const auto clamped = std::clamp(current, kMinSidebarWidth, effectiveCap);
+        if (clamped != current)
+        {
+            WorkspaceSidebarColumn().Width(GridLengthHelper::FromPixels(clamped));
+        }
+    }
+
+    // Seed `_workspaces` with one workspace so that brand-new windows in
+    // workspaces mode start with a single entry instead of an empty list.
+    // The workspace's title mirrors the default profile's name; its paneTree
+    // carries a single `newTab` action with the default profile so future
+    // mount/unmount steps can replay it. Live tab/pane creation still flows
+    // through the normal startup-actions path — `_workspaces` is parallel
+    // dormant state until the sidebar mount wiring lands.
+    //
+    // Cascade-endpoint contract (spec §Reliability, line 196): this is also
+    // the fallback the app reaches on persisted-state corruption recovery.
+    // On corruption, ApplicationState quarantines `state.json` to
+    // `state.json.corrupt.<stamp>` and reports `RecoveredFromCorruption() ==
+    // true` with empty `PersistedWindowLayouts()`. `LoadPersistedLayout()`
+    // then returns null (no TabLayout to restore), so `_workspaces` is
+    // freshly empty by the time we reach here and the early-out below does
+    // not trigger. Future persistence-restore code MUST short-circuit to
+    // this path when `RecoveredFromCorruption()` is true (or whenever its
+    // own deserialization fails) — i.e., never call this if a partial
+    // restore populated `_workspaces`, and never skip it after a failed
+    // restore. The InfoBar surfaced by `_ShowCorruptStateRecoveredInfoBarIf
+    // Needed` is the user-visible signal that this fallback fired.
+    void TerminalPage::_BootstrapDefaultWorkspace()
+    {
+        if (!_workspaces || _workspaces->Count() != 0)
+        {
+            return;
+        }
+
+        ::TerminalApp::WorkspaceState ws;
+        ws.id = 1;
+        ws.pinned = false;
+
+        const auto defaultProfileGuid = _settings.GlobalSettings().DefaultProfile();
+        if (const auto profile = _settings.FindProfile(defaultProfileGuid))
+        {
+            ws.title = profile.Name();
+        }
+
+        Json::Value newTab{ Json::objectValue };
+        newTab["action"] = "newTab";
+        newTab["profile"] = winrt::to_string(::Microsoft::Console::Utils::GuidToString(defaultProfileGuid));
+        ws.paneTree = Json::Value{ Json::arrayValue };
+        ws.paneTree.append(std::move(newTab));
+
+        _workspaces->Insert(std::move(ws),
+                            winrt::Microsoft::Terminal::Settings::Model::WorkspacePlacementPolicy::End,
+                            true);
+    }
+
+    // Drain `_persistedWorkspaceState` into `_workspaces`. Called once from
+    // `Create()` when TerminalWindow successfully parsed the persisted
+    // `workspaceLayout` blob. Each restored workspace carries forward its
+    // title, runtime color, custom description, pinned state, and full
+    // paneTree (which `_MaterializeWorkspace` + `_ReplayWorkspacePaneTree`
+    // will replay on activation). The persisted active index, sidebar
+    // width, and pin/unpin partition are preserved bit-for-bit via
+    // `WorkspaceList::FromState` so insert ordering can't drift workspaces
+    // across the pin region. After hydration we reset
+    // `_persistedWorkspaceState` to release the Json::Value memory (paneTree
+    // is the heaviest field).
+    //
+    // **Workspace ids are NOT preserved.** They're a per-session monotonic
+    // counter used as the key into `_workspaceTabs` and the lookup id for
+    // `_ReplayWorkspacePaneTree`. The migration path
+    // (`WorkspaceMigration::MigrateLegacyTabLayout`) emits `newWorkspace`
+    // headers without an `id` field, so restored workspaces would all share
+    // `id == 0` — `_workspaceTabs` would alias every workspace onto a single
+    // map slot, and `_SwitchToWorkspace` / `_ReplayWorkspacePaneTree` would
+    // route every row to the first-restored tab. We re-assign each restored
+    // workspace a fresh id from `_nextWorkspaceId` to keep keys unique
+    // within the live session.
+    void TerminalPage::_HydrateWorkspacesFromPersistedState()
+    {
+        if (!_workspaces || !_persistedWorkspaceState.has_value())
+        {
+            return;
+        }
+
+        auto state = std::move(*_persistedWorkspaceState);
+        _persistedWorkspaceState.reset();
+
+        if (state.workspaces.empty())
+        {
+            return;
+        }
+
+        // Honor the persisted sidebar width when TerminalWindow didn't
+        // already supply one from the same WindowLayout (it does today;
+        // this is a defense-in-depth path).
+        if (state.sidebarWidth.has_value() && !_persistedSidebarWidth.has_value())
+        {
+            _persistedSidebarWidth = *state.sidebarWidth;
+        }
+
+        // Re-assign session-unique ids to every restored workspace, then
+        // bump `_nextWorkspaceId` past the last one. See comment above.
+        for (auto& ws : state.workspaces)
+        {
+            ws.id = _nextWorkspaceId++;
+        }
+
+        *_workspaces = ::TerminalApp::WorkspaceList::FromState(std::move(state));
+    }
+
+    // Imperatively rebuild the sidebar's row visuals from `_workspaces`. This
+    // is the read-only render path for slice 1 step #2 — `_workspaces` doesn't
+    // mutate after Create() yet, so a one-shot rebuild on construction is
+    // sufficient. When mount/unmount and click-to-switch land we'll either
+    // re-call this on activation, or project a snapshotted
+    // IObservableVector<WorkspaceRowViewModel> and let XAML diff for us.
+    void TerminalPage::_RebuildWorkspaceSidebar()
+    {
+        if (!_workspaces)
+        {
+            return;
+        }
+        auto host = WorkspaceRowsHost();
+        if (!host)
+        {
+            return;
+        }
+
+        host.Children().Clear();
+
+        const auto activeIndex = _workspaces->ActiveIndex();
+        const auto count = _workspaces->Count();
+
+        const auto resources = Application::Current().Resources();
+        Media::Brush activeBackground{ nullptr };
+        if (const auto key = winrt::box_value(L"TabViewItemHeaderBackgroundSelected"); resources.HasKey(key))
+        {
+            activeBackground = resources.Lookup(key).try_as<Media::Brush>();
+        }
+
+        for (size_t i = 0; i < count; ++i)
+        {
+            const auto& ws = _workspaces->At(i);
+            const bool isActive = activeIndex.has_value() && *activeIndex == i;
+
+            // Two-column layout: a 3px reservation for the runtime-color
+            // stripe (left blank when ws.runtimeColor is unset, per spec) and
+            // the row's main content. Reserving the column even when blank
+            // avoids reflow when a workspace later gains a color.
+            Grid rowGrid;
+            ColumnDefinition stripeCol;
+            stripeCol.Width(GridLengthHelper::FromPixels(3.0));
+            ColumnDefinition contentCol;
+            contentCol.Width(GridLengthHelper::FromValueAndType(1.0, GridUnitType::Star));
+            rowGrid.ColumnDefinitions().Append(stripeCol);
+            rowGrid.ColumnDefinitions().Append(contentCol);
+
+            if (ws.runtimeColor.has_value())
+            {
+                Shapes::Rectangle stripe;
+                stripe.Fill(Media::SolidColorBrush{ *ws.runtimeColor });
+                Grid::SetColumn(stripe, 0);
+                rowGrid.Children().Append(stripe);
+            }
+
+            TextBlock title;
+            title.Text(winrt::hstring{ ws.title });
+            title.FontWeight(Windows::UI::Text::FontWeights::SemiBold());
+            title.TextTrimming(TextTrimming::CharacterEllipsis);
+            title.Margin(ThicknessHelper::FromLengths(10.0, 8.0, 8.0, 8.0));
+            Grid::SetColumn(title, 1);
+            rowGrid.Children().Append(title);
+
+            Border row;
+            row.Child(rowGrid);
+            if (isActive && activeBackground)
+            {
+                row.Background(activeBackground);
+            }
+            // Defer the switch to the next dispatcher tick. _SwitchToWorkspace
+            // sets _tabView.SelectedItem, which synchronously fires
+            // SelectionChanged → _UpdatedSelectedTab → mutations of
+            // _tabContent.Children. Doing that from inside the Tapped
+            // handler crashed WinUI's input dispatch (0xC0000005 in
+            // Windows.UI.Xaml.dll's post-input bookkeeping).
+            row.Tapped([weakThis = get_weak(), i](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->Dispatcher().RunAsync(
+                        Windows::UI::Core::CoreDispatcherPriority::Normal,
+                        [weakThis, i]() {
+                            if (auto inner = weakThis.get())
+                            {
+                                inner->_SwitchToWorkspace(i);
+                            }
+                        });
+                }
+            });
+
+            host.Children().Append(row);
+        }
+    }
+
+    // Post a sidebar rebuild to the dispatcher so it runs after the current
+    // event handler unwinds. Direct `_RebuildWorkspaceSidebar()` calls from
+    // inside an event handler attached to a row Border (or the "+" button)
+    // would destroy that Border before WinUI finished dispatching the
+    // originating Tapped/Click event, producing a 0xC0000005 access violation
+    // deep in the input pipeline as it tried to post-process the detached
+    // element. Deferral lets the handler return cleanly first.
+    void TerminalPage::_QueueSidebarRebuild()
+    {
+        Dispatcher().RunAsync(Windows::UI::Core::CoreDispatcherPriority::Normal,
+                              [weakThis = get_weak()]() {
+                                  if (auto self = weakThis.get())
+                                  {
+                                      self->_RebuildWorkspaceSidebar();
+                                  }
+                              });
+    }
+
+    // Bring the workspace at `index` to "live" state: build a Pane from its
+    // first paneTree action's profile, append a Tab to `_tabs` end-positioned
+    // (so we can deterministically retrieve it), and record it in
+    // `_workspaceTabs`. `_CreateNewTabFromPane` synchronously appends to
+    // `_tabs` and selects the new TabViewItem, which fires the existing
+    // `_OnTabSelectionChanged` → `_UpdatedSelectedTab` chain — that's the
+    // path that mounts content into `_tabContent`. Reused as-is so ConPTYs
+    // get the same survives-unmount guarantee tabs already enjoy: the Tab
+    // stays alive in `_tabs` (and in this map) when its UIElement is removed
+    // from the visual tree on switch-away.
+    void TerminalPage::_MaterializeWorkspace(size_t index)
+    {
+        if (!_workspaces || index >= _workspaces->Count())
+        {
+            return;
+        }
+        auto& ws = _workspaces->At(index);
+        if (const auto it = _workspaceTabs.find(ws.id); it != _workspaceTabs.end() && it->second)
+        {
+            return;
+        }
+
+        Microsoft::Terminal::Settings::Model::NewTerminalArgs termArgs{};
+        if (ws.paneTree.isArray() && !ws.paneTree.empty() && ws.paneTree[0u].isObject())
+        {
+            const auto& action = ws.paneTree[0u];
+            if (action.isMember("profile") && action["profile"].isString())
+            {
+                termArgs.Profile(winrt::to_hstring(action["profile"].asString()));
+            }
+        }
+
+        auto pane = _MakePane(termArgs, nullptr);
+        if (!pane)
+        {
+            return;
+        }
+
+        // Force end-of-list insertion so we can pull the tab back out of
+        // `_tabs` deterministically; the user's NewTabPosition setting
+        // doesn't apply to materialization.
+        const auto insertPosition = _tabs.Size();
+        auto tab = _CreateNewTabFromPane(pane, insertPosition);
+        _workspaceTabs.insert_or_assign(ws.id, tab);
+
+        // Replay paneTree[1..n] (split / focus actions) onto the just-created
+        // tab. This is the "preserves the pane tree" half of the persistence
+        // contract: action[0] is the workspace's seed `newTab` (already
+        // applied via _MakePane above); everything after it splits or
+        // focuses against the tab we just selected. Replay is async so it
+        // can yield to WinUI between actions (otherwise splitPane racks up
+        // before the previous pane's TermControl gets a layout pass — the
+        // GH#13136 race that ProcessStartupActions also paces around).
+        // Replay-once invariant: this is the only path that creates a
+        // workspace's tab, so the early-out above guarantees we never
+        // double-replay when the user clicks back to a materialized
+        // workspace.
+        _ReplayWorkspacePaneTree(ws.id);
+    }
+
+    // Replay paneTree[1..n] for `workspaceId`. Action[0] (the seed `newTab`)
+    // was applied synchronously by `_MaterializeWorkspace` via `_MakePane` +
+    // `_CreateNewTabFromPane`; everything else (splitPane, focusPane, …)
+    // dispatches against the now-active tab through the same
+    // `_actionDispatch->DoAction` path that user-driven splits use, with
+    // `wil::resume_foreground` between actions to let WinUI layout each
+    // intermediate pane. If the user switches workspaces mid-replay, the
+    // remaining actions still target the old tab via `_actionDispatch` (it
+    // routes by `_GetFocusedTab` at dispatch time) — that's a known sharp
+    // edge worth flagging if it bites; for slice 1, splits land on whatever
+    // tab is focused at each await resumption.
+    safe_void_coroutine TerminalPage::_ReplayWorkspacePaneTree(uint64_t workspaceId)
+    {
+        const auto strong = get_strong();
+
+        // Snapshot the paneTree synchronously so concurrent mutations to
+        // `_workspaces` (theoretical: nothing mutates paneTree post-create
+        // today) can't tear the action stream we're about to replay.
+        Json::Value paneTree;
+        if (_workspaces)
+        {
+            for (size_t i = 0; i < _workspaces->Count(); ++i)
+            {
+                const auto& ws = _workspaces->At(i);
+                if (ws.id == workspaceId)
+                {
+                    paneTree = ws.paneTree;
+                    break;
+                }
+            }
+        }
+        if (!paneTree.isArray() || paneTree.size() <= 1)
+        {
+            co_return;
+        }
+
+        // Convert paneTree[1..n] to typed `ActionAndArgs` projections via
+        // the public `ActionAndArgs::Deserialize(hstring)` API. That path
+        // expects `{"actions": [...]}`, so we wrap. Doing this in one
+        // round-trip avoids an additional cross-project header include for
+        // the impl-side `FromJson` helper.
+        Json::Value wrapper{ Json::objectValue };
+        Json::Value actionsArray{ Json::arrayValue };
+        for (Json::ArrayIndex i = 1; i < paneTree.size(); ++i)
+        {
+            if (paneTree[i].isObject())
+            {
+                actionsArray.append(paneTree[i]);
+            }
+        }
+        wrapper["actions"] = std::move(actionsArray);
+
+        Json::StreamWriterBuilder wb;
+        wb["indentation"] = "";
+        const auto wrapperString = Json::writeString(wb, wrapper);
+
+        winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::ActionAndArgs> actions{ nullptr };
+        try
+        {
+            actions = Microsoft::Terminal::Settings::Model::ActionAndArgs::Deserialize(winrt::to_hstring(wrapperString));
+        }
+        catch (...)
+        {
+            // Malformed paneTree action entries — skip replay, the
+            // workspace's seed pane is still alive so the user has
+            // *something* usable in this workspace.
+            co_return;
+        }
+
+        if (!actions || actions.Size() == 0)
+        {
+            co_return;
+        }
+
+        for (const auto& action : actions)
+        {
+            if (!action)
+            {
+                continue;
+            }
+            co_await wil::resume_foreground(Dispatcher(), winrt::Windows::UI::Core::CoreDispatcherPriority::Low);
+            if (!_actionDispatch)
+            {
+                co_return;
+            }
+            _actionDispatch->DoAction(action);
+        }
+    }
+
+    // Drive the active-workspace change. Activation is a no-op in
+    // `WorkspaceList` if `index` is already active, so re-clicking the
+    // active row costs only a sidebar rebuild.
+    void TerminalPage::_SwitchToWorkspace(size_t index)
+    {
+        if (!_workspaces || index >= _workspaces->Count())
+        {
+            return;
+        }
+        if (_workspaces->ActiveIndex() == index)
+        {
+            return;
+        }
+
+        _workspaces->Activate(index);
+        _MaterializeWorkspace(index);
+
+        const auto& ws = _workspaces->At(index);
+        if (const auto it = _workspaceTabs.find(ws.id); it != _workspaceTabs.end() && it->second)
+        {
+            // Selecting the TabViewItem fires `_OnTabSelectionChanged`,
+            // which calls `_UpdatedSelectedTab` to clear and re-attach
+            // `_tabContent.Children`. The reverse-sync hook in
+            // `_OnTabSelectionChanged` will see the activeIndex is already
+            // correct and just re-render the sidebar.
+            _tabView.SelectedItem(it->second.TabViewItem());
+        }
+
+        _RebuildWorkspaceSidebar();
+        _UpdateWorkspaceTitleInChrome();
+    }
+
+    // Synchronously build a new workspace running `profileGuid`, append it
+    // to `_workspaces` per the user's newWorkspacePlacement, materialize
+    // its content, and bring focus. Callers must invoke this from the
+    // dispatcher (not directly from a Click/Tapped handler) — materialize
+    // mutates the visual tree, and doing that inside an input-dispatch
+    // frame crashes WinUI in `Windows.UI.Xaml.dll`'s post-input bookkeeping.
+    void TerminalPage::_CreateNewWorkspaceWithProfile(const winrt::guid& profileGuid)
+    {
+        if (!_workspaces)
+        {
+            return;
+        }
+
+        ::TerminalApp::WorkspaceState ws;
+        ws.id = _nextWorkspaceId++;
+        ws.pinned = false;
+
+        if (const auto profile = _settings.FindProfile(profileGuid))
+        {
+            ws.title = profile.Name();
+        }
+
+        Json::Value newTab{ Json::objectValue };
+        newTab["action"] = "newTab";
+        newTab["profile"] = winrt::to_string(::Microsoft::Console::Utils::GuidToString(profileGuid));
+        ws.paneTree = Json::Value{ Json::arrayValue };
+        ws.paneTree.append(std::move(newTab));
+
+        const auto policy = _settings.GlobalSettings().NewWorkspacePlacement();
+        const auto inserted = _workspaces->Insert(std::move(ws), policy, /*activate*/ true);
+        _MaterializeWorkspace(inserted);
+        _RebuildWorkspaceSidebar();
+        _UpdateWorkspaceTitleInChrome();
+    }
+
+    // Build the hamburger MenuFlyout and the "+ New Workspace" SplitButton's
+    // primary-click + chevron flyout. Called once from Create() after
+    // EnableWorkspacesMode flips TabRowControl into chrome mode.
+    //
+    // Slice 1 deviation from spec line 132: the chevron flyout lists
+    // `_settings.ActiveProfiles()` directly rather than the full
+    // NewTabMenu-derived recursive picker (folders/RemainingProfiles/
+    // MatchProfiles/Action entries). Defer to a follow-up that clones
+    // _CreateNewTabFlyoutItems with the leaf click rewired.
+    //
+    // "Switch Workspace…" is included as a disabled MenuFlyoutItem because
+    // it depends on the command palette's `@`-mode workspace switcher,
+    // which is not yet built. "Manage Workspaces…" is omitted entirely
+    // per spec ("deferred POC — hidden").
+    void TerminalPage::_BuildWorkspaceChromeMenus()
+    {
+        if (!_tabRow)
+        {
+            return;
+        }
+
+        // Hamburger menu.
+        if (const auto hamburger = _tabRow.HamburgerButton())
+        {
+            auto flyout = WUX::Controls::MenuFlyout{};
+            flyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+
+            auto switchItem = WUX::Controls::MenuFlyoutItem{};
+            switchItem.Text(RS_(L"WorkspaceChromeSwitchMenuItem"));
+            switchItem.IsEnabled(false);
+            flyout.Items().Append(switchItem);
+
+            auto closeAllItem = WUX::Controls::MenuFlyoutItem{};
+            closeAllItem.Text(RS_(L"WorkspaceChromeCloseAllMenuItem"));
+            closeAllItem.Click([weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->CloseWindow();
+                }
+            });
+            flyout.Items().Append(closeAllItem);
+
+            flyout.Items().Append(WUX::Controls::MenuFlyoutSeparator{});
+
+            auto settingsItem = WUX::Controls::MenuFlyoutItem{};
+            settingsItem.Text(RS_(L"SettingsMenuItem"));
+            WUX::Controls::SymbolIcon settingsIcon{};
+            settingsIcon.Symbol(WUX::Controls::Symbol::Setting);
+            settingsItem.Icon(settingsIcon);
+            settingsItem.Click({ this, &TerminalPage::_SettingsButtonOnClick });
+            flyout.Items().Append(settingsItem);
+
+            auto paletteItem = WUX::Controls::MenuFlyoutItem{};
+            paletteItem.Text(RS_(L"CommandPaletteMenuItem"));
+            WUX::Controls::FontIcon paletteIcon{};
+            paletteIcon.Glyph(L"\xE945");
+            paletteIcon.FontFamily(Media::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" });
+            paletteItem.Icon(paletteIcon);
+            paletteItem.Click({ this, &TerminalPage::_CommandPaletteButtonOnClick });
+            flyout.Items().Append(paletteItem);
+
+            auto aboutItem = WUX::Controls::MenuFlyoutItem{};
+            aboutItem.Text(RS_(L"AboutMenuItem"));
+            WUX::Controls::SymbolIcon aboutIcon{};
+            aboutIcon.Symbol(WUX::Controls::Symbol::Help);
+            aboutItem.Icon(aboutIcon);
+            aboutItem.Click({ this, &TerminalPage::_AboutButtonOnClick });
+            flyout.Items().Append(aboutItem);
+
+            hamburger.Flyout(flyout);
+        }
+
+        // + New Workspace SplitButton.
+        if (const auto newWsButton = _tabRow.NewWorkspaceButton())
+        {
+            // Primary-click: create a new workspace running the default profile.
+            // Defer to the dispatcher so the body runs after WinUI finishes
+            // dispatching the click — _MaterializeWorkspace mutates the visual
+            // tree and would AV inside the input pipeline otherwise.
+            newWsButton.Click([weakThis = get_weak()](auto&&, auto&&) {
+                if (auto self = weakThis.get())
+                {
+                    self->Dispatcher().RunAsync(
+                        Windows::UI::Core::CoreDispatcherPriority::Normal,
+                        [weakThis]() {
+                            if (auto inner = weakThis.get())
+                            {
+                                const auto defaultGuid = inner->_settings.GlobalSettings().DefaultProfile();
+                                inner->_CreateNewWorkspaceWithProfile(defaultGuid);
+                            }
+                        });
+                }
+            });
+
+            // Chevron flyout: one entry per active profile. (Slice 1 deviation
+            // — see method-level comment.)
+            auto flyout = WUX::Controls::MenuFlyout{};
+            flyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
+            for (const auto& profile : _settings.ActiveProfiles())
+            {
+                auto item = WUX::Controls::MenuFlyoutItem{};
+                item.Text(profile.Name());
+                const auto profileGuid = profile.Guid();
+                item.Click([weakThis = get_weak(), profileGuid](auto&&, auto&&) {
+                    if (auto self = weakThis.get())
+                    {
+                        self->Dispatcher().RunAsync(
+                            Windows::UI::Core::CoreDispatcherPriority::Normal,
+                            [weakThis, profileGuid]() {
+                                if (auto inner = weakThis.get())
+                                {
+                                    inner->_CreateNewWorkspaceWithProfile(profileGuid);
+                                }
+                            });
+                    }
+                });
+                flyout.Items().Append(item);
+            }
+            newWsButton.Flyout(flyout);
+        }
+    }
+
+    // Sync the chrome's centered title TextBlock to the active workspace's
+    // title. Cheap (~one string copy) so we just call it from every site
+    // that mutates `_workspaces` or active-index — Create(), _SwitchToWorkspace,
+    // _CreateNewWorkspaceWithProfile, and the legacy-strip reverse-sync.
+    void TerminalPage::_UpdateWorkspaceTitleInChrome()
+    {
+        if (!_tabRow || !_workspaces)
+        {
+            return;
+        }
+        const auto active = _workspaces->ActiveIndex();
+        if (!active.has_value())
+        {
+            return;
+        }
+        if (const auto titleText = _tabRow.WorkspaceTitleText())
+        {
+            titleText.Text(winrt::hstring{ _workspaces->At(*active).title });
         }
     }
 

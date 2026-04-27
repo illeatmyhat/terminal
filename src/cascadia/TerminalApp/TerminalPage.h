@@ -16,6 +16,8 @@
 
 #include "WindowsPackageManagerFactory.h"
 
+#include "../TerminalSettingsModel/WorkspaceState.h"
+
 #define DECLARE_ACTION_HANDLER(action) void _Handle##action(const IInspectable& sender, const Microsoft::Terminal::Settings::Model::ActionEventArgs& args);
 
 namespace TerminalAppLocalTests
@@ -32,6 +34,12 @@ namespace Microsoft::Terminal::Core
 namespace winrt::Microsoft::Terminal::Settings
 {
     struct TerminalSettingsCreateResult;
+}
+
+namespace TerminalApp
+{
+    struct WorkspaceList;
+    using WorkspaceListState = winrt::Microsoft::Terminal::Settings::Model::implementation::WorkspaceListState;
 }
 
 namespace winrt::TerminalApp::implementation
@@ -94,6 +102,7 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager);
+        ~TerminalPage();
 
         // This implements shobjidl's IInitializeWithWindow, but due to a XAML Compiler bug we cannot
         // put it in our inheritance graph. https://github.com/microsoft/microsoft-ui-xaml/issues/3331
@@ -140,6 +149,8 @@ namespace winrt::TerminalApp::implementation
 
         void SetStartupActions(std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> actions);
         void SetStartupConnection(winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection connection);
+        void SetPersistedSidebarWidth(double width);
+        void SetPersistedWorkspaceState(::TerminalApp::WorkspaceListState state);
 
         static std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> ConvertExecuteCommandlineToActions(const Microsoft::Terminal::Settings::Model::ExecuteCommandlineArgs& args);
 
@@ -268,6 +279,32 @@ namespace winrt::TerminalApp::implementation
 
         std::vector<Microsoft::Terminal::Settings::Model::ActionAndArgs> _startupActions;
         winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection _startupConnection{ nullptr };
+        std::optional<double> _persistedSidebarWidth{};
+
+        // Owns the structural state of this window's workspaces. Constructed
+        // when experimental.workspaces.enabled is true; null otherwise. Lives
+        // behind a unique_ptr so this header doesn't need the WorkspaceList
+        // implementation include.
+        std::unique_ptr<::TerminalApp::WorkspaceList> _workspaces;
+
+        // Set by TerminalWindow when a non-empty `workspaceLayout` blob was
+        // successfully parsed from `state.json`. Consumed once during
+        // `Create()` to hydrate `_workspaces`; reset after to release the
+        // Json::Values. Null when no persisted blob existed, when the blob
+        // was malformed (cascade falls through to bootstrap), or when the
+        // window is non-workspaces-mode.
+        std::optional<::TerminalApp::WorkspaceListState> _persistedWorkspaceState;
+
+        // Sidecar workspace-id -> Tab map, holding the live Tab projection
+        // for each workspace whose content has been materialized. The Tab is
+        // also held strongly by `_tabs`; storing a strong ref here too
+        // ensures the workspace owns its content even if the legacy `_tabs`
+        // collection is later restructured.
+        std::unordered_map<uint64_t, winrt::TerminalApp::Tab> _workspaceTabs;
+        // ID 1 is reserved by _BootstrapDefaultWorkspace; subsequent
+        // workspaces get monotonically increasing IDs from here. (To be
+        // revisited when persistence-restore lands and IDs round-trip.)
+        uint64_t _nextWorkspaceId{ 2 };
 
         std::shared_ptr<Toast> _windowIdToast{ nullptr };
         std::shared_ptr<Toast> _actionSavedToast{ nullptr };
@@ -361,6 +398,8 @@ namespace winrt::TerminalApp::implementation
         void _DismissTabContextMenus();
         void _FocusCurrentTab(const bool focusAlways);
         bool _HasMultipleTabs() const;
+        bool _ShouldConfirmCloseWindow() const;
+        size_t _CountAllPanesAcrossWorkspaces() const;
 
         void _SelectNextTab(const bool bMoveRight, const Windows::Foundation::IReference<Microsoft::Terminal::Settings::Model::TabSwitcherMode>& customTabSwitcherMode);
         bool _SelectTab(uint32_t tabIndex);
@@ -530,6 +569,20 @@ namespace winrt::TerminalApp::implementation
         safe_void_coroutine _ConnectionStateChangedHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args);
         void _CloseOnExitInfoDismissHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args) const;
         void _KeyboardServiceWarningInfoDismissHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args) const;
+        void _CorruptStateRecoveredInfoDismissHandler(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& args) const;
+        void _ShowCorruptStateRecoveredInfoBarIfNeeded() const;
+        void _WorkspaceSplitterDragDelta(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::Primitives::DragDeltaEventArgs& args);
+        void _ClampWorkspaceSidebarWidth();
+        void _BootstrapDefaultWorkspace();
+        void _HydrateWorkspacesFromPersistedState();
+        void _RebuildWorkspaceSidebar();
+        void _QueueSidebarRebuild();
+        void _MaterializeWorkspace(size_t index);
+        safe_void_coroutine _ReplayWorkspacePaneTree(uint64_t workspaceId);
+        void _SwitchToWorkspace(size_t index);
+        void _CreateNewWorkspaceWithProfile(const winrt::guid& profileGuid);
+        void _BuildWorkspaceChromeMenus();
+        void _UpdateWorkspaceTitleInChrome();
         static bool _IsMessageDismissed(const winrt::Microsoft::Terminal::Settings::Model::InfoBarMessage& message);
         static void _DismissMessage(const winrt::Microsoft::Terminal::Settings::Model::InfoBarMessage& message);
 
