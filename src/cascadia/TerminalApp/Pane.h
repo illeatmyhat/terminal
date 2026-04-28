@@ -64,6 +64,27 @@ struct PaneResources
 class Pane : public std::enable_shared_from_this<Pane>
 {
 public:
+    // PaneTab is the per-tab carrier inside a leaf pane. In Phase A this
+    // was a single member (PaneTab _activeTab). Phase B widens storage
+    // to std::vector<std::unique_ptr<PaneTab>> so multi-tab leaf panes
+    // (slice 3 acceptance #1) become reachable via the new
+    // AddTab / RemoveTab / MoveTab / ActivateTab API. Internal-node
+    // panes (those with _firstChild / _secondChild) hold an empty _tabs
+    // vector and never participate in tab-list operations.
+    //
+    // PaneTab is a plain C++ struct, NOT a WinRT type, per spec. It does
+    // not cross WinRT boundaries; consumers within the TerminalApp project
+    // read fields directly via TabAt(i).
+    struct PaneTab
+    {
+        winrt::TerminalApp::IPaneContent content{ nullptr };
+        winrt::hstring customTitle{};
+        std::optional<winrt::Windows::UI::Color> runtimeColor{};
+        std::chrono::steady_clock::time_point lastFocused{};
+        uint32_t id{ 0 };
+        bool pinned{ false };
+    };
+
     Pane(winrt::TerminalApp::IPaneContent content,
          const bool lastFocused = false);
 
@@ -94,6 +115,20 @@ public:
 
     winrt::Windows::UI::Xaml::Controls::Grid GetRootElement();
     winrt::TerminalApp::IPaneContent GetContent() const noexcept { return _IsLeaf() ? _activeContent() : nullptr; }
+
+    // Per-leaf-pane tab list management (slice 3). Calls on internal-node
+    // panes are no-ops — only leaves carry tabs. AddTab activates the new
+    // tab and rebinds the close revoker; RemoveTab activates a neighbor
+    // (or fires Closed if the pane just emptied — the cascade hook for
+    // slice 3 Phase C); ActivateTab rebinds the close revoker. MoveTab
+    // tracks the active index across reorder.
+    size_t AddTab(winrt::TerminalApp::IPaneContent content);
+    void RemoveTab(size_t index);
+    void MoveTab(size_t from, size_t to);
+    void ActivateTab(size_t index);
+    size_t TabCount() const noexcept;
+    size_t ActiveTabIndex() const noexcept;
+    const PaneTab& TabAt(size_t index) const;
 
     bool WasLastFocused() const noexcept;
     void UpdateVisuals();
@@ -226,27 +261,19 @@ public:
     til::event<winrt::delegate<std::shared_ptr<Pane>>> LostFocus;
     til::event<winrt::delegate<std::shared_ptr<Pane>>> Detached;
 
+    // Per-pane tab list events (slice 3 Phase B). Fired with the index of
+    // the affected tab. ActiveTabChanged also fires for AddTab and for
+    // RemoveTab when the active tab is removed and a neighbor takes over.
+    til::event<winrt::delegate<size_t>> TabAdded;
+    til::event<winrt::delegate<size_t>> TabRemoved;
+    til::event<winrt::delegate<size_t>> ActiveTabChanged;
+
 private:
     struct PanePoint;
     struct PaneNeighborSearch;
     struct SnapSizeResult;
     struct SnapChildrenSizeResult;
     struct LayoutSizeNode;
-
-    // PaneTab is a leaf-pane-only concept. In Phase A this is a single
-    // member (PaneTab _activeTab) that mirrors the pre-existing _content
-    // field. Phase B widens it to a vector with active-index when the
-    // leaf-pane tab strip lands. Internal-node panes hold _firstChild /
-    // _secondChild and never populate _activeTab.content.
-    struct PaneTab
-    {
-        winrt::TerminalApp::IPaneContent content{ nullptr };
-        winrt::hstring customTitle{};
-        std::optional<winrt::Windows::UI::Color> runtimeColor{};
-        std::chrono::steady_clock::time_point lastFocused{};
-        uint32_t id{ 0 };
-        bool pinned{ false };
-    };
 
     winrt::Windows::UI::Xaml::Controls::Grid _root{};
     winrt::Windows::UI::Xaml::Controls::Border _borderFirst{};
@@ -260,10 +287,14 @@ private:
     SplitState _splitState{ SplitState::None };
     float _desiredSplitPosition;
 
-    // Phase A storage: a single PaneTab whose .content mirrors the
-    // pre-Phase-A `_content` field. Phase B will widen this to a
-    // vector with active-index when the leaf-pane tab strip lands.
-    PaneTab _activeTab{};
+    // Phase B storage: vector of unique_ptr keeps PaneTab heap-allocated
+    // so each PaneTab has a stable address across vector growth. Direct
+    // std::vector<PaneTab> caused sporadic split-pane disappearance on
+    // workspace switch (see reference_pane_content_storage_trap.md). The
+    // unique_ptr indirection lets the auto_revoke `[this]` lambda and any
+    // captured WinUI references stay valid across push_back / erase.
+    std::vector<std::unique_ptr<PaneTab>> _tabs{};
+    size_t _activeTabIndex{ 0 };
 #pragma endregion
 
     std::optional<uint32_t> _id;

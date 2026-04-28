@@ -1729,18 +1729,33 @@ void Pane::_SetupChildCloseHandlers()
 
 // Returns the active tab's content, or nullptr if this leaf pane has no
 // content yet (during construction/teardown). Internal-node panes also
-// report nullptr since they never populate _activeTab.content.
+// report nullptr since they never populate _tabs.
 IPaneContent Pane::_activeContent() const noexcept
 {
-    return _activeTab.content;
+    if (_tabs.empty() || _activeTabIndex >= _tabs.size())
+    {
+        return nullptr;
+    }
+    return _tabs[_activeTabIndex]->content;
 }
 
 // With this method you take ownership of the control from this Pane.
 // Assign it to another Pane with _setPaneContent() or Close() it.
+//
+// Phase B: still single-tab in practice (Split / _CloseChild paths only
+// ever hold one tab). The multi-tab AddTab / RemoveTab API operates on
+// _tabs directly without going through this helper.
 IPaneContent Pane::_takePaneContent()
 {
     _closeRequestedRevoker.revoke();
-    return std::move(_activeTab.content);
+    if (_tabs.empty())
+    {
+        return nullptr;
+    }
+    auto content = std::move(_tabs[_activeTabIndex]->content);
+    _tabs.clear();
+    _activeTabIndex = 0;
+    return content;
 }
 
 // This method safely sets the content of the Pane. It'll ensure to revoke and
@@ -1757,9 +1772,136 @@ void Pane::_setPaneContent(IPaneContent content)
 
     if (content)
     {
-        _activeTab.content = std::move(content);
-        _closeRequestedRevoker = _activeTab.content.CloseRequested(winrt::auto_revoke, [this](auto&&, auto&&) { Close(); });
+        auto newTab = std::make_unique<PaneTab>();
+        newTab->content = std::move(content);
+        _tabs.push_back(std::move(newTab));
+        _activeTabIndex = 0;
+        _closeRequestedRevoker = _tabs[_activeTabIndex]->content.CloseRequested(winrt::auto_revoke, [this](auto&&, auto&&) { Close(); });
     }
+}
+
+// ---- Multi-tab leaf-pane API (slice 3 Phase B) -----------------------------
+// Each method below is a no-op for non-leaf (internal-node) panes since they
+// never participate in tab-list operations. Bounds-checking on indices is
+// permissive: out-of-range RemoveTab/MoveTab/ActivateTab silently return.
+// TabAt uses .at() and throws on bad index — that's the only narrow contract.
+
+size_t Pane::AddTab(IPaneContent content)
+{
+    if (!content)
+    {
+        return _activeTabIndex;
+    }
+    auto newTab = std::make_unique<PaneTab>();
+    newTab->content = std::move(content);
+    _tabs.push_back(std::move(newTab));
+    const auto newIndex = _tabs.size() - 1;
+    _activeTabIndex = newIndex;
+    // Re-bind the close revoker to the new active tab. Each ActivateTab
+    // / AddTab also re-points the lambda's effective subject.
+    _closeRequestedRevoker = _tabs[_activeTabIndex]->content.CloseRequested(
+        winrt::auto_revoke, [this](auto&&, auto&&) { Close(); });
+    TabAdded.raise(newIndex);
+    ActiveTabChanged.raise(_activeTabIndex);
+    return newIndex;
+}
+
+void Pane::RemoveTab(size_t index)
+{
+    if (index >= _tabs.size())
+    {
+        return;
+    }
+    const auto wasActive = (index == _activeTabIndex);
+    _tabs.erase(_tabs.begin() + index);
+    if (_tabs.empty())
+    {
+        // Last tab removed: cascade hook for slice 3 Phase C — the pane
+        // self-closes and Pane::Closed propagates up the tree. The
+        // close-cascade for "last pane in workspace" / "last workspace
+        // in window" lands in Phase C wiring above this call site.
+        _closeRequestedRevoker.revoke();
+        _activeTabIndex = 0;
+        TabRemoved.raise(index);
+        Closed.raise(nullptr, nullptr);
+        return;
+    }
+    if (wasActive)
+    {
+        // Activate the previous neighbor (or the new tab at index 0 if
+        // we just removed index 0). Mirrors typical browser tab UX.
+        _activeTabIndex = (index > 0) ? index - 1 : 0;
+        _closeRequestedRevoker = _tabs[_activeTabIndex]->content.CloseRequested(
+            winrt::auto_revoke, [this](auto&&, auto&&) { Close(); });
+        TabRemoved.raise(index);
+        ActiveTabChanged.raise(_activeTabIndex);
+    }
+    else
+    {
+        // Removed before active: active index shifts down by one.
+        if (index < _activeTabIndex)
+        {
+            --_activeTabIndex;
+        }
+        TabRemoved.raise(index);
+    }
+}
+
+void Pane::MoveTab(size_t from, size_t to)
+{
+    if (from >= _tabs.size() || to >= _tabs.size() || from == to)
+    {
+        return;
+    }
+    auto moved = std::move(_tabs[from]);
+    _tabs.erase(_tabs.begin() + from);
+    _tabs.insert(_tabs.begin() + to, std::move(moved));
+
+    // Track the active index across the move:
+    //  * If the moved tab itself was active, its new index is `to`.
+    //  * If active sat between (from, to], shifting the moved tab past it
+    //    drags active backward by one.
+    //  * If active sat between [to, from), shifting the moved tab past it
+    //    pushes active forward by one.
+    if (_activeTabIndex == from)
+    {
+        _activeTabIndex = to;
+    }
+    else if (from < _activeTabIndex && to >= _activeTabIndex)
+    {
+        --_activeTabIndex;
+    }
+    else if (from > _activeTabIndex && to <= _activeTabIndex)
+    {
+        ++_activeTabIndex;
+    }
+}
+
+void Pane::ActivateTab(size_t index)
+{
+    if (index >= _tabs.size() || index == _activeTabIndex)
+    {
+        return;
+    }
+    _activeTabIndex = index;
+    _closeRequestedRevoker = _tabs[_activeTabIndex]->content.CloseRequested(
+        winrt::auto_revoke, [this](auto&&, auto&&) { Close(); });
+    ActiveTabChanged.raise(_activeTabIndex);
+}
+
+size_t Pane::TabCount() const noexcept
+{
+    return _tabs.size();
+}
+
+size_t Pane::ActiveTabIndex() const noexcept
+{
+    return _activeTabIndex;
+}
+
+const Pane::PaneTab& Pane::TabAt(size_t index) const
+{
+    return *_tabs.at(index);
 }
 
 // Method Description:
