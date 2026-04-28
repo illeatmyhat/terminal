@@ -20,6 +20,8 @@
 
 #pragma once
 
+#include <chrono>
+
 #include "TaskbarState.h"
 #include "TerminalPaneContent.h"
 
@@ -83,7 +85,7 @@ public:
     // - If this is a branch/root pane, return nullptr.
     winrt::Microsoft::Terminal::Settings::Model::Profile GetProfile() const
     {
-        if (const auto& c{ _content.try_as<winrt::TerminalApp::TerminalPaneContent>() })
+        if (const auto& c{ _activeContent().try_as<winrt::TerminalApp::TerminalPaneContent>() })
         {
             return c.GetProfile();
         }
@@ -91,7 +93,7 @@ public:
     }
 
     winrt::Windows::UI::Xaml::Controls::Grid GetRootElement();
-    winrt::TerminalApp::IPaneContent GetContent() const noexcept { return _IsLeaf() ? _content : nullptr; }
+    winrt::TerminalApp::IPaneContent GetContent() const noexcept { return _IsLeaf() ? _activeContent() : nullptr; }
 
     bool WasLastFocused() const noexcept;
     void UpdateVisuals();
@@ -231,6 +233,21 @@ private:
     struct SnapChildrenSizeResult;
     struct LayoutSizeNode;
 
+    // PaneTab is a leaf-pane-only concept. In Phase A this is a single
+    // member (PaneTab _activeTab) that mirrors the pre-existing _content
+    // field. Phase B widens it to a vector with active-index when the
+    // leaf-pane tab strip lands. Internal-node panes hold _firstChild /
+    // _secondChild and never populate _activeTab.content.
+    struct PaneTab
+    {
+        winrt::TerminalApp::IPaneContent content{ nullptr };
+        winrt::hstring customTitle{};
+        std::optional<winrt::Windows::UI::Color> runtimeColor{};
+        std::chrono::steady_clock::time_point lastFocused{};
+        uint32_t id{ 0 };
+        bool pinned{ false };
+    };
+
     winrt::Windows::UI::Xaml::Controls::Grid _root{};
     winrt::Windows::UI::Xaml::Controls::Border _borderFirst{};
     winrt::Windows::UI::Xaml::Controls::Border _borderSecond{};
@@ -243,7 +260,10 @@ private:
     SplitState _splitState{ SplitState::None };
     float _desiredSplitPosition;
 
-    winrt::TerminalApp::IPaneContent _content{ nullptr };
+    // Phase A storage: a single PaneTab whose .content mirrors the
+    // pre-Phase-A `_content` field. Phase B will widen this to a
+    // vector with active-index when the leaf-pane tab strip lands.
+    PaneTab _activeTab{};
 #pragma endregion
 
     std::optional<uint32_t> _id;
@@ -264,6 +284,7 @@ private:
     bool _IsLeaf() const noexcept;
     bool _HasFocusedChild() const noexcept;
     void _SetupChildCloseHandlers();
+    winrt::TerminalApp::IPaneContent _activeContent() const noexcept;
     winrt::TerminalApp::IPaneContent _takePaneContent();
     void _setPaneContent(winrt::TerminalApp::IPaneContent content);
     bool _HasChild(const std::shared_ptr<Pane> child);
