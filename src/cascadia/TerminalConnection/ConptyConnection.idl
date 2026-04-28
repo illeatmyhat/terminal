@@ -23,6 +23,12 @@ namespace Microsoft.Terminal.TerminalConnection
 
         UInt64 RootProcessHandle();
 
+        // Best-effort introspection of the client process's current working
+        // directory via NtQueryInformationProcess + PEB read. Returns empty
+        // on any failure (process gone, access denied, WoW64 mismatch, etc.)
+        // — the caller is expected to treat empty as "couldn't determine".
+        String ClientWorkingDirectory();
+
         static event NewConnectionHandler NewConnection;
         static void StartInboundListener();
 

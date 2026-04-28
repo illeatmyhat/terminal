@@ -73,7 +73,8 @@ Author(s):
     X(hstring, SearchWebDefaultQueryUrl, "searchWebDefaultQueryUrl", L"https://www.bing.com/search?q=%22%s%22")                                                                                       \
     X(bool, ShowTabsFullscreen, "showTabsFullscreen", false)                                                                                                                                          \
     X(bool, WorkspacesEnabled, "experimental.workspaces.enabled", false)                                                                                                                              \
-    X(Model::WorkspacePlacementPolicy, NewWorkspacePlacement, "experimental.workspaces.newWorkspacePlacement", Model::WorkspacePlacementPolicy::AfterCurrent)
+    X(Model::WorkspacePlacementPolicy, NewWorkspacePlacement, "experimental.workspaces.newWorkspacePlacement", Model::WorkspacePlacementPolicy::AfterCurrent)                                          \
+    X(bool, AutoShellIntegration, "experimental.workspaces.autoShellIntegration", true)
 
 // Also add these settings to:
 // * Profile.idl

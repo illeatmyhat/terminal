@@ -116,6 +116,7 @@ namespace Microsoft.Terminal.Settings.Model
         INHERITABLE_SETTING(String, SearchWebDefaultQueryUrl);
         INHERITABLE_SETTING(Boolean, WorkspacesEnabled);
         INHERITABLE_SETTING(WorkspacePlacementPolicy, NewWorkspacePlacement);
+        INHERITABLE_SETTING(Boolean, AutoShellIntegration);
 
         Windows.Foundation.Collections.IMapView<String, ColorScheme> ColorSchemes();
         void AddColorScheme(ColorScheme scheme);

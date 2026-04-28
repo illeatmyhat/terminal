@@ -664,6 +664,95 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
         return reinterpret_cast<uint64_t>(_piClient.hProcess);
     }
 
+    // Best-effort: read the client process's current working directory out of
+    // its PEB via NtQueryInformationProcess + ReadProcessMemory. Used as a
+    // fallback for "what's the CWD?" when the shell hasn't opted into shell
+    // integration (no OSC 7 / OSC 9;9 emission). Modeled on
+    // `_commandlineFromProcess`. Returns empty on any failure — the caller
+    // treats empty as "couldn't determine."
+    //
+    // Limitations:
+    // - Only inspects the root client process (the one we launched). If the
+    //   user is sitting at a subprocess (e.g. agent under a shell), the
+    //   shell's CWD is what we report, not the subprocess's.
+    // - WoW64 (32-bit child of 64-bit WT) reads the wrong PEB and returns
+    //   empty; same pre-existing limitation as `_commandlineFromProcess`.
+    // - WSL / Azure / other non-conpty sessions: `_piClient.hProcess` is
+    //   either null or points at a host process whose CWD is meaningless.
+    winrt::hstring ConptyConnection::ClientWorkingDirectory() noexcept
+    try
+    {
+        if (!_piClient.hProcess)
+        {
+            return {};
+        }
+
+        struct PROCESS_BASIC_INFORMATION
+        {
+            NTSTATUS ExitStatus;
+            PPEB PebBaseAddress;
+            ULONG_PTR AffinityMask;
+            KPRIORITY BasePriority;
+            ULONG_PTR UniqueProcessId;
+            ULONG_PTR InheritedFromUniqueProcessId;
+        } info;
+        THROW_IF_NTSTATUS_FAILED(NtQueryInformationProcess(_piClient.hProcess, ProcessBasicInformation, &info, sizeof(info), nullptr));
+
+        PEB peb;
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(_piClient.hProcess, info.PebBaseAddress, &peb, sizeof(peb), nullptr));
+
+        // winternl.h's public RTL_USER_PROCESS_PARAMETERS hides the early
+        // fields (CurrentDirectory included) under Reserved2[]. Define the
+        // prefix layout up to and including CurrentDirectory so we can read
+        // CurrentDirectory.DosPath without depending on phnt.
+        struct ClientProcessParameters
+        {
+            ULONG MaximumLength;
+            ULONG Length;
+            ULONG Flags;
+            ULONG DebugFlags;
+            HANDLE ConsoleHandle;
+            ULONG ConsoleFlags;
+            HANDLE StandardInput;
+            HANDLE StandardOutput;
+            HANDLE StandardError;
+            UNICODE_STRING CurrentDirectoryDosPath;
+            HANDLE CurrentDirectoryHandle;
+        } params;
+        // Layout sanity: the canonical RTL_USER_PROCESS_PARAMETERS places
+        // CurrentDirectory.DosPath at offset 0x38 on x64.
+        static_assert(sizeof(UNICODE_STRING) == 16);
+        static_assert(offsetof(ClientProcessParameters, CurrentDirectoryDosPath) == 0x38);
+
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(_piClient.hProcess, peb.ProcessParameters, &params, sizeof(params), nullptr));
+
+        if (!params.CurrentDirectoryDosPath.Buffer || params.CurrentDirectoryDosPath.Length == 0)
+        {
+            return {};
+        }
+
+        winrt::impl::hstring_builder cwd{ params.CurrentDirectoryDosPath.Length / 2u };
+        THROW_IF_WIN32_BOOL_FALSE(ReadProcessMemory(_piClient.hProcess, params.CurrentDirectoryDosPath.Buffer, cwd.data(), params.CurrentDirectoryDosPath.Length, nullptr));
+        const auto raw = cwd.to_hstring();
+
+        // PEB CurrentDirectory always carries a trailing backslash
+        // (`C:\Users\Kai\`); strip it so std::filesystem::path::filename()
+        // returns the basename rather than empty. For drive-roots
+        // (`C:\` → `C:`) the caller's home-fallback handles the no-basename
+        // case.
+        std::wstring_view view{ raw };
+        if (!view.empty() && view.back() == L'\\')
+        {
+            view.remove_suffix(1);
+        }
+        return winrt::hstring{ view };
+    }
+    catch (...)
+    {
+        LOG_CAUGHT_EXCEPTION();
+        return {};
+    }
+
     void ConptyConnection::Close() noexcept
     try
     {

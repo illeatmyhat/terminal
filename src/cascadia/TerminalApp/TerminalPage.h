@@ -344,10 +344,19 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowMultiLinePasteWarningDialog();
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowLargePasteWarningDialog();
 
+        // Leaf-click handler used by `_CreateNewTabFlyoutItems` /
+        // `_CreateNewTabFlyoutProfile`. The legacy new-tab dropdown leaves
+        // this null and the profile leaf clicks dispatch to
+        // `_OpenNewTerminalViaDropdown`. The workspace chrome chevron passes
+        // a handler that creates a new workspace from the args, so the same
+        // recursive NewTabMenu picker (folders / RemainingProfiles /
+        // MatchProfiles / Action entries) is shared across both surfaces.
+        using NewTabFlyoutLeafHandler = std::function<void(const Microsoft::Terminal::Settings::Model::NewTerminalArgs&)>;
+
         void _CreateNewTabFlyout();
-        std::vector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase> _CreateNewTabFlyoutItems(winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry> entries);
+        std::vector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase> _CreateNewTabFlyoutItems(winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry> entries, const NewTabFlyoutLeafHandler& leafHandler = nullptr);
         winrt::Windows::UI::Xaml::Controls::IconElement _CreateNewTabFlyoutIcon(const winrt::hstring& icon);
-        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutProfile(const Microsoft::Terminal::Settings::Model::Profile profile, int profileIndex, const winrt::hstring& iconPathOverride);
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutProfile(const Microsoft::Terminal::Settings::Model::Profile profile, int profileIndex, const winrt::hstring& iconPathOverride, const NewTabFlyoutLeafHandler& leafHandler = nullptr);
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutAction(const winrt::hstring& actionId, const winrt::hstring& iconPathOverride);
 
         void _OpenNewTabDropdown();
@@ -581,6 +590,7 @@ namespace winrt::TerminalApp::implementation
         safe_void_coroutine _ReplayWorkspacePaneTree(uint64_t workspaceId);
         void _SwitchToWorkspace(size_t index);
         void _CreateNewWorkspaceWithProfile(const winrt::guid& profileGuid);
+        void _CreateNewWorkspaceFromNewTerminalArgs(const Microsoft::Terminal::Settings::Model::NewTerminalArgs& args);
         void _BuildWorkspaceChromeMenus();
         void _UpdateWorkspaceTitleInChrome();
         static bool _IsMessageDismissed(const winrt::Microsoft::Terminal::Settings::Model::InfoBarMessage& message);

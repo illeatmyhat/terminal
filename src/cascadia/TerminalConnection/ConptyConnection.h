@@ -31,6 +31,7 @@ namespace winrt::Microsoft::Terminal::TerminalConnection::implementation
 
         void ReparentWindow(const uint64_t newParent);
         uint64_t RootProcessHandle() noexcept;
+        winrt::hstring ClientWorkingDirectory() noexcept;
 
         winrt::hstring Commandline() const;
         winrt::hstring StartingTitle() const;

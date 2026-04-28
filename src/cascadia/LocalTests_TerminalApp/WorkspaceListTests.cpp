@@ -43,11 +43,14 @@ namespace TerminalAppLocalTests
 
         TEST_METHOD(EmptyList);
         TEST_METHOD(NoPinned_TopAfterCurrentEnd);
+        TEST_METHOD(NoPinned_NewPinnedLandsAtZero);
         TEST_METHOD(AllPinned_NewUnpinnedAlwaysAtEnd);
+        TEST_METHOD(AllPinned_NewPinnedRespectsPolicy);
         TEST_METHOD(MixedRegions_NewPinnedStaysInPinnedRegion);
         TEST_METHOD(MixedRegions_NewUnpinnedStaysInUnpinnedRegion);
         TEST_METHOD(AfterCurrent_FallsBackWhenCurrentInOtherRegion);
         TEST_METHOD(AfterCurrent_NoCurrent);
+        TEST_METHOD(TopAndEnd_IgnoreCurrentIndex);
     };
 
     void WorkspacePlacementTests::EmptyList()
@@ -129,6 +132,43 @@ namespace TerminalAppLocalTests
         const auto flags = pinnedFlags({ true, false, false });
         VERIFY_ARE_EQUAL(1u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::AfterCurrent, flags, std::nullopt, true));
         VERIFY_ARE_EQUAL(3u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::AfterCurrent, flags, std::nullopt, false));
+    }
+
+    void WorkspacePlacementTests::NoPinned_NewPinnedLandsAtZero()
+    {
+        // No existing pinned workspaces, so the pinned region is [0, 0).
+        // A new pinned workspace must land at 0 regardless of policy.
+        const auto flags = pinnedFlags({ false, false, false });
+        for (const auto policy : { WorkspacePlacementPolicy::Top, WorkspacePlacementPolicy::AfterCurrent, WorkspacePlacementPolicy::End })
+        {
+            VERIFY_ARE_EQUAL(0u, WorkspacePlacement::ResolveInsertionIndex(policy, flags, 1u, true));
+        }
+    }
+
+    void WorkspacePlacementTests::AllPinned_NewPinnedRespectsPolicy()
+    {
+        // All existing entries are pinned: pinned region is [0, 3), unpinned is [3, 3).
+        // A new pinned workspace lands inside [0, 3] per the policy.
+        const auto flags = pinnedFlags({ true, true, true });
+        VERIFY_ARE_EQUAL(0u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::Top, flags, 1u, true));
+        VERIFY_ARE_EQUAL(3u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::End, flags, 1u, true));
+        VERIFY_ARE_EQUAL(2u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::AfterCurrent, flags, 1u, true));
+    }
+
+    void WorkspacePlacementTests::TopAndEnd_IgnoreCurrentIndex()
+    {
+        // Top and End must produce identical results regardless of which
+        // workspace happens to be the active one — only AfterCurrent reads
+        // currentIndex.
+        const auto flags = pinnedFlags({ true, true, false, false, false });
+
+        for (const auto current : { 0u, 1u, 2u, 3u, 4u })
+        {
+            VERIFY_ARE_EQUAL(0u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::Top, flags, current, true));
+            VERIFY_ARE_EQUAL(2u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::End, flags, current, true));
+            VERIFY_ARE_EQUAL(2u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::Top, flags, current, false));
+            VERIFY_ARE_EQUAL(5u, WorkspacePlacement::ResolveInsertionIndex(WorkspacePlacementPolicy::End, flags, current, false));
+        }
     }
 
     // -----------------------------------------------------------------------

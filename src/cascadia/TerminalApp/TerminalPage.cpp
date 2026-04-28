@@ -1175,7 +1175,7 @@ namespace winrt::TerminalApp::implementation
     // - For a given list of tab menu entries, this method will create the corresponding
     //   list of flyout items. This is a recursive method that calls itself when it comes
     //   across a folder entry.
-    std::vector<WUX::Controls::MenuFlyoutItemBase> TerminalPage::_CreateNewTabFlyoutItems(IVector<NewTabMenuEntry> entries)
+    std::vector<WUX::Controls::MenuFlyoutItemBase> TerminalPage::_CreateNewTabFlyoutItems(IVector<NewTabMenuEntry> entries, const NewTabFlyoutLeafHandler& leafHandler)
     {
         std::vector<WUX::Controls::MenuFlyoutItemBase> items;
 
@@ -1214,7 +1214,7 @@ namespace winrt::TerminalApp::implementation
                 }
 
                 // Recursively generate flyout items
-                auto folderEntryItems = _CreateNewTabFlyoutItems(folderEntries);
+                auto folderEntryItems = _CreateNewTabFlyoutItems(folderEntries, leafHandler);
 
                 // If the folder should auto-inline and there is only one item, do so.
                 if (folderEntry.Inlining() == FolderEntryInlining::Auto && folderEntryItems.size() == 1)
@@ -1267,7 +1267,7 @@ namespace winrt::TerminalApp::implementation
 
                 for (auto&& [profileIndex, remainingProfile] : remainingProfilesEntry.Profiles())
                 {
-                    items.push_back(_CreateNewTabFlyoutProfile(remainingProfile, profileIndex, {}));
+                    items.push_back(_CreateNewTabFlyoutProfile(remainingProfile, profileIndex, {}, leafHandler));
                 }
 
                 break;
@@ -1281,7 +1281,7 @@ namespace winrt::TerminalApp::implementation
                     break;
                 }
 
-                auto profileItem = _CreateNewTabFlyoutProfile(profileEntry.Profile(), profileEntry.ProfileIndex(), profileEntry.Icon().Resolved());
+                auto profileItem = _CreateNewTabFlyoutProfile(profileEntry.Profile(), profileEntry.ProfileIndex(), profileEntry.Icon().Resolved(), leafHandler);
                 items.push_back(profileItem);
                 break;
             }
@@ -1306,7 +1306,7 @@ namespace winrt::TerminalApp::implementation
     // Method Description:
     // - This method creates a flyout menu item for a given profile with the given index.
     //   It makes sure to set the correct icon, keybinding, and click-action.
-    WUX::Controls::MenuFlyoutItem TerminalPage::_CreateNewTabFlyoutProfile(const Profile profile, int profileIndex, const winrt::hstring& iconPathOverride)
+    WUX::Controls::MenuFlyoutItem TerminalPage::_CreateNewTabFlyoutProfile(const Profile profile, int profileIndex, const winrt::hstring& iconPathOverride, const NewTabFlyoutLeafHandler& leafHandler)
     {
         auto profileMenuItem = WUX::Controls::MenuFlyoutItem{};
 
@@ -1368,7 +1368,7 @@ namespace winrt::TerminalApp::implementation
         toolTip.Content(textBlock);
         WUX::Controls::ToolTipService::SetToolTip(profileMenuItem, toolTip);
 
-        profileMenuItem.Click([profileIndex, weakThis{ get_weak() }](auto&&, auto&&) {
+        profileMenuItem.Click([profileIndex, weakThis{ get_weak() }, leafHandler](auto&&, auto&&) {
             if (auto page{ weakThis.get() })
             {
                 TraceLoggingWrite(
@@ -1381,7 +1381,14 @@ namespace winrt::TerminalApp::implementation
                     TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
 
                 NewTerminalArgs newTerminalArgs{ profileIndex };
-                page->_OpenNewTerminalViaDropdown(newTerminalArgs);
+                if (leafHandler)
+                {
+                    leafHandler(newTerminalArgs);
+                }
+                else
+                {
+                    page->_OpenNewTerminalViaDropdown(newTerminalArgs);
+                }
             }
         });
 
@@ -1569,6 +1576,80 @@ namespace winrt::TerminalApp::implementation
     // - the terminal settings
     // Return value:
     // - the desired connection
+    namespace
+    {
+        // PowerShell builtin Set-Location updates $PWD but does NOT call
+        // SetCurrentDirectoryW, so the process's PEB CurrentDirectory stays
+        // pinned at the launch dir. PEB introspection (used to populate a
+        // new workspace's CWD) reads stale data as a result. Wrap the
+        // PowerShell launch with a -Command bootstrap that captures
+        // whatever `prompt` the user's auto-loaded $PROFILE defined, then
+        // installs a wrapper prompt that:
+        //   - syncs [Environment]::CurrentDirectory = $PWD.Path on every
+        //     prompt (this calls SetCurrentDirectoryW under the hood, so
+        //     the PEB is now accurate);
+        //   - delegates to the user's original `prompt` so their visual
+        //     customization survives.
+        // -Command runs AFTER profile auto-load (we don't pass -NoProfile),
+        // so $orig captures whatever the user defined. Errors are swallowed
+        // so a broken environment doesn't break the shell. No double quotes
+        // inside the script — single quotes only — so the C-level argument
+        // quoting stays simple.
+        constexpr std::wstring_view kPowerShellAutoIntegrationArgs =
+            LR"-( -NoExit -Command "& { $orig = (Get-Item function:prompt -EA SilentlyContinue).ScriptBlock; function global:prompt { try { [Environment]::CurrentDirectory = $PWD.Path } catch {}; if ($orig) { & $orig } else { 'PS ' + $PWD.Path + '> ' } } }")-";
+
+        bool _isPowerShellExeBasename(std::wstring_view path) noexcept
+        {
+            if (path.size() >= 2 && path.front() == L'"' && path.back() == L'"')
+            {
+                path.remove_prefix(1);
+                path.remove_suffix(1);
+            }
+            const auto slash = path.find_last_of(LR"(\/)");
+            const auto base = (slash == std::wstring_view::npos) ? path : path.substr(slash + 1);
+            const std::wstring lower{ base };
+            return _wcsicmp(lower.c_str(), L"powershell.exe") == 0 ||
+                   _wcsicmp(lower.c_str(), L"pwsh.exe") == 0;
+        }
+
+        // Decide whether `commandline` is "just powershell with no entry-
+        // point override." If so, append our shell-integration bootstrap.
+        // Otherwise return unchanged — user-provided -Command, -File, or
+        // -EncodedCommand args are alternative entry points and our wrap
+        // would conflict with them.
+        winrt::hstring _wrapPowerShellForShellIntegration(const winrt::hstring& commandline)
+        {
+            int argc = 0;
+            wil::unique_hlocal_ptr<LPWSTR[]> argv{ CommandLineToArgvW(commandline.c_str(), &argc) };
+            if (!argv || argc == 0)
+            {
+                return commandline;
+            }
+            if (!_isPowerShellExeBasename(argv[0]))
+            {
+                return commandline;
+            }
+            for (int i = 1; i < argc; ++i)
+            {
+                const std::wstring arg{ argv[i] };
+                if (_wcsicmp(arg.c_str(), L"-Command") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-c") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-File") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-f") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-EncodedCommand") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-e") == 0 ||
+                    _wcsicmp(arg.c_str(), L"-ec") == 0)
+                {
+                    return commandline;
+                }
+            }
+
+            std::wstring result{ commandline };
+            result.append(kPowerShellAutoIntegrationArgs);
+            return winrt::hstring{ result };
+        }
+    }
+
     TerminalConnection::ITerminalConnection TerminalPage::_CreateConnectionFromSettings(Profile profile,
                                                                                         IControlSettings settings,
                                                                                         const bool inheritCursor)
@@ -1633,7 +1714,14 @@ namespace winrt::TerminalApp::implementation
             // restored the CWD to its original value.
             auto newWorkingDirectory{ _evaluatePathForCwd(settings.StartingDirectory()) };
             connection = TerminalConnection::ConptyConnection{};
-            valueSet = TerminalConnection::ConptyConnection::CreateSettings(settings.Commandline(),
+
+            auto effectiveCommandline = settings.Commandline();
+            if (_settings.GlobalSettings().AutoShellIntegration())
+            {
+                effectiveCommandline = _wrapPowerShellForShellIntegration(effectiveCommandline);
+            }
+
+            valueSet = TerminalConnection::ConptyConnection::CreateSettings(effectiveCommandline,
                                                                             newWorkingDirectory,
                                                                             settings.StartingTitle(),
                                                                             settingsInternal->ReloadEnvironmentVariables(),
@@ -5465,6 +5553,10 @@ namespace winrt::TerminalApp::implementation
             {
                 termArgs.Profile(winrt::to_hstring(action["profile"].asString()));
             }
+            if (action.isMember("startingDirectory") && action["startingDirectory"].isString())
+            {
+                termArgs.StartingDirectory(winrt::to_hstring(action["startingDirectory"].asString()));
+            }
         }
 
         auto pane = _MakePane(termArgs, nullptr);
@@ -5629,18 +5721,135 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        const auto profile = _settings.FindProfile(profileGuid);
+
+        // Inherit the previously-active workspace's focused-pane CWD when
+        // available; fall back to the profile's evaluated startingDirectory.
+        // CWD sources tried in order:
+        //   1. TermControl::WorkingDirectory() — but only if it differs from
+        //      the profile's pre-seeded starting directory. ControlCore
+        //      pre-seeds the field at construction, so the same value comes
+        //      back forever for shells that don't emit OSC 7 / OSC 9;9.
+        //   2. ConptyConnection::ClientWorkingDirectory() — best-effort PEB
+        //      introspection. Works for shells whose builtin `cd` calls
+        //      SetCurrentDirectoryW (cmd.exe, git bash, nushell, etc.).
+        //   3. profile.EvaluatedStartingDirectory().
+        std::wstring cwd;
+        if (const auto activeIndex = _workspaces->ActiveIndex())
+        {
+            const auto& activeWs = _workspaces->At(*activeIndex);
+            if (const auto it = _workspaceTabs.find(activeWs.id); it != _workspaceTabs.end() && it->second)
+            {
+                if (const auto& tabImpl = _GetTabImpl(it->second))
+                {
+                    if (const auto& termControl = tabImpl->GetActiveTerminalControl())
+                    {
+                        const auto wd = termControl.WorkingDirectory();
+
+                        // Determine whether `wd` is just the unmodified
+                        // pre-seed. Compare against the focused profile's
+                        // resolved StartingDirectory, normalizing trailing
+                        // backslashes so `C:\foo` and `C:\foo\` match.
+                        bool wdLooksShellReported = false;
+                        if (!wd.empty())
+                        {
+                            const auto activeProfile = tabImpl->GetFocusedProfile();
+                            if (activeProfile)
+                            {
+                                const auto seeded = _evaluatePathForCwd(activeProfile.EvaluatedStartingDirectory());
+                                auto trim = [](std::wstring_view s) {
+                                    while (s.size() > 1 && s.back() == L'\\')
+                                    {
+                                        s.remove_suffix(1);
+                                    }
+                                    return s;
+                                };
+                                const auto a = trim(std::wstring_view{ wd });
+                                const auto b = trim(std::wstring_view{ seeded });
+                                const bool equal = (a.size() == b.size()) &&
+                                                   (CompareStringOrdinal(a.data(),
+                                                                         static_cast<int>(a.size()),
+                                                                         b.data(),
+                                                                         static_cast<int>(b.size()),
+                                                                         TRUE) == CSTR_EQUAL);
+                                wdLooksShellReported = !equal;
+                            }
+                            else
+                            {
+                                // No profile to compare against — trust the
+                                // value if it's a real directory.
+                                wdLooksShellReported = true;
+                            }
+                        }
+
+                        if (wdLooksShellReported && Utils::IsValidDirectory(wd.c_str()))
+                        {
+                            cwd.assign(wd);
+                        }
+
+                        if (cwd.empty())
+                        {
+                            if (const auto conn = termControl.Connection())
+                            {
+                                if (const auto pty = conn.try_as<TerminalConnection::ConptyConnection>())
+                                {
+                                    const auto introspected = pty.ClientWorkingDirectory();
+                                    if (Utils::IsValidDirectory(introspected.c_str()))
+                                    {
+                                        cwd.assign(introspected);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (cwd.empty() && profile)
+        {
+            cwd = _evaluatePathForCwd(profile.EvaluatedStartingDirectory());
+        }
+
+        // Title: basename(cwd), unless the cwd is the user's home directory
+        // or the basename is empty — both fall back to profile.Name().
+        winrt::hstring title;
+        if (!cwd.empty())
+        {
+            std::wstring userHome;
+            try
+            {
+                userHome = wil::ExpandEnvironmentStringsW<std::wstring>(L"%USERPROFILE%");
+            }
+            CATCH_LOG();
+
+            const bool isUserHome = !userHome.empty() &&
+                                    CompareStringOrdinal(cwd.c_str(), -1, userHome.c_str(), -1, TRUE) == CSTR_EQUAL;
+            if (!isUserHome)
+            {
+                const auto basename = std::filesystem::path{ cwd }.filename().wstring();
+                if (!basename.empty())
+                {
+                    title = winrt::hstring{ basename };
+                }
+            }
+        }
+        if (title.empty() && profile)
+        {
+            title = profile.Name();
+        }
+
         ::TerminalApp::WorkspaceState ws;
         ws.id = _nextWorkspaceId++;
         ws.pinned = false;
-
-        if (const auto profile = _settings.FindProfile(profileGuid))
-        {
-            ws.title = profile.Name();
-        }
+        ws.title = title;
 
         Json::Value newTab{ Json::objectValue };
         newTab["action"] = "newTab";
         newTab["profile"] = winrt::to_string(::Microsoft::Console::Utils::GuidToString(profileGuid));
+        if (!cwd.empty())
+        {
+            newTab["startingDirectory"] = winrt::to_string(cwd);
+        }
         ws.paneTree = Json::Value{ Json::arrayValue };
         ws.paneTree.append(std::move(newTab));
 
@@ -5655,11 +5864,10 @@ namespace winrt::TerminalApp::implementation
     // primary-click + chevron flyout. Called once from Create() after
     // EnableWorkspacesMode flips TabRowControl into chrome mode.
     //
-    // Slice 1 deviation from spec line 132: the chevron flyout lists
-    // `_settings.ActiveProfiles()` directly rather than the full
-    // NewTabMenu-derived recursive picker (folders/RemainingProfiles/
-    // MatchProfiles/Action entries). Defer to a follow-up that clones
-    // _CreateNewTabFlyoutItems with the leaf click rewired.
+    // The chevron flyout reuses `_CreateNewTabFlyoutItems` with a workspace
+    // leaf handler, so the recursive NewTabMenu picker (folders /
+    // RemainingProfiles / MatchProfiles / Action entries) is shared with
+    // the legacy new-tab dropdown.
     //
     // "Switch Workspace…" is included as a disabled MenuFlyoutItem because
     // it depends on the command palette's `@`-mode workspace switcher,
@@ -5745,32 +5953,62 @@ namespace winrt::TerminalApp::implementation
                 }
             });
 
-            // Chevron flyout: one entry per active profile. (Slice 1 deviation
-            // — see method-level comment.)
+            // Chevron flyout: drive from the user's NewTabMenu so folders,
+            // RemainingProfiles, MatchProfiles and Action entries all show
+            // up the same way they do in the legacy new-tab dropdown. Profile
+            // leaves create a workspace; action leaves dispatch the action
+            // verbatim (matches legacy semantics — the action retargeting
+            // for newTab → newPaneTab in workspace mode is slice 6's job).
+            //
+            // The leaf handler defers each create to the dispatcher so the
+            // body runs after WinUI finishes input dispatch — same WinUI AV
+            // trap as the primary-click path.
             auto flyout = WUX::Controls::MenuFlyout{};
             flyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
-            for (const auto& profile : _settings.ActiveProfiles())
+
+            NewTabFlyoutLeafHandler workspaceLeafHandler = [weakThis = get_weak()](const NewTerminalArgs& args) {
+                if (auto self = weakThis.get())
+                {
+                    self->Dispatcher().RunAsync(
+                        Windows::UI::Core::CoreDispatcherPriority::Normal,
+                        [weakThis, args]() {
+                            if (auto inner = weakThis.get())
+                            {
+                                inner->_CreateNewWorkspaceFromNewTerminalArgs(args);
+                            }
+                        });
+                }
+            };
+
+            const auto entries = _settings.GlobalSettings().NewTabMenu();
+            const auto items = _CreateNewTabFlyoutItems(entries, workspaceLeafHandler);
+            for (const auto& item : items)
             {
-                auto item = WUX::Controls::MenuFlyoutItem{};
-                item.Text(profile.Name());
-                const auto profileGuid = profile.Guid();
-                item.Click([weakThis = get_weak(), profileGuid](auto&&, auto&&) {
-                    if (auto self = weakThis.get())
-                    {
-                        self->Dispatcher().RunAsync(
-                            Windows::UI::Core::CoreDispatcherPriority::Normal,
-                            [weakThis, profileGuid]() {
-                                if (auto inner = weakThis.get())
-                                {
-                                    inner->_CreateNewWorkspaceWithProfile(profileGuid);
-                                }
-                            });
-                    }
-                });
                 flyout.Items().Append(item);
             }
             newWsButton.Flyout(flyout);
         }
+    }
+
+    // Resolve the profile from `args` and forward to
+    // `_CreateNewWorkspaceWithProfile`. Used by the workspace chrome chevron
+    // when a profile leaf is clicked in the shared NewTabMenu picker.
+    // Modifier-key elevation/window-routing logic from
+    // `_OpenNewTerminalViaDropdown` is intentionally not applied here — the
+    // chevron's purpose is "create a workspace using this profile", not
+    // "open a new tab with these modifiers."
+    void TerminalPage::_CreateNewWorkspaceFromNewTerminalArgs(const NewTerminalArgs& args)
+    {
+        if (!_workspaces)
+        {
+            return;
+        }
+        const auto profile = _settings.GetProfileForArgs(args);
+        if (!profile)
+        {
+            return;
+        }
+        _CreateNewWorkspaceWithProfile(profile.Guid());
     }
 
     // Sync the chrome's centered title TextBlock to the active workspace's

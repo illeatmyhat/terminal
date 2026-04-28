@@ -1201,6 +1201,17 @@ namespace winrt::TerminalApp::implementation
                 {
                     layout.MigrateLegacyTabLayoutToWorkspaceLayout();
                 }
+                else if (!layout.WorkspaceLayout().empty())
+                {
+                    // The flag is off but state.json still carries a
+                    // workspaceLayout blob from a prior flag-on session
+                    // (e.g. that session crashed before a clean shutdown
+                    // could rewrite the file). Clear the stale blob: the
+                    // toggle-off path is destructive ("punishment switch"
+                    // per spec) and re-enabling the flag later must not
+                    // silently resurrect old workspace state.
+                    layout.WorkspaceLayout({});
+                }
 
                 // TODO: GH#12633: Right now, we're manually making sure that we
                 // have at least one tab to restore. If we ever want to come
