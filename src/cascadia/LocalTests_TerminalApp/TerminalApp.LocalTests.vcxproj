@@ -43,6 +43,7 @@
     <ClCompile Include="SettingsTests.cpp" />
     <ClCompile Include="TabTests.cpp" />
 	<ClCompile Include="FilteredCommandTests.cpp" />
+    <ClCompile Include="WorkspaceTests.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -51,6 +52,9 @@
   <!-- ========================= Project References ======================== -->
   <ItemGroup>
     <ProjectReference Include="$(OpenConsoleDir)\src\cascadia\TerminalApp\TerminalAppLib.vcxproj" />
+    <ProjectReference Include="$(OpenConsoleDir)\src\cascadia\WorkspaceModel\WorkspaceModel.vcxproj">
+      <Project>{2BC10750-87C1-4575-8183-B9918DA433D0}</Project>
+    </ProjectReference>
     <ProjectReference Include="$(OpenConsoleDir)\src\types\lib\types.vcxproj" />
 
     <!-- If you don't reference these projects here, the

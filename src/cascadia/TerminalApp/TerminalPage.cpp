@@ -23,6 +23,9 @@
 #include "SnippetsPaneContent.h"
 #include "TabRowControl.h"
 #include "TerminalSettingsCache.h"
+#include "WorkspaceView.h"
+
+#include "../WorkspaceModel/Diff.h"
 
 #include "LaunchPositionRequest.g.cpp"
 #include "RenameWindowRequestedArgs.g.cpp"
@@ -5949,5 +5952,46 @@ namespace winrt::TerminalApp::implementation
         profileMenuItemFlyout.Items().Append(runAsAdminItem);
 
         return profileMenuItemFlyout;
+    }
+
+    // -----------------------------------------------------------------
+    // Workspaces (experimental.workspaces.enabled)
+    // -----------------------------------------------------------------
+
+    bool TerminalPage::_workspacesFlagEnabled() const noexcept
+    {
+        if (_settings == nullptr)
+        {
+            return false;
+        }
+        return _settings.GlobalSettings().WorkspacesEnabled();
+    }
+
+    void TerminalPage::_ensureWorkspaceView()
+    {
+        if (!_workspaceView)
+        {
+            _workspaceView = std::make_unique<WorkspaceView>(get_weak());
+            // Seed the view with the current (empty) state so id
+            // lookups during the first applyChanges() resolve correctly.
+            _workspaceView->setState(_workspaceModelState);
+        }
+    }
+
+    void TerminalPage::_applyWorkspaceAction(::WorkspaceModel::ModelState newState)
+    {
+        _ensureWorkspaceView();
+        auto changes = ::WorkspaceModel::diff(_workspaceModelState, newState);
+        _workspaceModelState = std::move(newState);
+        _workspaceView->setState(_workspaceModelState);
+        ::WorkspaceModel::applyChanges(*_workspaceView, std::span<const ::WorkspaceModel::WorkspaceChange>{ changes });
+    }
+
+    void TerminalPage::_openDefaultTabForWorkspace()
+    {
+        // Mirrors the classic _HandleNewTab(args==nullptr) branch:
+        // _OpenNewTab(nullptr) lets the page consult its settings for
+        // the default profile.
+        LOG_IF_FAILED(_OpenNewTab(nullptr));
     }
 }

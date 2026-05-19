@@ -492,6 +492,7 @@
       <BuildDependency Project="src/cascadia/TerminalControl/dll/TerminalControl.vcxproj" />
       <BuildDependency Project="src/cascadia/TerminalSettingsEditor/Microsoft.Terminal.Settings.Editor.vcxproj" />
       <BuildDependency Project="src/cascadia/TerminalSettingsModel/dll/Microsoft.Terminal.Settings.Model.vcxproj" />
+      <BuildDependency Project="src/cascadia/WorkspaceModel/WorkspaceModel.vcxproj" />
       <BuildType Solution="AuditMode|Any CPU" Project="Debug" />
       <BuildType Solution="AuditMode|ARM64" Project="Release" />
       <BuildType Solution="AuditMode|x64" Project="Release" />
@@ -632,6 +633,7 @@
       <BuildDependency Project="src/cascadia/TerminalApp/TerminalAppLib.vcxproj" />
       <BuildDependency Project="src/cascadia/TerminalSettingsModel/dll/Microsoft.Terminal.Settings.Model.vcxproj" />
       <BuildDependency Project="src/cascadia/TerminalSettingsModel/Microsoft.Terminal.Settings.ModelLib.vcxproj" />
+      <BuildDependency Project="src/cascadia/WorkspaceModel/WorkspaceModel.vcxproj" />
       <Platform Solution="*|Any CPU" Project="Win32" />
       <Build Solution="*|Any CPU" Project="false" />
       <Build Solution="AuditMode|ARM64" Project="false" />

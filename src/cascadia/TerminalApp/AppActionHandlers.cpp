@@ -456,12 +456,44 @@ namespace winrt::TerminalApp::implementation
         args.Handled(true);
     }
 
+    // Detects the "default profile, no extra arguments" shape of a
+    // NewTab action. Phase 1 Slice 2 routes only this case through the
+    // WorkspaceView. Any explicit-profile / commandline /
+    // tab-title customisation stays on the classic path.
+    static bool _isDefaultProfileNewTab(const INewContentArgs& contentArgs) noexcept
+    {
+        if (contentArgs == nullptr)
+        {
+            return true;
+        }
+        const auto terminalArgs = contentArgs.try_as<NewTerminalArgs>();
+        if (!terminalArgs)
+        {
+            return false;
+        }
+        return terminalArgs.ProfileIndex() == nullptr &&
+               terminalArgs.Profile().empty() &&
+               terminalArgs.Commandline().empty() &&
+               terminalArgs.StartingDirectory().empty() &&
+               terminalArgs.TabTitle().empty() &&
+               terminalArgs.ContentId() == 0u;
+    }
+
     void TerminalPage::_HandleNewTab(const IInspectable& /*sender*/,
                                      const ActionEventArgs& args)
     {
         if (args == nullptr)
         {
-            LOG_IF_FAILED(_OpenNewTab(nullptr));
+            if (_workspacesFlagEnabled())
+            {
+                ::WorkspaceModel::TerminalSpec spec{};
+                auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+                _applyWorkspaceAction(std::move(created.state));
+            }
+            else
+            {
+                LOG_IF_FAILED(_OpenNewTab(nullptr));
+            }
             args.Handled(true);
         }
         else if (const auto& realArgs = args.ActionArgs().try_as<NewTabArgs>())
@@ -469,6 +501,19 @@ namespace winrt::TerminalApp::implementation
             if (_shouldBailForInvalidProfileIndex(_settings, realArgs.ContentArgs()))
             {
                 args.Handled(false);
+                return;
+            }
+
+            if (_workspacesFlagEnabled() && _isDefaultProfileNewTab(realArgs.ContentArgs()))
+            {
+                // Phase 1 maps each classic window-level tab onto its
+                // own model workspace (one tab per leaf). A user-level
+                // "new tab" therefore dispatches newWorkspace; per-leaf
+                // multi-tab support lands in Phase 2 slices 9-10.
+                ::WorkspaceModel::TerminalSpec spec{};
+                auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+                _applyWorkspaceAction(std::move(created.state));
+                args.Handled(true);
                 return;
             }
 

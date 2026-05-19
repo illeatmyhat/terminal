@@ -14,6 +14,8 @@
 #include "LaunchPositionRequest.g.h"
 #include "Toast.h"
 
+#include "../WorkspaceModel/WorkspaceActions.h"
+
 #include "WindowsPackageManagerFactory.h"
 
 #define DECLARE_ACTION_HANDLER(action) void _Handle##action(const IInspectable& sender, const Microsoft::Terminal::Settings::Model::ActionEventArgs& args);
@@ -22,6 +24,7 @@ namespace TerminalAppLocalTests
 {
     class TabTests;
     class SettingsTests;
+    class WorkspaceTests;
 }
 
 namespace Microsoft::Terminal::Core
@@ -37,6 +40,7 @@ namespace winrt::Microsoft::Terminal::Settings
 namespace winrt::TerminalApp::implementation
 {
     struct TerminalSettingsCache;
+    class WorkspaceView;
 
     inline constexpr uint32_t DefaultRowsToScroll{ 3 };
     inline constexpr std::wstring_view TabletInputServiceKey{ L"TabletInputService" };
@@ -595,8 +599,30 @@ namespace winrt::TerminalApp::implementation
 #undef ON_ALL_ACTIONS
 #pragma endregion
 
+        // ----------------------------------------------------------------
+        // Workspaces (experimental.workspaces.enabled). When the flag is
+        // ON, the migrated user actions for this slice (startup-replay
+        // and default-profile new-tab) route through WorkspaceActions ->
+        // diff -> WorkspaceView, which reaches back into the methods
+        // below to mutate classic XAML state. When the flag is OFF, the
+        // model state stays empty and these helpers are not invoked.
+        // ----------------------------------------------------------------
+        ::WorkspaceModel::ModelState _workspaceModelState{ nullptr };
+        std::unique_ptr<WorkspaceView> _workspaceView{ nullptr };
+
+        bool _workspacesFlagEnabled() const noexcept;
+        void _ensureWorkspaceView();
+        void _applyWorkspaceAction(::WorkspaceModel::ModelState newState);
+
+        // Called by WorkspaceView::apply(TabAdded) for a default-profile
+        // TerminalSpec. Invokes the classic _OpenNewTab(nullptr) path so
+        // the observable result is identical to the flag-off path.
+        void _openDefaultTabForWorkspace();
+
+        friend class WorkspaceView;
         friend class TerminalAppLocalTests::TabTests;
         friend class TerminalAppLocalTests::SettingsTests;
+        friend class TerminalAppLocalTests::WorkspaceTests;
     };
 }
 
