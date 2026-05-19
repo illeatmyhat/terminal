@@ -618,6 +618,13 @@
       <Build Solution="Fuzzing|x64" Project="false" />
       <Build Solution="Fuzzing|x86" Project="false" />
     </Project>
+    <Project Path="src/cascadia/WorkspaceModel/WorkspaceModel.vcxproj" Id="2bc10750-87c1-4575-8183-b9918da433d0">
+      <Platform Solution="*|Any CPU" Project="Win32" />
+      <Build Solution="*|Any CPU" Project="false" />
+      <Build Solution="Fuzzing|ARM64" Project="false" />
+      <Build Solution="Fuzzing|x64" Project="false" />
+      <Build Solution="Fuzzing|x86" Project="false" />
+    </Project>
   </Folder>
   <Folder Name="/Terminal/Tests/">
     <Project Path="src/cascadia/LocalTests_TerminalApp/TerminalApp.LocalTests.vcxproj" Id="ca5cad1a-b11c-4ddb-a4fe-c3afae9b5506">
@@ -678,6 +685,17 @@
     </Project>
     <Project Path="src/cascadia/UnitTests_TerminalCore/UnitTests.vcxproj" Id="2c2beef4-9333-4d05-b12a-1905cbf112f9">
       <BuildDependency Project="src/host/ut_lib/host.unittest.vcxproj" />
+      <Platform Solution="*|Any CPU" Project="Win32" />
+      <Build Solution="*|Any CPU" Project="false" />
+      <Build Solution="AuditMode|ARM64" Project="false" />
+      <Build Solution="AuditMode|x64" Project="false" />
+      <Build Solution="AuditMode|x86" Project="false" />
+      <Build Solution="Fuzzing|ARM64" Project="false" />
+      <Build Solution="Fuzzing|x64" Project="false" />
+      <Build Solution="Fuzzing|x86" Project="false" />
+    </Project>
+    <Project Path="src/cascadia/UnitTests_WorkspaceModel/UnitTests_WorkspaceModel.vcxproj" Id="e13e3fc9-143d-4028-ad6f-f30914aae3c7">
+      <BuildDependency Project="src/cascadia/WorkspaceModel/WorkspaceModel.vcxproj" />
       <Platform Solution="*|Any CPU" Project="Win32" />
       <Build Solution="*|Any CPU" Project="false" />
       <Build Solution="AuditMode|ARM64" Project="false" />

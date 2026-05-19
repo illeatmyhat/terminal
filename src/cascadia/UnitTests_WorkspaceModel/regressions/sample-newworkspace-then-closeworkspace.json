@@ -1,0 +1,38 @@
+{
+    "seed": 1,
+    "startState": {
+        "schemaVersion": 1,
+        "idCounter": 0,
+        "sidebarWidth": 240.0,
+        "activeWorkspaceId": null,
+        "mru": [],
+        "workspaces": []
+    },
+    "ops": [
+        {
+            "op": "newWorkspace",
+            "params": {
+                "name": "sample-ws",
+                "initialTab": {
+                    "kind": "terminal",
+                    "profile": "00000000000000000000000000000000"
+                },
+                "initialTabTitle": "",
+                "initialTabColor": null,
+                "initialTabPinned": false
+            }
+        },
+        {
+            "op": "setSidebarWidth",
+            "params": {
+                "width": 300.0
+            }
+        },
+        {
+            "op": "closeAllWorkspaces",
+            "params": {}
+        }
+    ],
+    "failingOpIdx": null,
+    "violation": null
+}
