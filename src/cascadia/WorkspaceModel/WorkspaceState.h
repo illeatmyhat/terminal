@@ -3,11 +3,11 @@
 //
 // Per-workspace state and the top-level WorkspaceModelData container.
 //
-// NB: the name `WorkspaceState` here is in the WorkspaceModel namespace and
-// is unrelated to the existing
+// NB: the name `WorkspaceState` here lives in the WorkspaceModel namespace
+// and is unrelated to the existing
 // winrt::Microsoft::Terminal::Settings::Model::implementation::WorkspaceState
-// in src/cascadia/TerminalSettingsModel/WorkspaceState.h. The two will
-// coexist until the cutover slices.
+// in src/cascadia/TerminalSettingsModel/WorkspaceState.h. The two
+// namespaces are intentionally independent.
 //
 // Pure C++: no winrt::*, no Windows.h.
 
@@ -64,7 +64,7 @@ namespace WorkspaceModel
         // Sidebar width in DIPs. Persists across launches.
         double sidebarWidth{ 240.0 };
 
-        // Monotonic ID counter. Every new id allocated by a mutator is the
+        // Monotonic ID counter. Every new id allocated by an action is the
         // current value + 1; the counter is then incremented. Persisted so
         // that ids remain stable across launches and so the WAL/log records
         // referring to ids stay interpretable.

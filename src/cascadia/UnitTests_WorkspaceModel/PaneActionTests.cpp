@@ -1,12 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tests for the 4 pane mutators in Mutators.h.
+// Tests for the 4 pane actions in WorkspaceActions.h.
 //
-// Includes the identity-preservation test for splitPane specifically
-// called out in issue #11: the original leaf's PaneId must be unchanged
-// across the mutation, because the new SplitPane wraps the original leaf
-// rather than replacing it.
+// Includes the identity-preservation test for splitPane: the original
+// leaf's PaneId must be unchanged across the action, because the new
+// SplitPane wraps the original leaf rather than replacing it.
 
 #include "pch.h"
 
@@ -20,9 +19,9 @@ using namespace WorkspaceModelUnitTests;
 
 namespace WorkspaceModelUnitTests
 {
-    class PaneMutatorTests
+    class PaneActionTests
     {
-        TEST_CLASS(PaneMutatorTests);
+        TEST_CLASS(PaneActionTests);
 
         TEST_METHOD(SplitPane_PreservesOriginalLeafPaneId);
         TEST_METHOD(SplitPane_NewLeafContainsOneTab);
@@ -44,7 +43,7 @@ namespace WorkspaceModelUnitTests
     };
 
     // -----------------------------------------------------------------
-    void PaneMutatorTests::SplitPane_PreservesOriginalLeafPaneId()
+    void PaneActionTests::SplitPane_PreservesOriginalLeafPaneId()
     {
         auto f = makeSingleWorkspace();
         const auto originalLeafId = f.leafId;
@@ -57,7 +56,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(std::holds_alternative<SplitPane>(ws.root));
         const auto& split = std::get<SplitPane>(ws.root);
 
-        // The original leaf should be the LEFT child (per our mutator's
+        // The original leaf should be the LEFT child (per the action's
         // documented placement). Its PaneId must equal originalLeafId.
         VERIFY_IS_TRUE(split.left != nullptr);
         const auto& leftNode = *split.left;
@@ -66,7 +65,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leftLeaf.id == originalLeafId);
     }
 
-    void PaneMutatorTests::SplitPane_NewLeafContainsOneTab()
+    void PaneActionTests::SplitPane_NewLeafContainsOneTab()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Horizontal, 0.5, termSpec(2),
@@ -82,7 +81,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(std::string{ "newtab" }, rightLeaf.tabs[0].customTitle);
     }
 
-    void PaneMutatorTests::SplitPane_UnknownLeaf_NoChange()
+    void PaneActionTests::SplitPane_UnknownLeaf_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, PaneId{ 9999 }, Axis::Vertical, 0.5, termSpec(2));
@@ -91,7 +90,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_FALSE(validate(*sp.state).has_value());
     }
 
-    void PaneMutatorTests::SplitPane_AssignsRequestedAxisAndRatio()
+    void PaneActionTests::SplitPane_AssignsRequestedAxisAndRatio()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Horizontal, 0.3, termSpec(2));
@@ -100,7 +99,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(0.3, split.ratio);
     }
 
-    void PaneMutatorTests::SplitPane_AllocatesMonotonicIds()
+    void PaneActionTests::SplitPane_AllocatesMonotonicIds()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -110,7 +109,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(sp.newTabId.v > sp.newPaneId.v);
     }
 
-    void PaneMutatorTests::SplitPane_FocusesNewPane()
+    void PaneActionTests::SplitPane_FocusesNewPane()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -118,7 +117,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void PaneMutatorTests::ClosePane_CollapsesSplitToSibling()
+    void PaneActionTests::ClosePane_CollapsesSplitToSibling()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -131,7 +130,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(std::get<LeafPane>(ws.root).id == f.leafId);
     }
 
-    void PaneMutatorTests::ClosePane_LastLeafRemovesWorkspace()
+    void PaneActionTests::ClosePane_LastLeafRemovesWorkspace()
     {
         auto f = makeSingleWorkspace();
         auto next = closePane(f.state, f.leafId);
@@ -140,7 +139,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_FALSE(next->activeWorkspaceId.has_value());
     }
 
-    void PaneMutatorTests::ClosePane_UnknownLeaf_NoChange()
+    void PaneActionTests::ClosePane_UnknownLeaf_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = closePane(f.state, PaneId{ 9999 });
@@ -149,7 +148,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void PaneMutatorTests::ResizePane_UpdatesSplitRatio()
+    void PaneActionTests::ResizePane_UpdatesSplitRatio()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -162,7 +161,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(0.75, split2.ratio);
     }
 
-    void PaneMutatorTests::ResizePane_ClampsToBounds()
+    void PaneActionTests::ResizePane_ClampsToBounds()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -173,7 +172,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(1.0, std::get<SplitPane>(huge->workspaces[0].root).ratio);
     }
 
-    void PaneMutatorTests::ResizePane_OnLeafId_NoChange()
+    void PaneActionTests::ResizePane_OnLeafId_NoChange()
     {
         auto f = makeSingleWorkspace();
         // Try to resize a leaf id; should be a no-op since leaves aren't
@@ -183,7 +182,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void PaneMutatorTests::FocusPane_SwitchesActivePaneAndWorkspace()
+    void PaneActionTests::FocusPane_SwitchesActivePaneAndWorkspace()
     {
         // Make two workspaces; focus the leaf in the older workspace.
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
@@ -196,7 +195,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->mru.front() == a.id);
     }
 
-    void PaneMutatorTests::FocusPane_UnknownLeaf_NoChange()
+    void PaneActionTests::FocusPane_UnknownLeaf_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = focusPane(f.state, PaneId{ 9999 });

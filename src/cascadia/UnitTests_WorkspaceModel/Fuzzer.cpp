@@ -5,7 +5,7 @@
 
 #include "Fuzzer.h"
 
-#include "../WorkspaceModel/Mutators.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
 #include "../WorkspaceModel/PaneTree.h"
 
 #include <chrono>
@@ -50,7 +50,7 @@ namespace WorkspaceModelUnitTests
 
         // Dispatch an OpRecord against a state. Mirrors Replay.cpp's
         // anonymous-namespace applyOne; reimplemented here because it
-        // isn't exported, and the fuzzer wants to call mutators step by
+        // isn't exported, and the fuzzer wants to call actions step by
         // step rather than going through the LogEntry replay loop.
         ModelState applyOpRecord(const ModelState& state, const OpRecord& op)
         {
@@ -313,7 +313,7 @@ namespace WorkspaceModelUnitTests
     {
         const auto idx = indexEntities(state);
 
-        // 25 mutator kinds. Pick one; if its required entities are absent
+        // 25 action kinds. Pick one; if its required entities are absent
         // retry; after a few retries fall back to a guaranteed-valid op.
         for (int attempt = 0; attempt < 10; ++attempt)
         {
@@ -321,7 +321,7 @@ namespace WorkspaceModelUnitTests
             // when the state is small so the fuzzer doesn't get stuck in
             // "empty model + closeTab" no-op territory.
             const std::size_t opCount = (idx.tabs.size() + idx.leaves.size());
-            // 0..30 = bucket selector across 25 mutator kinds.
+            // 0..30 = bucket selector across 25 action kinds.
             const int kind = static_cast<int>(_rng() % 30);
 
             switch (kind)
@@ -515,7 +515,7 @@ namespace WorkspaceModelUnitTests
                 MoveTabRecord r;
                 r.tabId = idx.tabs[_rng() % idx.tabs.size()];
                 r.dstLeafId = idx.leaves[_rng() % idx.leaves.size()];
-                r.dstIdx = _rng() % 8; // mutator clamps
+                r.dstIdx = _rng() % 8; // action clamps
                 return r;
             }
             case 23: // moveTabAsSplit

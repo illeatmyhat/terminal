@@ -1,17 +1,18 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// The 25 atomic mutators of the workspace data model.
+// The 25 atomic workspace actions. Each one is a pure function over
+// ModelState: it takes the current state and returns a new state.
 //
-// Each mutator takes a `ModelState` (= `shared_ptr<const WorkspaceModelData>`)
-// and returns a new `ModelState`. Mutators are pure: structural sharing of
+// Each action takes a `ModelState` (= `shared_ptr<const WorkspaceModelData>`)
+// and returns a new `ModelState`. Actions are pure: structural sharing of
 // the underlying pane tree means returning a new state is cheap.
 //
-// Every mutator must produce a returned state that satisfies `validate()`.
-// In debug builds the mutators assert this internally; the test suite
+// Every action must produce a returned state that satisfies `validate()`.
+// In debug builds the actions assert this internally; the test suite
 // asserts it externally for every case.
 //
-// Cascade rules (re-stated from issue #11 and the PRD #9):
+// Cascade rules:
 //   - closeTab emptying a leaf → leaf removed → if the leaf's parent split
 //     becomes single-child, the split collapses to the surviving sibling →
 //     if the workspace's root pane is gone, the workspace is removed →
@@ -19,7 +20,7 @@
 //   - closeWorkspace removing the last workspace leaves workspaces.empty()
 //     and activeWorkspaceId == std::nullopt.
 //   - splitPane wraps the original leaf in a new SplitPane (kept by
-//     shared_ptr); the leaf's PaneId is preserved across the mutation.
+//     shared_ptr); the leaf's PaneId is preserved across the action.
 //   - moveTab: source leaf cascade matches closeTab rules; destination leaf
 //     gets the tab inserted atomically; both activeTabIdx fields are
 //     updated consistently in the same returned state.
@@ -41,13 +42,13 @@
 
 namespace WorkspaceModel
 {
-    // The application's handle on a model state. Mutators take and return
-    // values of this type; structural sharing keeps the per-mutation cost
+    // The application's handle on a model state. Actions take and return
+    // values of this type; structural sharing keeps the per-action cost
     // proportional to the depth of the affected leaf, not the model size.
     using ModelState = std::shared_ptr<const WorkspaceModelData>;
 
     // ---------------------------------------------------------------------
-    // Workspace lifecycle (10 ops)
+    // Workspace lifecycle (10 actions)
     // ---------------------------------------------------------------------
 
     struct NewWorkspaceResult
@@ -86,7 +87,7 @@ namespace WorkspaceModel
     [[nodiscard]] ModelState reorderWorkspace(const ModelState& state, WorkspaceId id, std::size_t dstIdx);
 
     // ---------------------------------------------------------------------
-    // Tab (8 ops)
+    // Tab (8 actions)
     // ---------------------------------------------------------------------
 
     struct NewTabResult
@@ -130,7 +131,7 @@ namespace WorkspaceModel
     [[nodiscard]] ModelState setTabPinned(const ModelState& state, TabId id, bool pinned);
 
     // ---------------------------------------------------------------------
-    // Pane (4 ops)
+    // Pane (4 actions)
     // ---------------------------------------------------------------------
 
     struct SplitPaneResult
@@ -148,7 +149,7 @@ namespace WorkspaceModel
     // The new sibling leaf is placed on the right/bottom by default. To
     // place it on the left/top instead, use ratio < 0.5 and an axis as
     // appropriate to the rendering — but since which side is "new" is a
-    // UI concern, this slice fixes new = right.
+    // UI concern, this action fixes new = right.
     //
     // If `leafId` doesn't exist, returns the input state with
     // newPaneId == PaneId{0} and newTabId == TabId{0}.
@@ -176,7 +177,7 @@ namespace WorkspaceModel
     [[nodiscard]] ModelState focusPane(const ModelState& state, PaneId leafId);
 
     // ---------------------------------------------------------------------
-    // Move (2 ops)
+    // Move (2 actions)
     // ---------------------------------------------------------------------
 
     // Detach the tab with id `tabId` from its source leaf (cascading if
@@ -221,7 +222,7 @@ namespace WorkspaceModel
                                             Edge edge);
 
     // ---------------------------------------------------------------------
-    // UI prefs (1 op)
+    // UI prefs (1 action)
     // ---------------------------------------------------------------------
 
     // Negative or non-finite values are clamped to a minimum of 0.

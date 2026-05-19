@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tests for the 10 workspace-lifecycle mutators in Mutators.h.
+// Tests for the 10 workspace-lifecycle actions in WorkspaceActions.h.
 
 #include "pch.h"
 
@@ -15,9 +15,9 @@ using namespace WorkspaceModelUnitTests;
 
 namespace WorkspaceModelUnitTests
 {
-    class WorkspaceMutatorTests
+    class WorkspaceActionTests
     {
-        TEST_CLASS(WorkspaceMutatorTests);
+        TEST_CLASS(WorkspaceActionTests);
 
         TEST_METHOD(NewWorkspace_OnEmpty_BecomesActiveAndMru);
         TEST_METHOD(NewWorkspace_AppendsAndMovesActive);
@@ -47,7 +47,7 @@ namespace WorkspaceModelUnitTests
     };
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::NewWorkspace_OnEmpty_BecomesActiveAndMru()
+    void WorkspaceActionTests::NewWorkspace_OnEmpty_BecomesActiveAndMru()
     {
         auto r = newWorkspace(emptyModel(), "alpha", termSpec(1));
         VERIFY_IS_FALSE(validate(*r.state).has_value());
@@ -58,7 +58,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(r.state->mru.front() == r.id);
     }
 
-    void WorkspaceMutatorTests::NewWorkspace_AppendsAndMovesActive()
+    void WorkspaceActionTests::NewWorkspace_AppendsAndMovesActive()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -70,7 +70,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(b.state->mru.back() == a.id);
     }
 
-    void WorkspaceMutatorTests::NewWorkspace_AllocatesMonotonicIds()
+    void WorkspaceActionTests::NewWorkspace_AllocatesMonotonicIds()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -80,7 +80,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(b.state->idCounter >= 6);
     }
 
-    void WorkspaceMutatorTests::NewWorkspace_CarriesRichTabFields()
+    void WorkspaceActionTests::NewWorkspace_CarriesRichTabFields()
     {
         Color red{ 255, 0, 0, 255 };
         auto r = newWorkspace(emptyModel(), "alpha", termSpec(7), "MyTitle", red, /*pinned=*/true);
@@ -94,7 +94,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::CloseWorkspace_RemovesFromList()
+    void WorkspaceActionTests::CloseWorkspace_RemovesFromList()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -104,7 +104,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->workspaces[0].id == b.id);
     }
 
-    void WorkspaceMutatorTests::CloseWorkspace_FallsBackToMruNext()
+    void WorkspaceActionTests::CloseWorkspace_FallsBackToMruNext()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -115,7 +115,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(*next->activeWorkspaceId == a.id);
     }
 
-    void WorkspaceMutatorTests::CloseWorkspace_LastOne_LeavesEmptyState()
+    void WorkspaceActionTests::CloseWorkspace_LastOne_LeavesEmptyState()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto next = closeWorkspace(a.state, a.id);
@@ -125,7 +125,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->mru.empty());
     }
 
-    void WorkspaceMutatorTests::CloseWorkspace_UnknownId_NoChange()
+    void WorkspaceActionTests::CloseWorkspace_UnknownId_NoChange()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto next = closeWorkspace(a.state, WorkspaceId{ 999 });
@@ -134,7 +134,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::CloseOtherWorkspaces_KeepsOnlyNamed()
+    void WorkspaceActionTests::CloseOtherWorkspaces_KeepsOnlyNamed()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -146,7 +146,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(*next->activeWorkspaceId == b.id);
     }
 
-    void WorkspaceMutatorTests::CloseOtherWorkspaces_UnknownKeep_NoChange()
+    void WorkspaceActionTests::CloseOtherWorkspaces_UnknownKeep_NoChange()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -155,7 +155,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(2), next->workspaces.size());
     }
 
-    void WorkspaceMutatorTests::CloseAllWorkspaces_LeavesEmpty()
+    void WorkspaceActionTests::CloseAllWorkspaces_LeavesEmpty()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -167,7 +167,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::SwitchToWorkspace_UpdatesActiveAndMru()
+    void WorkspaceActionTests::SwitchToWorkspace_UpdatesActiveAndMru()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -178,7 +178,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->mru.front() == a.id);
     }
 
-    void WorkspaceMutatorTests::SwitchToWorkspace_UnknownId_NoChange()
+    void WorkspaceActionTests::SwitchToWorkspace_UnknownId_NoChange()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto next = switchToWorkspace(a.state, WorkspaceId{ 999 });
@@ -187,7 +187,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::RenameWorkspace_UpdatesName()
+    void WorkspaceActionTests::RenameWorkspace_UpdatesName()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto next = renameWorkspace(a.state, a.id, "Renamed");
@@ -195,7 +195,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(std::string{ "Renamed" }, next->workspaces[0].name);
     }
 
-    void WorkspaceMutatorTests::SetWorkspaceColor_RoundTrips()
+    void WorkspaceActionTests::SetWorkspaceColor_RoundTrips()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         Color blue{ 0, 0, 255, 255 };
@@ -208,7 +208,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_FALSE(cleared->workspaces[0].color.has_value());
     }
 
-    void WorkspaceMutatorTests::SetWorkspaceDescription_RoundTrips()
+    void WorkspaceActionTests::SetWorkspaceDescription_RoundTrips()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto next = setWorkspaceDescription(a.state, a.id, "An alpha workspace");
@@ -216,7 +216,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(std::string{ "An alpha workspace" }, next->workspaces[0].customDescription);
     }
 
-    void WorkspaceMutatorTests::SetWorkspacePinned_RoundTrips()
+    void WorkspaceActionTests::SetWorkspacePinned_RoundTrips()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto pinned = setWorkspacePinned(a.state, a.id, true);
@@ -227,7 +227,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void WorkspaceMutatorTests::ReorderWorkspace_MovesEntry()
+    void WorkspaceActionTests::ReorderWorkspace_MovesEntry()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -240,7 +240,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->workspaces[2].id == b.id);
     }
 
-    void WorkspaceMutatorTests::ReorderWorkspace_ClampsOutOfRange()
+    void WorkspaceActionTests::ReorderWorkspace_ClampsOutOfRange()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -251,7 +251,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->workspaces[1].id == a.id);
     }
 
-    void WorkspaceMutatorTests::ReorderWorkspace_SameIndex_NoChange()
+    void WorkspaceActionTests::ReorderWorkspace_SameIndex_NoChange()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));

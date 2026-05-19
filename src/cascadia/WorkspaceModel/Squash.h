@@ -10,13 +10,13 @@
 // snapshotPath + ".tmp", flush+close, then std::filesystem::rename over
 // the live snapshot. A crash mid-write leaves the prior snapshot intact;
 // a crash AFTER rename but BEFORE truncate replays the log on top of the
-// new snapshot one extra time -- benign because mutators are idempotent
+// new snapshot one extra time -- benign because actions are idempotent
 // over their structural intent (the IDs differ but the structure does
 // not).
 //
-// The squash *scheduler* (200 ops / 60 s idle / clean exit) is NOT in
-// this slice; this header only provides the operation itself. The cutover
-// slice wires the trigger.
+// The squash *scheduler* (200 ops / 60 s idle / clean exit) is not in
+// this header; this header only provides the operation itself. The
+// callers that own persistence wire the trigger.
 //
 // Pure C++: no winrt::*, no Windows.h.
 
@@ -24,13 +24,13 @@
 
 #include <filesystem>
 
-#include "Mutators.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {
     // Serialize `state` to `snapshotPath` via a write-then-rename pattern,
     // then truncate `logPath`. Throws SerializerError on any filesystem
-    // failure. The state itself is NOT validated by squash; callers that
+    // failure. The state itself is not validated by squash; callers that
     // want a validity guarantee must run validate() beforehand.
     //
     // If `snapshotPath`'s parent directory does not exist, it is created.

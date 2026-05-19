@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Shared fixture-builder helpers for the WorkspaceModel mutator tests.
+// Shared fixture-builder helpers for the WorkspaceModel action tests.
 // Each helper returns minimal well-formed shapes; tests then layer their
-// specific scenario on top with the rich mutator API.
+// specific scenario on top with the rich action API.
 
 #pragma once
 
-#include "../WorkspaceModel/Mutators.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
 #include "../WorkspaceModel/PaneTree.h"
 #include "../WorkspaceModel/TabContent.h"
 #include "../WorkspaceModel/Validator.h"

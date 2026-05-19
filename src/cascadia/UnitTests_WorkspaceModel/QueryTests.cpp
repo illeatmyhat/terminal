@@ -4,9 +4,9 @@
 // Tests for the 10 const-member queries on WorkspaceModelData.
 //
 // The naming compromise (workspaces_view / activeWorkspaceId_view /
-// mru_view / sidebarWidth_view) is documented in Mutators.h / WorkspaceState.h
-// — these methods coexist with same-named public fields so the rich
-// reading API doesn't break Slice 1's direct field access in tests.
+// mru_view / sidebarWidth_view) is documented in WorkspaceActions.h /
+// WorkspaceState.h — these methods coexist with same-named public fields
+// so the rich reading API doesn't shadow direct field access in tests.
 
 #include "pch.h"
 

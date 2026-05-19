@@ -1,16 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Internal cascade helpers shared across mutator families.
+// Internal cascade helpers shared across action families.
 //
 // The pane tree is immutable shared-substructure (every SplitPane child is
 // `shared_ptr<const PaneNode>`); structural updates rebuild only the path
 // from the root to the affected leaf. The functions in this header are the
 // rebuild primitives plus the "split collapses when a child disappears"
-// rule that close-style mutators all share.
+// rule that close-style actions all share.
 //
 // These helpers are intentionally not exported from the library; consumers
-// outside the mutator family don't need them and shouldn't depend on them.
+// outside the action family don't need them and shouldn't depend on them.
 //
 // Pure C++: no winrt::*, no Windows.h.
 

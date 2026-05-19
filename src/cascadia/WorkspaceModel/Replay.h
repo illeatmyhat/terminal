@@ -2,12 +2,12 @@
 // Licensed under the MIT license.
 //
 // Replay engine. Given a starting ModelState and a vector of LogEntry,
-// applies the recorded mutators in order and returns the final state.
+// re-applies the recorded actions in order and returns the final state.
 //
-// ID-replay choice (option (b) in the Slice 4 plan): replay calls the
-// existing mutators from Mutators.h, which allocate FRESH IDs from the
-// state's monotonic counter. As a result the IDs in the replayed model
-// generally differ from the IDs that the original session produced.
+// ID-replay choice: replay calls the existing actions from
+// WorkspaceActions.h, which allocate FRESH IDs from the state's monotonic
+// counter. As a result the IDs in the replayed model generally differ
+// from the IDs that the original session produced.
 //
 // Why this is OK:
 //   - The user-visible state is unchanged. Workspace names, tab
@@ -16,8 +16,8 @@
 //   - Old WAL records that referenced the original ids are invalidated by
 //     a squash, which is expected behaviour: squash writes a fresh
 //     snapshot (with new ids) and truncates the log.
-//   - The renderer reconciles by structural identity, not raw id equality
-//     against any external value, so the reshuffle is invisible to it.
+//   - The view diffs by structural identity, not raw id equality against
+//     any external value, so the reshuffle is invisible to it.
 //
 // Pure C++: no winrt::*, no Windows.h.
 
@@ -28,12 +28,12 @@
 #include <vector>
 
 #include "ActionLog.h"
-#include "Mutators.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {
     // Apply every entry in `entries` to `start`, returning the resulting
-    // state. If any mutator throws (or produces a state that fails
+    // state. If any action throws (or produces a state that fails
     // validate()), replay halts and the partially-applied state is
     // returned. Use replaySafe() if you want to know whether the replay
     // ran to completion.

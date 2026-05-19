@@ -5,8 +5,8 @@
 //
 // Intentionally narrow: this header pulls in only standard C++ facilities.
 // The WorkspaceModel lib must remain free of winrt::*, Windows.h, and any
-// other Windows-specific dependency so its tests (and a future fuzzer /
-// behavioural simulator) can build with no WinRT apartment.
+// other Windows-specific dependency so its tests (fuzzer, DSL-driven
+// behavioural tests) can build with no WinRT apartment.
 
 #pragma once
 

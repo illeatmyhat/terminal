@@ -1,29 +1,29 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// BehavioralSimulator — a TAEF-test-level DSL for scripting user flows
+// WorkspaceDSL — a TAEF-test-level scripting DSL for driving user flows
 // against the pure-C++ workspace model.
 //
-// Each Script step is a thin wrapper around one mutator from Mutators.h
-// that records the produced entity (workspace, leaf, tab) by a string
-// LABEL. Subsequent steps then address entities by that label, which keeps
-// the test scripts readable and isolates them from "mutator returns IDs in
-// a particular order" assumptions.
+// Each Script step is a thin wrapper around one action from
+// WorkspaceActions.h that records the produced entity (workspace, leaf,
+// tab) by a string LABEL. Subsequent steps then address entities by that
+// label, which keeps the test scripts readable and isolates them from
+// "action returns IDs in a particular order" assumptions.
 //
-// The simulator also captures the RenderOp sequence produced by reconcile()
-// between successive snapshots, so scripts can assert on the renderer
-// output without re-running reconcile manually.
+// The DSL also captures the WorkspaceChange sequence produced by diff()
+// between successive snapshots, so scripts can assert on the view output
+// without re-running diff manually.
 //
 // Pure C++: no winrt::*. Lives alongside the other unit-test fixtures.
 
 #pragma once
 
-#include "../WorkspaceModel/Mutators.h"
+#include "../WorkspaceModel/Diff.h"
 #include "../WorkspaceModel/PaneTree.h"
-#include "../WorkspaceModel/Reconciler.h"
-#include "../WorkspaceModel/RenderOp.h"
 #include "../WorkspaceModel/TabContent.h"
 #include "../WorkspaceModel/Validator.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
+#include "../WorkspaceModel/WorkspaceChange.h"
 #include "../WorkspaceModel/WorkspaceState.h"
 
 #include <functional>
@@ -35,11 +35,11 @@
 
 namespace WorkspaceModelUnitTests
 {
-    // The simulator's primary handle. Tests instantiate a Script, chain
-    // step calls on it, optionally interleave expectState / expectRenderOps
+    // The DSL's primary handle. Tests instantiate a Script, chain step
+    // calls on it, optionally interleave expect / expectChangesSinceLast
     // assertions, then call run() to get the final ModelState.
     //
-    // Every mutator step validates the result via validate() and stores
+    // Every action step validates the result via validate() and stores
     // the first violation it sees in `_violation`. expectNoViolation() (the
     // default state assertion at every step) reads it; tests can also
     // explicitly accept a violation in negative-path tests by checking
@@ -50,7 +50,7 @@ namespace WorkspaceModelUnitTests
         Script();
 
         // --------------------------------------------------------------
-        // Workspace mutators
+        // Workspace actions
         // --------------------------------------------------------------
 
         Script& newWorkspace(std::string label,
@@ -75,7 +75,7 @@ namespace WorkspaceModelUnitTests
         Script& reorderWorkspace(std::string label, std::size_t dstIdx);
 
         // --------------------------------------------------------------
-        // Tab mutators
+        // Tab actions
         // --------------------------------------------------------------
 
         Script& newTab(std::string newTabLabel,
@@ -95,13 +95,13 @@ namespace WorkspaceModelUnitTests
         Script& setTabPinned(std::string tabLabel, bool pinned);
 
         // --------------------------------------------------------------
-        // Pane mutators
+        // Pane actions
         // --------------------------------------------------------------
 
         // Splits the leaf addressed by `leafLabel`. After the split the
         // original leaf retains its PaneId and the new sibling leaf is
         // labelled `newLeafLabel`. The new tab (always allocated by the
-        // splitPane mutator) is labelled `newTabLabel`.
+        // splitPane action) is labelled `newTabLabel`.
         Script& splitPane(std::string leafLabel,
                           WorkspaceModel::Axis axis,
                           double ratio,
@@ -114,7 +114,7 @@ namespace WorkspaceModelUnitTests
         Script& focusPane(std::string leafLabel);
 
         // --------------------------------------------------------------
-        // Move mutators
+        // Move actions
         // --------------------------------------------------------------
 
         Script& moveTab(std::string tabLabel, std::string dstLeafLabel, std::size_t dstIdx);
@@ -134,7 +134,7 @@ namespace WorkspaceModelUnitTests
         // --------------------------------------------------------------
 
         // Capture a snapshot of the current state. Subsequent calls to
-        // expectRenderOpsSinceLast() diff against this snapshot.
+        // expectChangesSinceLast() diff against this snapshot.
         Script& snapshot();
 
         // Assert a predicate on the current model state.
@@ -142,21 +142,22 @@ namespace WorkspaceModelUnitTests
                        std::string msg = {});
 
         // Assert that no validate() violation has been observed at any
-        // step so far. This is the implicit default after every mutator;
+        // step so far. This is the implicit default after every action;
         // tests can call it explicitly to add a checkpoint comment.
         Script& expectNoViolation();
 
-        // Assert that the RenderOp sequence emitted by reconcile() between
-        // the last snapshot() and the current state matches the predicate
-        // list (one predicate per op, in order, equal in size).
-        Script& expectRenderOpsSinceLast(
-            std::vector<std::function<bool(const WorkspaceModel::RenderOp&)>> predicates);
+        // Assert that the WorkspaceChange sequence emitted by diff()
+        // between the last snapshot() and the current state matches the
+        // predicate list (one predicate per change, in order, equal in
+        // size).
+        Script& expectChangesSinceLast(
+            std::vector<std::function<bool(const WorkspaceModel::WorkspaceChange&)>> predicates);
 
-        // Assert that at least one op of the matching kind exists in the
-        // RenderOp sequence since the last snapshot. Looser sibling to
-        // expectRenderOpsSinceLast (full sequence equality).
-        Script& expectRenderOpSinceLast(
-            std::function<bool(const WorkspaceModel::RenderOp&)> predicate,
+        // Assert that at least one change of the matching kind exists in
+        // the WorkspaceChange sequence since the last snapshot. Looser
+        // sibling to expectChangesSinceLast (full sequence equality).
+        Script& expectChangeSinceLast(
+            std::function<bool(const WorkspaceModel::WorkspaceChange&)> predicate,
             std::string msg = {});
 
         // --------------------------------------------------------------
@@ -177,20 +178,20 @@ namespace WorkspaceModelUnitTests
         WorkspaceModel::ModelState run();
 
         // --------------------------------------------------------------
-        // RenderOp matchers (free helpers, exposed for readable tests)
+        // Change matchers (free helpers, exposed for readable tests)
         // --------------------------------------------------------------
 
         // Returns true iff the variant arm matches T.
         template<typename T>
-        static std::function<bool(const WorkspaceModel::RenderOp&)> isOp()
+        static std::function<bool(const WorkspaceModel::WorkspaceChange&)> isChange()
         {
-            return [](const WorkspaceModel::RenderOp& op) {
-                return std::holds_alternative<T>(op);
+            return [](const WorkspaceModel::WorkspaceChange& change) {
+                return std::holds_alternative<T>(change);
             };
         }
 
     private:
-        void runMutatorStep(std::function<void()> step);
+        void runActionStep(std::function<void()> step);
 
         WorkspaceModel::ModelState _state;
         WorkspaceModel::ModelState _snapshotState;
@@ -209,11 +210,11 @@ namespace WorkspaceModelUnitTests
     };
 
     // ------------------------------------------------------------------
-    // Free helpers used by behavioral tests. Kept here so test files
+    // Free helpers used by DSL-driven tests. Kept here so test files
     // don't need to repeat them.
     // ------------------------------------------------------------------
 
-    inline WorkspaceModel::TerminalSpec termSpecSim(std::uint8_t seed)
+    inline WorkspaceModel::TerminalSpec termSpecDsl(std::uint8_t seed)
     {
         WorkspaceModel::TerminalSpec s{};
         s.profile[0] = seed;

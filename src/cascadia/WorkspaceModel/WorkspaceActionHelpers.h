@@ -1,17 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tiny private helpers shared across all the Mutators_*.cpp files.
+// Tiny private helpers shared across all the Actions_*.cpp files.
 //
 // This header is intentionally internal — it sits inside the
-// WorkspaceModel namespace alongside the public mutators but only the
+// WorkspaceModel namespace alongside the public actions but only the
 // implementation files include it. Callers of the library reach for
-// Mutators.h (or the helpers in Cascade.h if they're doing structural
-// rebuilds) instead.
+// WorkspaceActions.h (or the helpers in Cascade.h if they're doing
+// structural rebuilds) instead.
 
 #pragma once
 
-#include "Mutators.h"
+#include "WorkspaceActions.h"
 #include "Validator.h"
 #include "Cascade.h"
 
@@ -22,7 +22,7 @@
 
 namespace WorkspaceModel::detail
 {
-    // Deep-mutable copy of the state's underlying data. Mutators build a
+    // Deep-mutable copy of the state's underlying data. Actions build a
     // new WorkspaceModelData on top of this copy and wrap it back into a
     // shared_ptr with `finalize()`. A null input is treated as an empty
     // model.
@@ -103,7 +103,7 @@ namespace WorkspaceModel::detail
     // Locate the workspace (by index in m.workspaces) containing the leaf
     // with id `paneId`. Returns std::nullopt if not found. Returning an
     // index rather than a pointer avoids lifetime questions when the
-    // mutator subsequently rewrites the workspace's pane tree.
+    // action subsequently rewrites the workspace's pane tree.
     [[nodiscard]] inline std::optional<std::size_t> findWorkspaceIndexForLeaf(
         const WorkspaceModelData& m,
         PaneId paneId) noexcept

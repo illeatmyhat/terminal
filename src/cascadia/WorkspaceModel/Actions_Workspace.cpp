@@ -1,15 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Workspace-lifecycle mutators: newWorkspace, closeWorkspace,
+// Workspace-lifecycle actions: newWorkspace, closeWorkspace,
 // closeOtherWorkspaces, closeAllWorkspaces, switchToWorkspace,
 // renameWorkspace, setWorkspaceColor, setWorkspaceDescription,
 // setWorkspacePinned, reorderWorkspace.
 
 #include "pch.h"
 
-#include "MutatorHelpers.h"
-#include "Mutators.h"
+#include "WorkspaceActionHelpers.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {

@@ -1,13 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Op records for the write-ahead log.
+// Action records for the write-ahead log.
 //
-// Each mutator in Mutators.h has a corresponding record struct here that
-// captures the exact parameters needed to replay the call. The set of
+// Each action in WorkspaceActions.h has a corresponding record struct here
+// that captures the exact parameters needed to replay the call. The set of
 // record types is a closed std::variant `OpRecord`; this guarantees the
-// log writer and the replay engine agree on the universe of ops without
-// any string-matching at compile time.
+// log writer and the replay engine agree on the universe of actions
+// without any string-matching at compile time.
 //
 // A LogEntry pairs an OpRecord with a monotonic sequence number and an
 // ISO-8601 timestamp string. The WAL file is line-delimited JSON: one
@@ -15,10 +15,10 @@
 //
 // On-disk shape:
 //   { "seq": <uint64>, "ts": "<iso8601>", "op": "newTab",
-//     "params": { ...op-specific... } }
+//     "params": { ...action-specific... } }
 //
-// The "op" discriminator strings match the function names in Mutators.h
-// exactly.
+// The "op" discriminator strings match the function names in
+// WorkspaceActions.h exactly.
 //
 // Pure C++: no winrt::*, no Windows.h.
 
@@ -31,17 +31,17 @@
 #include <string>
 #include <variant>
 
-#include "Mutators.h"
+#include "WorkspaceActions.h"
 #include "PaneTree.h"
 #include "TabContent.h"
 
 namespace WorkspaceModel
 {
     // -------------------- record structs --------------------
-    // Each record carries the exact set of params from its mutator's
-    // signature in Mutators.h. Default-constructible so JSON decoders can
-    // build them field-by-field; equality-comparable so tests can write
-    // expected/actual asserts trivially.
+    // Each record carries the exact set of params from its action's
+    // signature in WorkspaceActions.h. Default-constructible so JSON
+    // decoders can build them field-by-field; equality-comparable so tests
+    // can write expected/actual asserts trivially.
 
     struct NewWorkspaceRecord
     {

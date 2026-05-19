@@ -1,26 +1,27 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// reconcile(prev, next) — the pure diff function.
+// diff(prev, next) — the pure diff function.
 //
 // EMIT ORDERING
 // =============
-// The output is partitioned into three phases so a renderer can apply ops
+// The output is partitioned into three phases so a view can apply changes
 // sequentially without worrying about ordering hazards (e.g. setting the
 // active tab on a pane before that pane has been created):
 //
 //   Phase 1 (additive):
-//     AddWorkspace, CreateLeafPane, CreateSplitPane, AddTab, MountContent
+//     WorkspaceAdded, LeafPaneCreated, SplitPaneCreated, TabAdded,
+//     ContentMounted
 //   Phase 2 (intra-existing mutation):
-//     MoveTab, SetSplitRatio, UpdateTabDecoration, SetActiveTab,
-//     SetActiveWorkspace
+//     TabMoved, SplitRatioChanged, TabDecorationUpdated, ActiveTabChanged,
+//     ActiveWorkspaceChanged
 //   Phase 3 (subtractive):
-//     UnmountContent, RemoveTab, CollapseSplitPane, RemoveWorkspace
+//     ContentUnmounted, TabRemoved, SplitPaneCollapsed, WorkspaceRemoved
 //
-// Within Phase 1 we emit workspace ops before pane ops before tab ops
-// before mount ops, and we emit Create ops for ancestors before
-// descendants when both are new in the same workspace — so a renderer
-// can blindly process ops in order.
+// Within Phase 1 we emit workspace events before pane events before tab
+// events before mount events, and we emit Created events for ancestors
+// before descendants when both are new in the same workspace — so a view
+// can blindly process changes in order.
 //
 // Within Phase 3 we emit content unmounts before tab removes before
 // split collapses before workspace removes — the inverse of Phase 1.
@@ -31,52 +32,52 @@
 // across (prev, next):
 //
 //   - WorkspaceId in both → diff its contents.
-//   - WorkspaceId in next only → AddWorkspace.
-//   - WorkspaceId in prev only → RemoveWorkspace (omits per-leaf
-//                                 RemoveTab/CollapseSplitPane; the
-//                                 renderer drops the whole workspace).
+//   - WorkspaceId in next only → WorkspaceAdded.
+//   - WorkspaceId in prev only → WorkspaceRemoved (omits per-leaf
+//                                 TabRemoved/SplitPaneCollapsed; the
+//                                 view drops the whole workspace).
 //
 //   - PaneId in both as same kind (leaf/leaf or split/split) → diff
 //                                 internals (ratio, tabs, etc.).
-//   - PaneId in next only → CreateLeafPane or CreateSplitPane.
-//   - PaneId in prev only as a SplitPane → CollapseSplitPane{ removedSplit, survivor }.
+//   - PaneId in next only → LeafPaneCreated or SplitPaneCreated.
+//   - PaneId in prev only as a SplitPane → SplitPaneCollapsed{ removedSplit, survivor }.
 //   - PaneId in prev only as a LeafPane within a surviving workspace
-//                                  → its tabs are emitted as RemoveTab;
+//                                  → its tabs are emitted as TabRemoved;
 //                                    the parent split's collapse is what
 //                                    structurally drops the leaf.
 //
-//   - TabId in both at same (leafId, idx) → maybe UpdateTabDecoration if
+//   - TabId in both at same (leafId, idx) → maybe TabDecorationUpdated if
 //                                            customTitle/runtimeColor/pinned
 //                                            changed.
-//   - TabId in both at different (leafId, idx) → MoveTab. (Critical for
+//   - TabId in both at different (leafId, idx) → TabMoved. (Critical for
 //                                                 preserving live XAML
 //                                                 state across reorder /
 //                                                 cross-leaf / cross-
 //                                                 workspace move.)
-//   - TabId in next only → AddTab.
-//   - TabId in prev only (and its workspace survives) → RemoveTab.
+//   - TabId in next only → TabAdded.
+//   - TabId in prev only (and its workspace survives) → TabRemoved.
 //
 // SPLIT PRESERVATION UNDER WRAP
 // ==============================
-// When mutator `splitPane` wraps a leaf, the original leaf's PaneId is
-// preserved. The reconciler observes:
+// When the `splitPane` action wraps a leaf, the original leaf's PaneId is
+// preserved. diff observes:
 //   prev: leafL exists at root.
 //   next: leafL exists nested under new splitS (also a new sibling
 //         leafR introduced).
 // It emits:
-//   CreateSplitPane(splitS, …)   — new split id, new ratio/axis.
-//   CreateLeafPane(leafR, …)      — new sibling leaf.
-//   AddTab for each tab in leafR.
-//   MountContent for the new sibling's tabs (if they have mounts).
-// It does NOT emit Create/Remove/Add ops for leafL or its tabs; they are
-// preserved across the wrap.
+//   SplitPaneCreated(splitS, …)   — new split id, new ratio/axis.
+//   LeafPaneCreated(leafR, …)     — new sibling leaf.
+//   TabAdded for each tab in leafR.
+//   ContentMounted for the new sibling's tabs (if they have mounts).
+// It does NOT emit any Created/Removed/Added events for leafL or its
+// tabs; they are preserved across the wrap.
 
 #include "pch.h"
 
-#include "Reconciler.h"
+#include "Diff.h"
 
 #include "Cascade.h"
-#include "IRenderSurface.h"
+#include "IWorkspaceView.h"
 
 #include <span>
 #include <unordered_map>
@@ -199,28 +200,28 @@ namespace WorkspaceModel
             return p.leafNode != nullptr;
         }
 
-        // Emit Create ops for every pane in `subtree` that is NOT present
-        // in prevIndex.panes. Walks parent-before-child order. Also emits
-        // AddTab for every new tab encountered and MountContent for any
-        // already-mounted tab in the new subtree.
+        // Emit Created events for every pane in `subtree` that is NOT
+        // present in prevIndex.panes. Walks parent-before-child order.
+        // Also emits TabAdded for every new tab encountered and
+        // ContentMounted for any already-mounted tab in the new subtree.
         void emitCreatesForNewSubtree(const PaneNode& subtree,
                                       const StateIndex& prevIndex,
                                       std::optional<PaneId> parentInNext,
-                                      std::vector<RenderOp>& out)
+                                      std::vector<WorkspaceChange>& out)
         {
             if (const auto* leaf = std::get_if<LeafPane>(&subtree))
             {
-                // Only emit CreateLeafPane if the leaf id is new in next.
+                // Only emit LeafPaneCreated if the leaf id is new in next.
                 if (prevIndex.panes.find(leaf->id) == prevIndex.panes.end())
                 {
-                    out.push_back(CreateLeafPane{ leaf->id, parentInNext });
+                    out.push_back(LeafPaneCreated{ leaf->id, parentInNext });
                     // All of this leaf's tabs are necessarily new (no
                     // prev-side leaf to host them). We still gate per-tab
                     // because a tab could in theory have been moved here
                     // from elsewhere — but that case is handled later in
-                    // the MoveTab pass, so we skip those here.
-                    // We intentionally don't emit AddTab from this helper;
-                    // tab emissions are handled separately so MoveTab
+                    // the TabMoved pass, so we skip those here.
+                    // We intentionally don't emit TabAdded from this helper;
+                    // tab emissions are handled separately so TabMoved
                     // detection runs first.
                 }
                 return;
@@ -252,7 +253,7 @@ namespace WorkspaceModel
                         rightId = std::get<SplitPane>(*split.right).id;
                     }
                 }
-                out.push_back(CreateSplitPane{ split.id, split.axis, split.ratio, leftId, rightId });
+                out.push_back(SplitPaneCreated{ split.id, split.axis, split.ratio, leftId, rightId });
             }
             if (split.left)
             {
@@ -265,10 +266,10 @@ namespace WorkspaceModel
         }
 
         // For each SplitPane that exists in both states with a different
-        // ratio, emit SetSplitRatio.
+        // ratio, emit SplitRatioChanged.
         void emitSplitRatioChanges(const StateIndex& prevIndex,
                                    const StateIndex& nextIndex,
-                                   std::vector<RenderOp>& out)
+                                   std::vector<WorkspaceChange>& out)
         {
             for (const auto& [pid, info] : nextIndex.panes)
             {
@@ -283,20 +284,20 @@ namespace WorkspaceModel
                 }
                 if (it->second.splitNode->ratio != info.splitNode->ratio)
                 {
-                    out.push_back(SetSplitRatio{ pid, info.splitNode->ratio });
+                    out.push_back(SplitRatioChanged{ pid, info.splitNode->ratio });
                 }
             }
         }
 
-        // Detect every CollapseSplitPane. A split collapses when its
+        // Detect every SplitPaneCollapsed. A split collapses when its
         // PaneId is in prev but absent in next, AND one of its prev
         // children survives in next within the same workspace.
-        // Workspaces removed entirely are skipped (the RemoveWorkspace
+        // Workspaces removed entirely are skipped (the WorkspaceRemoved
         // op handles them).
         void emitCollapses(const WorkspaceModelData* prev,
                            const StateIndex& prevIndex,
                            const StateIndex& nextIndex,
-                           std::vector<RenderOp>& out)
+                           std::vector<WorkspaceChange>& out)
         {
             if (!prev)
             {
@@ -313,7 +314,7 @@ namespace WorkspaceModel
                     continue; // split still exists in next
                 }
                 // Skip if the containing workspace is gone in next; the
-                // RemoveWorkspace op tears the entire tree down.
+                // WorkspaceRemoved op tears the entire tree down.
                 if (nextIndex.workspaceById.find(info.workspaceId) ==
                     nextIndex.workspaceById.end())
                 {
@@ -356,19 +357,19 @@ namespace WorkspaceModel
                     // Unusual but legal: emit with PaneId{0}. The
                     // renderer can treat it as "drop this split entirely
                     // and don't graft anything in its place".
-                    out.push_back(CollapseSplitPane{ pid, PaneId{ 0 } });
+                    out.push_back(SplitPaneCollapsed{ pid, PaneId{ 0 } });
                     continue;
                 }
-                out.push_back(CollapseSplitPane{ pid, survivor });
+                out.push_back(SplitPaneCollapsed{ pid, survivor });
             }
         }
 
-        // Emit AddTab for every TabId that is new in next AND whose leaf
+        // Emit TabAdded for every TabId that is new in next AND whose leaf
         // exists in next. Skips tabs that are also present in prev (those
-        // are MoveTab or unchanged).
+        // are TabMoved or unchanged).
         void emitTabAdds(const WorkspaceModelData* next,
                          const StateIndex& prevIndex,
-                         std::vector<RenderOp>& out)
+                         std::vector<WorkspaceChange>& out)
         {
             if (!next)
             {
@@ -387,7 +388,7 @@ namespace WorkspaceModel
                         {
                             continue; // existing tab, handled elsewhere
                         }
-                        out.push_back(AddTab{
+                        out.push_back(TabAdded{
                             leaf->id,
                             i,
                             t.id,
@@ -399,12 +400,12 @@ namespace WorkspaceModel
             }
         }
 
-        // Emit RemoveTab for every TabId that was in prev but is gone in
+        // Emit TabRemoved for every TabId that was in prev but is gone in
         // next AND whose workspace is still present in next. (If the
-        // workspace itself was removed, RemoveWorkspace replaces these.)
+        // workspace itself was removed, WorkspaceRemoved replaces these.)
         void emitTabRemoves(const StateIndex& prevIndex,
                             const StateIndex& nextIndex,
-                            std::vector<RenderOp>& out)
+                            std::vector<WorkspaceChange>& out)
         {
             for (const auto& [tid, info] : prevIndex.tabs)
             {
@@ -421,24 +422,24 @@ namespace WorkspaceModel
                 if (nextIndex.workspaceById.find(paneIt->second.workspaceId) ==
                     nextIndex.workspaceById.end())
                 {
-                    continue; // workspace gone — RemoveWorkspace handles
+                    continue; // workspace gone — WorkspaceRemoved handles
                 }
-                out.push_back(RemoveTab{ info.leafId, tid });
+                out.push_back(TabRemoved{ info.leafId, tid });
             }
         }
 
-        // Emit MoveTab for every TabId present in both states whose
+        // Emit TabMoved for every TabId present in both states whose
         // (leafId, indexInLeaf) differs.
         void emitTabMoves(const StateIndex& prevIndex,
                           const StateIndex& nextIndex,
-                          std::vector<RenderOp>& out)
+                          std::vector<WorkspaceChange>& out)
         {
             for (const auto& [tid, nextInfo] : nextIndex.tabs)
             {
                 auto prevIt = prevIndex.tabs.find(tid);
                 if (prevIt == prevIndex.tabs.end())
                 {
-                    continue; // new tab → AddTab handled elsewhere
+                    continue; // new tab → TabAdded handled elsewhere
                 }
                 const auto& prevInfo = prevIt->second;
                 if (prevInfo.leafId == nextInfo.leafId &&
@@ -446,7 +447,7 @@ namespace WorkspaceModel
                 {
                     continue; // not moved
                 }
-                out.push_back(MoveTab{
+                out.push_back(TabMoved{
                     tid,
                     prevInfo.leafId,
                     nextInfo.leafId,
@@ -454,16 +455,16 @@ namespace WorkspaceModel
             }
         }
 
-        // Emit UpdateTabDecoration for every TabId present in both states
+        // Emit TabDecorationUpdated for every TabId present in both states
         // where customTitle / runtimeColor / pinned changed and the
         // tab's location is unchanged. (When the location changed we
-        // emit MoveTab; if decoration also changed, a later
-        // UpdateTabDecoration is still emitted so the renderer can apply
+        // emit TabMoved; if decoration also changed, a later
+        // TabDecorationUpdated is still emitted so the renderer can apply
         // both — the order Move-then-Update is fine because XAML state is
-        // preserved across MoveTab.)
+        // preserved across TabMoved.)
         void emitDecorationUpdates(const StateIndex& prevIndex,
                                    const StateIndex& nextIndex,
-                                   std::vector<RenderOp>& out)
+                                   std::vector<WorkspaceChange>& out)
         {
             for (const auto& [tid, nextInfo] : nextIndex.tabs)
             {
@@ -482,7 +483,7 @@ namespace WorkspaceModel
                     a->runtimeColor != b->runtimeColor ||
                     a->pinned != b->pinned)
                 {
-                    out.push_back(UpdateTabDecoration{
+                    out.push_back(TabDecorationUpdated{
                         tid,
                         b->customTitle,
                         b->runtimeColor,
@@ -496,8 +497,8 @@ namespace WorkspaceModel
         // ContentId → nullopt is Unmount.
         void emitMountOps(const StateIndex& prevIndex,
                           const StateIndex& nextIndex,
-                          std::vector<RenderOp>& outMounts,
-                          std::vector<RenderOp>& outUnmounts)
+                          std::vector<WorkspaceChange>& outMounts,
+                          std::vector<WorkspaceChange>& outUnmounts)
         {
             // Mounts: any tab in next whose mount differs from its
             // previous value (or the tab itself is new).
@@ -516,12 +517,12 @@ namespace WorkspaceModel
                 }
                 if (nb.mount.has_value() && prevMount != nb.mount)
                 {
-                    outMounts.push_back(MountContent{ tid, *nb.mount, nb.description });
+                    outMounts.push_back(ContentMounted{ tid, *nb.mount, nb.description });
                 }
                 if (prevMount.has_value() && prevMount != nb.mount)
                 {
                     // Mount changed (rare) or was set and is now unset.
-                    outUnmounts.push_back(UnmountContent{ tid, *prevMount });
+                    outUnmounts.push_back(ContentUnmounted{ tid, *prevMount });
                 }
             }
             // Unmounts: tabs gone from next that still had a mount in prev,
@@ -547,18 +548,18 @@ namespace WorkspaceModel
                     // workspace gone; whole-workspace teardown handles it
                     continue;
                 }
-                outUnmounts.push_back(UnmountContent{ tid, *prevInfo.record->mount });
+                outUnmounts.push_back(ContentUnmounted{ tid, *prevInfo.record->mount });
             }
         }
 
-        // SetActiveTab: per-leaf activeTabIdx changed AND the leaf exists
+        // ActiveTabChanged: per-leaf activeTabIdx changed AND the leaf exists
         // in both states. New leaves carry their initial active tab idx
         // only when it's non-zero (the renderer's default for a freshly
         // materialised leaf is activeTabIdx == 0; emitting a redundant
-        // SetActiveTab op for the zero case would just be noise).
+        // ActiveTabChanged op for the zero case would just be noise).
         void emitActiveTabChanges(const WorkspaceModelData* next,
                                   const StateIndex& prevIndex,
-                                  std::vector<RenderOp>& out)
+                                  std::vector<WorkspaceChange>& out)
         {
             if (!next)
             {
@@ -573,17 +574,17 @@ namespace WorkspaceModel
                     auto prevIt = prevIndex.panes.find(leaf->id);
                     if (prevIt == prevIndex.panes.end() || !isLeaf(prevIt->second))
                     {
-                        // Brand-new leaf. Emit SetActiveTab only if the
+                        // Brand-new leaf. Emit ActiveTabChanged only if the
                         // initial active idx isn't the default 0.
                         if (!leaf->tabs.empty() && leaf->activeTabIdx != 0)
                         {
-                            out.push_back(SetActiveTab{ leaf->id, leaf->activeTabIdx });
+                            out.push_back(ActiveTabChanged{ leaf->id, leaf->activeTabIdx });
                         }
                         continue;
                     }
                     if (prevIt->second.leafNode->activeTabIdx != leaf->activeTabIdx)
                     {
-                        out.push_back(SetActiveTab{ leaf->id, leaf->activeTabIdx });
+                        out.push_back(ActiveTabChanged{ leaf->id, leaf->activeTabIdx });
                     }
                 }
             }
@@ -591,8 +592,8 @@ namespace WorkspaceModel
     } // namespace
 
     // ---------------------------------------------------------------------
-    std::vector<RenderOp> reconcile(const ModelState& prevState,
-                                    const ModelState& nextState)
+    std::vector<WorkspaceChange> diff(const ModelState& prevState,
+                                      const ModelState& nextState)
     {
         const WorkspaceModelData* prev = prevState ? prevState.get() : nullptr;
         const WorkspaceModelData* next = nextState ? nextState.get() : nullptr;
@@ -601,13 +602,13 @@ namespace WorkspaceModel
         const StateIndex nextIndex = buildIndex(next);
 
         // Three phase buckets so we can sequence them at the end.
-        std::vector<RenderOp> additive;
-        std::vector<RenderOp> mutation;
-        std::vector<RenderOp> subtractive;
+        std::vector<WorkspaceChange> additive;
+        std::vector<WorkspaceChange> mutation;
+        std::vector<WorkspaceChange> subtractive;
 
         // -------- Phase 1: additive --------
 
-        // AddWorkspace for every workspace in next not in prev.
+        // WorkspaceAdded for every workspace in next not in prev.
         if (next)
         {
             for (std::size_t i = 0; i < next->workspaces.size(); ++i)
@@ -615,12 +616,12 @@ namespace WorkspaceModel
                 const auto& ws = next->workspaces[i];
                 if (prevIndex.workspaceById.find(ws.id) == prevIndex.workspaceById.end())
                 {
-                    additive.push_back(AddWorkspace{ ws.id, ws.name, ws.color, i });
+                    additive.push_back(WorkspaceAdded{ ws.id, ws.name, ws.color, i });
                 }
             }
         }
 
-        // CreateLeafPane / CreateSplitPane for every new pane in surviving
+        // LeafPaneCreated / SplitPaneCreated for every new pane in surviving
         // (or new) workspaces.
         if (next)
         {
@@ -630,13 +631,13 @@ namespace WorkspaceModel
             }
         }
 
-        // AddTab for every new tab.
+        // TabAdded for every new tab.
         emitTabAdds(next, prevIndex, additive);
 
-        // MountContent: collected jointly with unmounts below to keep
+        // ContentMounted: collected jointly with unmounts below to keep
         // logic in one place, but mount entries go in `additive`.
-        std::vector<RenderOp> mountsBucket;
-        std::vector<RenderOp> unmountsBucket;
+        std::vector<WorkspaceChange> mountsBucket;
+        std::vector<WorkspaceChange> unmountsBucket;
         emitMountOps(prevIndex, nextIndex, mountsBucket, unmountsBucket);
         for (auto& op : mountsBucket)
         {
@@ -650,47 +651,47 @@ namespace WorkspaceModel
         emitDecorationUpdates(prevIndex, nextIndex, mutation);
         emitActiveTabChanges(next, prevIndex, mutation);
 
-        // SetActiveWorkspace — emit when value changed (including
+        // ActiveWorkspaceChanged — emit when value changed (including
         // nullopt → something or something → nullopt).
         {
             std::optional<WorkspaceId> prevActive = prev ? prev->activeWorkspaceId : std::nullopt;
             std::optional<WorkspaceId> nextActive = next ? next->activeWorkspaceId : std::nullopt;
             if (prevActive != nextActive)
             {
-                mutation.push_back(SetActiveWorkspace{ nextActive });
+                mutation.push_back(ActiveWorkspaceChanged{ nextActive });
             }
         }
 
         // -------- Phase 3: subtractive --------
 
-        // Unmounts first so the renderer can detach live content before
+        // Unmounts first so the view can detach live content before
         // the tab structurally disappears.
-        for (auto& op : unmountsBucket)
+        for (auto& change : unmountsBucket)
         {
-            subtractive.push_back(std::move(op));
+            subtractive.push_back(std::move(change));
         }
 
-        // RemoveTab for tabs gone from surviving workspaces.
+        // TabRemoved for tabs gone from surviving workspaces.
         emitTabRemoves(prevIndex, nextIndex, subtractive);
 
-        // CollapseSplitPane for splits that disappeared while their
+        // SplitPaneCollapsed for splits that disappeared while their
         // workspace survived.
         emitCollapses(prev, prevIndex, nextIndex, subtractive);
 
-        // RemoveWorkspace for every workspace in prev not in next.
+        // WorkspaceRemoved for every workspace in prev not in next.
         if (prev)
         {
             for (const auto& ws : prev->workspaces)
             {
                 if (nextIndex.workspaceById.find(ws.id) == nextIndex.workspaceById.end())
                 {
-                    subtractive.push_back(RemoveWorkspace{ ws.id });
+                    subtractive.push_back(WorkspaceRemoved{ ws.id });
                 }
             }
         }
 
         // Concatenate the three phases.
-        std::vector<RenderOp> out;
+        std::vector<WorkspaceChange> out;
         out.reserve(additive.size() + mutation.size() + subtractive.size());
         for (auto& op : additive)
         {
@@ -708,13 +709,13 @@ namespace WorkspaceModel
     }
 
     // ---------------------------------------------------------------------
-    void applyOps(IRenderSurface& surface, std::span<const RenderOp> ops)
+    void applyChanges(IWorkspaceView& view, std::span<const WorkspaceChange> changes)
     {
-        for (const auto& op : ops)
+        for (const auto& change : changes)
         {
             std::visit(
-                [&surface](const auto& arm) { surface.apply(arm); },
-                op);
+                [&view](const auto& arm) { view.apply(arm); },
+                change);
         }
     }
 }

@@ -6,8 +6,8 @@
 // well-formed.
 //
 // The validator is the single source of truth for what constitutes a legal
-// model state. Every mutator must produce a state that satisfies it; the
-// property fuzzer (later slice) calls validate() after every random op.
+// model state. Every action must produce a state that satisfies it; the
+// property fuzzer calls validate() after every random op.
 //
 // Pure C++: no winrt::*, no Windows.h.
 

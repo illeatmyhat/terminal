@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tests for the 8 tab mutators in Mutators.h, including the cascade-edge
-// scenarios called out specifically in issue #11 (last-tab-in-leaf
-// removes leaf and collapses parent split).
+// Tests for the 8 tab actions in WorkspaceActions.h, including the
+// cascade-edge scenarios (last-tab-in-leaf removes leaf and collapses
+// parent split).
 
 #include "pch.h"
 
@@ -17,9 +17,9 @@ using namespace WorkspaceModelUnitTests;
 
 namespace WorkspaceModelUnitTests
 {
-    class TabMutatorTests
+    class TabActionTests
     {
-        TEST_CLASS(TabMutatorTests);
+        TEST_CLASS(TabActionTests);
 
         TEST_METHOD(NewTab_AddsToLeafAndBecomesActive);
         TEST_METHOD(NewTab_UnknownLeaf_NoChange);
@@ -46,7 +46,7 @@ namespace WorkspaceModelUnitTests
     };
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::NewTab_AddsToLeafAndBecomesActive()
+    void TabActionTests::NewTab_AddsToLeafAndBecomesActive()
     {
         auto f = makeSingleWorkspace();
         auto r = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -57,7 +57,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[1].id == r.id);
     }
 
-    void TabMutatorTests::NewTab_UnknownLeaf_NoChange()
+    void TabActionTests::NewTab_UnknownLeaf_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto r = newTab(f.state, f.wsId, PaneId{ 999 }, termSpec(2));
@@ -69,7 +69,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), leaf.tabs.size());
     }
 
-    void TabMutatorTests::NewTab_AllocatesMonotonicTabId()
+    void TabActionTests::NewTab_AllocatesMonotonicTabId()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -78,7 +78,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::CloseTab_RemovesFromLeaf()
+    void TabActionTests::CloseTab_RemovesFromLeaf()
     {
         auto f = makeSingleWorkspace();
         auto extra = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -90,7 +90,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[0].id == f.tabId);
     }
 
-    void TabMutatorTests::CloseTab_LastTabInLeaf_RemovesWorkspace()
+    void TabActionTests::CloseTab_LastTabInLeaf_RemovesWorkspace()
     {
         // A workspace with one leaf and one tab. closeTab on it should
         // cascade all the way: leaf gone → root gone → workspace gone
@@ -102,7 +102,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_FALSE(next->activeWorkspaceId.has_value());
     }
 
-    void TabMutatorTests::CloseTab_CascadeCollapsesSplit()
+    void TabActionTests::CloseTab_CascadeCollapsesSplit()
     {
         // Build a workspace with a 2-pane split. Close the only tab in
         // the right pane and verify:
@@ -133,7 +133,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(ws.activePaneId == f.leafId);
     }
 
-    void TabMutatorTests::CloseTab_ShiftsActiveIdxLeft()
+    void TabActionTests::CloseTab_ShiftsActiveIdxLeft()
     {
         // Three tabs; active = tab 2 (idx 2). Close tab 0; active should
         // shift from 2 to 1.
@@ -151,7 +151,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), leafAfter.activeTabIdx);
     }
 
-    void TabMutatorTests::CloseTab_UnknownTabId_NoChange()
+    void TabActionTests::CloseTab_UnknownTabId_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = closeTab(f.state, TabId{ 9999 });
@@ -160,7 +160,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::CloseTabsRight_TrimsTrailing()
+    void TabActionTests::CloseTabsRight_TrimsTrailing()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -174,7 +174,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[1].id == a.id);
     }
 
-    void TabMutatorTests::CloseTabsRight_OnLast_NoOp()
+    void TabActionTests::CloseTabsRight_OnLast_NoOp()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -185,7 +185,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::CloseOtherTabs_KeepsOnlyNamed()
+    void TabActionTests::CloseOtherTabs_KeepsOnlyNamed()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -198,7 +198,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), leaf.activeTabIdx);
     }
 
-    void TabMutatorTests::CloseOtherTabs_AdjustsActiveIdx()
+    void TabActionTests::CloseOtherTabs_AdjustsActiveIdx()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -211,7 +211,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::SelectTab_UpdatesActiveTabAndWorkspace()
+    void TabActionTests::SelectTab_UpdatesActiveTabAndWorkspace()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -225,7 +225,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->mru.front() == a.id);
     }
 
-    void TabMutatorTests::SelectTab_UnknownTabId_NoChange()
+    void TabActionTests::SelectTab_UnknownTabId_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = selectTab(f.state, TabId{ 9999 });
@@ -233,7 +233,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void TabMutatorTests::SetTabTitle_RoundTrips()
+    void TabActionTests::SetTabTitle_RoundTrips()
     {
         auto f = makeSingleWorkspace();
         auto next = setTabTitle(f.state, f.tabId, "Hello");
@@ -242,7 +242,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(std::string{ "Hello" }, leaf.tabs[0].customTitle);
     }
 
-    void TabMutatorTests::SetTabColor_RoundTrips()
+    void TabActionTests::SetTabColor_RoundTrips()
     {
         auto f = makeSingleWorkspace();
         Color green{ 0, 255, 0, 255 };
@@ -257,7 +257,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_FALSE(leaf2.tabs[0].runtimeColor.has_value());
     }
 
-    void TabMutatorTests::SetTabPinned_RoundTrips()
+    void TabActionTests::SetTabPinned_RoundTrips()
     {
         auto f = makeSingleWorkspace();
         auto next = setTabPinned(f.state, f.tabId, true);

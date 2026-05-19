@@ -17,7 +17,7 @@ namespace WorkspaceModel
     namespace
     {
         // Discriminator strings on the wire. Match the function names in
-        // Mutators.h exactly.
+        // WorkspaceActions.h exactly.
         constexpr const char* kOpNewWorkspace = "newWorkspace";
         constexpr const char* kOpCloseWorkspace = "closeWorkspace";
         constexpr const char* kOpCloseOtherWorkspaces = "closeOtherWorkspaces";

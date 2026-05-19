@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Move mutators: moveTab, moveTabAsSplit.
+// Move actions: moveTab, moveTabAsSplit.
 //
 // Both are atomic: the returned state has the tab fully removed from its
 // source leaf and inserted at the destination in a single shared_ptr
@@ -12,8 +12,8 @@
 
 #include "pch.h"
 
-#include "MutatorHelpers.h"
-#include "Mutators.h"
+#include "WorkspaceActionHelpers.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {

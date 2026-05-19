@@ -12,7 +12,7 @@ namespace WorkspaceModel
     namespace
     {
         // Apply one OpRecord against `state`. Returns the new state.
-        // Throws if a mutator throws; the caller (replaySafe) catches.
+        // Throws if an action throws; the caller (replaySafe) catches.
         ModelState applyOne(ModelState state, const OpRecord& op)
         {
             return std::visit(
@@ -173,7 +173,7 @@ namespace WorkspaceModel
             catch (const std::exception& e)
             {
                 out.state = state;
-                out.error = std::string{ "mutator threw at seq=" } +
+                out.error = std::string{ "action threw at seq=" } +
                             std::to_string(entries[i].seq) + ": " + e.what();
                 out.entriesApplied = i;
                 return out;
@@ -185,7 +185,7 @@ namespace WorkspaceModel
             if (next == nullptr)
             {
                 out.state = state;
-                out.error = std::string{ "mutator returned null at seq=" } +
+                out.error = std::string{ "action returned null at seq=" } +
                             std::to_string(entries[i].seq);
                 out.entriesApplied = i;
                 return out;
@@ -193,7 +193,7 @@ namespace WorkspaceModel
             if (const auto v = validate(*next); v.has_value())
             {
                 out.state = state;
-                out.error = std::string{ "mutator produced invalid state at seq=" } +
+                out.error = std::string{ "action produced invalid state at seq=" } +
                             std::to_string(entries[i].seq);
                 out.entriesApplied = i;
                 return out;

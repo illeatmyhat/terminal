@@ -1,17 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Pane mutators: splitPane, closePane, resizePane, focusPane.
+// Pane actions: splitPane, closePane, resizePane, focusPane.
 //
 // splitPane is the identity-preservation centrepiece. The original leaf's
-// PaneId is unchanged after the mutation: a new SplitPane wraps the
+// PaneId is unchanged after the action: a new SplitPane wraps the
 // original leaf (kept by shared_ptr<const PaneNode>) plus a freshly minted
 // sibling leaf. Tests assert that PaneId before == PaneId after.
 
 #include "pch.h"
 
-#include "MutatorHelpers.h"
-#include "Mutators.h"
+#include "WorkspaceActionHelpers.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {

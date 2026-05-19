@@ -16,7 +16,7 @@
 
 #include "Fuzzer.h"
 
-#include "../WorkspaceModel/Mutators.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
 #include "../WorkspaceModel/Serializer.h"
 #include "../WorkspaceModel/Validator.h"
 
@@ -227,7 +227,7 @@ namespace WorkspaceModelUnitTests
             //   - succeed (failingOpIdx absent) if the bug has been fixed
             //   - reproduce the same violation if it hasn't been fixed
             // Either is acceptable; what we forbid is a *different* failure
-            // (e.g. a new bug introduced by recent mutator changes that
+            // (e.g. a new bug introduced by recent action changes that
             // collapses an unrelated regression file).
             if (regression.failingOpIdx.has_value())
             {

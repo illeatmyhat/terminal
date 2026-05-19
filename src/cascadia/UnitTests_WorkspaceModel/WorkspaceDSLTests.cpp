@@ -1,16 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Behavioral simulator scripts. Each TEST_METHOD here is one scripted
-// user-flow sequence written against the Script DSL in
-// BehavioralSimulator.h.
-//
-// Phase 0 stop condition: these scripts collectively cover every flow
-// exercised in the running app today. See issue #14 for the flow list.
+// DSL-driven scripted scenarios. Each TEST_METHOD here is one scripted
+// user-flow sequence written against the Script DSL in WorkspaceDSL.h.
+// Collectively they cover every flow exercised in the running app.
 
 #include "pch.h"
 
-#include "BehavioralSimulator.h"
+#include "WorkspaceDSL.h"
 
 using namespace WorkspaceModel;
 using namespace WEX::Logging;
@@ -37,9 +34,9 @@ namespace WorkspaceModelUnitTests
         }
     }
 
-    class BehavioralTests
+    class WorkspaceDSLTests
     {
-        TEST_CLASS(BehavioralTests);
+        TEST_CLASS(WorkspaceDSLTests);
 
         // Workspace lifecycle
         TEST_METHOD(Workspace_Create_Switch_MruAdvances);
@@ -68,11 +65,11 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(Settings_FindFirstAndSelect_NoDuplicate);
 
         // All five content variants
-        TEST_METHOD(AllFiveContentVariants_MountContentOpEachKind);
+        TEST_METHOD(AllFiveContentVariants_ContentMountedChangeEachKind);
 
-        // Render-op assertions
-        TEST_METHOD(NewWorkspace_EmitsAddAndCreateAndMount);
-        TEST_METHOD(SplitPane_EmitsCreateSplitAndCreateLeafAndAddTab);
+        // Change-stream assertions
+        TEST_METHOD(NewWorkspace_EmitsWorkspaceAddedAndLeafCreatedAndTabAdded);
+        TEST_METHOD(SplitPane_EmitsSplitCreatedAndLeafCreatedAndTabAdded);
 
         // Cascade scenarios for the four cascade rules
         TEST_METHOD(Cascade_CloseTab_LastTab_RemovesLeafAndCollapsesSplit);
@@ -83,12 +80,12 @@ namespace WorkspaceModelUnitTests
     // Workspace lifecycle
     // ==================================================================
 
-    void BehavioralTests::Workspace_Create_Switch_MruAdvances()
+    void WorkspaceDSLTests::Workspace_Create_Switch_MruAdvances()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "tA")
-            .newWorkspace("b", "beta", termSpecSim(2), "tB")
-            .newWorkspace("c", "gamma", termSpecSim(3), "tC")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "tA")
+            .newWorkspace("b", "beta", termSpecDsl(2), "tB")
+            .newWorkspace("c", "gamma", termSpecDsl(3), "tC")
             // After three creates the MRU is [c, b, a] (front = most recent).
             .switchToWorkspace("a")
             .switchToWorkspace("b")
@@ -108,11 +105,11 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(m.mru.front() == s.workspaceFor("c"));
     }
 
-    void BehavioralTests::Workspace_Rename_Recolor_Description_Pinned()
+    void WorkspaceDSLTests::Workspace_Rename_Recolor_Description_Pinned()
     {
         Script s;
         Color red{ 200, 30, 30, 0xFF };
-        s.newWorkspace("a", "alpha", termSpecSim(1), "tA")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "tA")
             .renameWorkspace("a", "Renamed")
             .setWorkspaceColor("a", red)
             .setWorkspaceDescription("a", "an alpha workspace")
@@ -126,12 +123,12 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(ws.pinned);
     }
 
-    void BehavioralTests::Workspace_Reorder()
+    void WorkspaceDSLTests::Workspace_Reorder()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "tA")
-            .newWorkspace("b", "beta", termSpecSim(2), "tB")
-            .newWorkspace("c", "gamma", termSpecSim(3), "tC")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "tA")
+            .newWorkspace("b", "beta", termSpecDsl(2), "tB")
+            .newWorkspace("c", "gamma", termSpecDsl(3), "tC")
             .reorderWorkspace("c", 0); // move c to front
         s.run();
         verifyClean(s);
@@ -141,14 +138,14 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(m.workspaces[2].id == s.workspaceFor("b"));
     }
 
-    void BehavioralTests::Workspace_CloseOther_CloseAll_CloseLast_EmptyState()
+    void WorkspaceDSLTests::Workspace_CloseOther_CloseAll_CloseLast_EmptyState()
     {
         // First: closeOtherWorkspaces keeps just one. Then closeAll. Then
         // verify empty-state invariant.
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "tA")
-            .newWorkspace("b", "beta", termSpecSim(2), "tB")
-            .newWorkspace("c", "gamma", termSpecSim(3), "tC")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "tA")
+            .newWorkspace("b", "beta", termSpecDsl(2), "tB")
+            .newWorkspace("c", "gamma", termSpecDsl(3), "tC")
             .closeOtherWorkspaces("b")
             .expect([&s](const WorkspaceModelData& m) {
                 return m.workspaces.size() == 1 &&
@@ -166,10 +163,10 @@ namespace WorkspaceModelUnitTests
     // Single-leaf single-tab
     // ==================================================================
 
-    void BehavioralTests::SingleTab_SelectIsNoOp_CloseCascadesWorkspace()
+    void WorkspaceDSLTests::SingleTab_SelectIsNoOp_CloseCascadesWorkspace()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0")
             .selectTab("t0")
             .expect([&s](const WorkspaceModelData& m) {
                 if (m.workspaces.size() != 1) return false;
@@ -190,12 +187,12 @@ namespace WorkspaceModelUnitTests
     // Multi-tab single-leaf
     // ==================================================================
 
-    void BehavioralTests::MultiTab_Open3_SelectThrough_CloseMiddle()
+    void WorkspaceDSLTests::MultiTab_Open3_SelectThrough_CloseMiddle()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .newTab("t1", "a", "leafA", termSpecSim(2))
-            .newTab("t2", "a", "leafA", termSpecSim(3))
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .newTab("t1", "a", "leafA", termSpecDsl(2))
+            .newTab("t2", "a", "leafA", termSpecDsl(3))
             .selectTab("t0")
             .selectTab("t1")
             .selectTab("t2")
@@ -209,13 +206,13 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[1].id == s.tabFor("t2"));
     }
 
-    void BehavioralTests::MultiTab_CloseTabsRight_CloseOtherTabs_Decoration()
+    void WorkspaceDSLTests::MultiTab_CloseTabsRight_CloseOtherTabs_Decoration()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .newTab("t1", "a", "leafA", termSpecSim(2))
-            .newTab("t2", "a", "leafA", termSpecSim(3))
-            .newTab("t3", "a", "leafA", termSpecSim(4))
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .newTab("t1", "a", "leafA", termSpecDsl(2))
+            .newTab("t2", "a", "leafA", termSpecDsl(3))
+            .newTab("t3", "a", "leafA", termSpecDsl(4))
             .closeTabsRight("t1")
             // Now [t0, t1] remain.
             .expect([&s](const WorkspaceModelData& m) {
@@ -244,16 +241,16 @@ namespace WorkspaceModelUnitTests
     // Splits
     // ==================================================================
 
-    void BehavioralTests::Split_VerticalAndHorizontal_Resize_Close()
+    void WorkspaceDSLTests::Split_VerticalAndHorizontal_Resize_Close()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .splitPane("leafA", Axis::Vertical, 0.4, termSpecSim(2), "leafB", "tB")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .splitPane("leafA", Axis::Vertical, 0.4, termSpecDsl(2), "leafB", "tB")
             // Root is now a SplitPane.
             .expect([](const WorkspaceModelData& m) {
                 return std::holds_alternative<SplitPane>(m.workspaces[0].root);
             }, "root is split after splitPane")
-            .splitPane("leafB", Axis::Horizontal, 0.7, termSpecSim(3), "leafC", "tC")
+            .splitPane("leafB", Axis::Horizontal, 0.7, termSpecDsl(3), "leafC", "tC")
             .closePane("leafC")
             // Closing leafC cascades the inner split away; leafB returns
             // to being the sibling under the outer split.
@@ -264,11 +261,11 @@ namespace WorkspaceModelUnitTests
         verifyClean(s);
     }
 
-    void BehavioralTests::Split_CascadeCollapseWhenOneSideEmpties_FocusPane()
+    void WorkspaceDSLTests::Split_CascadeCollapseWhenOneSideEmpties_FocusPane()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .splitPane("leafA", Axis::Vertical, 0.5, termSpecSim(2), "leafB", "tB")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .splitPane("leafA", Axis::Vertical, 0.5, termSpecDsl(2), "leafB", "tB")
             .focusPane("leafA")
             .expect([&s](const WorkspaceModelData& m) {
                 return m.workspaces[0].activePaneId == s.leafFor("leafA");
@@ -289,12 +286,12 @@ namespace WorkspaceModelUnitTests
     // Moves
     // ==================================================================
 
-    void BehavioralTests::MoveTab_SameLeaf_Reorder()
+    void WorkspaceDSLTests::MoveTab_SameLeaf_Reorder()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .newTab("t1", "a", "leafA", termSpecSim(2))
-            .newTab("t2", "a", "leafA", termSpecSim(3))
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .newTab("t1", "a", "leafA", termSpecDsl(2))
+            .newTab("t2", "a", "leafA", termSpecDsl(3))
             // Move t2 to index 0.
             .moveTab("t2", "leafA", 0);
         s.run();
@@ -305,12 +302,12 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[2].id == s.tabFor("t1"));
     }
 
-    void BehavioralTests::MoveTab_CrossLeafSameWorkspace_PreservesTabId()
+    void WorkspaceDSLTests::MoveTab_CrossLeafSameWorkspace_PreservesTabId()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .newTab("t1", "a", "leafA", termSpecSim(2))
-            .splitPane("leafA", Axis::Vertical, 0.5, termSpecSim(3), "leafB", "tB")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .newTab("t1", "a", "leafA", termSpecDsl(2))
+            .splitPane("leafA", Axis::Vertical, 0.5, termSpecDsl(3), "leafB", "tB")
             // Move t1 from leafA to leafB at idx 0. t1's id should survive.
             .moveTab("t1", "leafB", 0);
         s.run();
@@ -332,13 +329,13 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(rightLeaf.tabs[1].id == s.tabFor("tB"));
     }
 
-    void BehavioralTests::MoveTab_CrossWorkspace_AtomicWithSourceCascade()
+    void WorkspaceDSLTests::MoveTab_CrossWorkspace_AtomicWithSourceCascade()
     {
         Script s;
         // ws "a" has [tA0, tA1]; ws "b" has [tB0]. Move tA0 across.
-        s.newWorkspace("a", "alpha", termSpecSim(1), "tA0", "leafA")
-            .newTab("tA1", "a", "leafA", termSpecSim(2))
-            .newWorkspace("b", "beta", termSpecSim(3), "tB0", "leafB")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "tA0", "leafA")
+            .newTab("tA1", "a", "leafA", termSpecDsl(2))
+            .newWorkspace("b", "beta", termSpecDsl(3), "tB0", "leafB")
             // After this move, ws a keeps [tA1], ws b becomes [tA0, tB0].
             .moveTab("tA0", "leafB", 0);
         s.run();
@@ -357,15 +354,15 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leafB.tabs[1].id == s.tabFor("tB0"));
     }
 
-    void BehavioralTests::MoveTabAsSplit_EachEdge_TopBottomLeftRight()
+    void WorkspaceDSLTests::MoveTabAsSplit_EachEdge_TopBottomLeftRight()
     {
         // Build a stable scenario and re-run for each edge.
         for (auto edge : { Edge::Top, Edge::Bottom, Edge::Left, Edge::Right })
         {
             Script s;
-            s.newWorkspace("a", "alpha", termSpecSim(1), "tA0", "leafA")
-                .newTab("tA1", "a", "leafA", termSpecSim(2))
-                .newWorkspace("b", "beta", termSpecSim(3), "tB0", "leafB")
+            s.newWorkspace("a", "alpha", termSpecDsl(1), "tA0", "leafA")
+                .newTab("tA1", "a", "leafA", termSpecDsl(2))
+                .newWorkspace("b", "beta", termSpecDsl(3), "tB0", "leafB")
                 .moveTabAsSplit("tA1", "leafB", edge, "newLeaf");
             s.run();
             verifyClean(s);
@@ -385,10 +382,10 @@ namespace WorkspaceModelUnitTests
     // Settings-as-content
     // ==================================================================
 
-    void BehavioralTests::Settings_FindFirstAndSelect_NoDuplicate()
+    void WorkspaceDSLTests::Settings_FindFirstAndSelect_NoDuplicate()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "term", "leafA")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "term", "leafA")
             .newTab("settings", "a", "leafA", SettingsSpec{}, "Settings");
         s.run();
         verifyClean(s);
@@ -402,7 +399,7 @@ namespace WorkspaceModelUnitTests
 
         // Now exercise the "select existing instead of duplicate" path:
         Script s2;
-        s2.newWorkspace("a", "alpha", termSpecSim(1), "term", "leafA")
+        s2.newWorkspace("a", "alpha", termSpecDsl(1), "term", "leafA")
             .newTab("settings", "a", "leafA", SettingsSpec{}, "Settings")
             // Imagine the UI handler. It queries; finds one; selectTab.
             .selectTab("settings");
@@ -426,17 +423,18 @@ namespace WorkspaceModelUnitTests
     // All five content variants
     // ==================================================================
 
-    void BehavioralTests::AllFiveContentVariants_MountContentOpEachKind()
+    void WorkspaceDSLTests::AllFiveContentVariants_ContentMountedChangeEachKind()
     {
         // The model accepts all 5 TabContent variants as first-class tab
-        // descriptions, but MountContent is registry-driven (Slice 7) and
-        // not emitted from pure mutator chains. The model-side proof that
-        // each variant works end-to-end is: newTab succeeds, the resulting
-        // state passes validate(), and the final state's tabs contain a
-        // TabRecord per variant kind. We assert on the state directly
-        // rather than on MountContent ops, which won't fire until cutover.
+        // descriptions, but ContentMounted is registry-driven and is not
+        // emitted from pure action chains alone (it fires only on a
+        // TabRecord.mount transition, which the ContentRegistry triggers).
+        // The model-side proof that each variant works end-to-end is:
+        // newTab succeeds, the resulting state passes validate(), and the
+        // final state's tabs contain a TabRecord per variant kind. We
+        // assert on the state directly.
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(7), "term", "leafA")
+        s.newWorkspace("a", "alpha", termSpecDsl(7), "term", "leafA")
             .newTab("settings", "a", "leafA", SettingsSpec{}, "Settings")
             .newTab("snippets", "a", "leafA", SnippetsSpec{}, "Snippets")
             .newTab("md", "a", "leafA",
@@ -479,38 +477,40 @@ namespace WorkspaceModelUnitTests
     }
 
     // ==================================================================
-    // Render-op assertions
+    // Change-stream assertions
     // ==================================================================
 
-    void BehavioralTests::NewWorkspace_EmitsAddAndCreateAndMount()
+    void WorkspaceDSLTests::NewWorkspace_EmitsWorkspaceAddedAndLeafCreatedAndTabAdded()
     {
         // The model never sets TabRecord.mount on creation - ContentId
-        // allocation is the future ContentRegistry's job (Slice 7). So the
-        // reconciler emits AddWorkspace + CreateLeafPane + AddTab on
-        // newWorkspace, but NOT MountContent. MountContent fires only on a
-        // mount-field transition, which the cutover layer triggers when it
-        // instantiates the live IPaneContent and assigns a ContentId.
+        // allocation is the ContentRegistry's job. So diff emits
+        // WorkspaceAdded + LeafPaneCreated + TabAdded on newWorkspace,
+        // but NOT ContentMounted. ContentMounted fires only on a
+        // mount-field transition, which the registry layer triggers
+        // when it instantiates the live IPaneContent and assigns a
+        // ContentId.
         Script s;
         s.snapshot()
-            .newWorkspace("a", "alpha", termSpecSim(1), "t0")
-            .expectRenderOpSinceLast(Script::isOp<AddWorkspace>(), "AddWorkspace")
-            .expectRenderOpSinceLast(Script::isOp<CreateLeafPane>(), "CreateLeafPane")
-            .expectRenderOpSinceLast(Script::isOp<AddTab>(), "AddTab");
+            .newWorkspace("a", "alpha", termSpecDsl(1), "t0")
+            .expectChangeSinceLast(Script::isChange<WorkspaceAdded>(), "WorkspaceAdded")
+            .expectChangeSinceLast(Script::isChange<LeafPaneCreated>(), "LeafPaneCreated")
+            .expectChangeSinceLast(Script::isChange<TabAdded>(), "TabAdded");
         s.run();
         verifyClean(s);
     }
 
-    void BehavioralTests::SplitPane_EmitsCreateSplitAndCreateLeafAndAddTab()
+    void WorkspaceDSLTests::SplitPane_EmitsSplitCreatedAndLeafCreatedAndTabAdded()
     {
-        // MountContent is registry-driven (Slice 7) and not emitted from
-        // pure mutator chains; see NewWorkspace_EmitsAddAndCreateAndMount.
+        // ContentMounted is registry-driven and not emitted from pure
+        // action chains; see
+        // NewWorkspace_EmitsWorkspaceAddedAndLeafCreatedAndTabAdded.
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
             .snapshot()
-            .splitPane("leafA", Axis::Vertical, 0.5, termSpecSim(2), "leafB", "tB")
-            .expectRenderOpSinceLast(Script::isOp<CreateSplitPane>(), "CreateSplitPane")
-            .expectRenderOpSinceLast(Script::isOp<CreateLeafPane>(), "CreateLeafPane (new)")
-            .expectRenderOpSinceLast(Script::isOp<AddTab>(), "AddTab (new tab in new leaf)");
+            .splitPane("leafA", Axis::Vertical, 0.5, termSpecDsl(2), "leafB", "tB")
+            .expectChangeSinceLast(Script::isChange<SplitPaneCreated>(), "SplitPaneCreated")
+            .expectChangeSinceLast(Script::isChange<LeafPaneCreated>(), "LeafPaneCreated (new)")
+            .expectChangeSinceLast(Script::isChange<TabAdded>(), "TabAdded (new tab in new leaf)");
         s.run();
         verifyClean(s);
     }
@@ -519,11 +519,11 @@ namespace WorkspaceModelUnitTests
     // Cascade rules
     // ==================================================================
 
-    void BehavioralTests::Cascade_CloseTab_LastTab_RemovesLeafAndCollapsesSplit()
+    void WorkspaceDSLTests::Cascade_CloseTab_LastTab_RemovesLeafAndCollapsesSplit()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
-            .splitPane("leafA", Axis::Vertical, 0.5, termSpecSim(2), "leafB", "tB")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
+            .splitPane("leafA", Axis::Vertical, 0.5, termSpecDsl(2), "leafB", "tB")
             // leafA has 1 tab. Close it → leaf disappears → split
             // collapses → leafB becomes workspace root.
             .closeTab("t0")
@@ -537,22 +537,22 @@ namespace WorkspaceModelUnitTests
         verifyClean(s);
     }
 
-    void BehavioralTests::Cascade_CloseWorkspace_LastOne_EmptyState()
+    void WorkspaceDSLTests::Cascade_CloseWorkspace_LastOne_EmptyState()
     {
         Script s;
-        s.newWorkspace("a", "alpha", termSpecSim(1), "t0", "leafA")
+        s.newWorkspace("a", "alpha", termSpecDsl(1), "t0", "leafA")
             .snapshot()
             .closeWorkspace("a")
             .expect([](const WorkspaceModelData& m) {
                 return m.workspaces.empty() && !m.activeWorkspaceId.has_value() && m.mru.empty();
             }, "empty state")
-            .expectRenderOpSinceLast(Script::isOp<RemoveWorkspace>(), "RemoveWorkspace")
-            .expectRenderOpSinceLast(
-                [](const RenderOp& op) {
-                    const auto* saw = std::get_if<SetActiveWorkspace>(&op);
+            .expectChangeSinceLast(Script::isChange<WorkspaceRemoved>(), "WorkspaceRemoved")
+            .expectChangeSinceLast(
+                [](const WorkspaceChange& change) {
+                    const auto* saw = std::get_if<ActiveWorkspaceChanged>(&change);
                     return saw && !saw->id.has_value();
                 },
-                "SetActiveWorkspace(nullopt)");
+                "ActiveWorkspaceChanged(nullopt)");
         s.run();
         verifyClean(s);
     }

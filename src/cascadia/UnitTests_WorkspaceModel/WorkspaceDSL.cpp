@@ -3,7 +3,7 @@
 
 #include "pch.h"
 
-#include "BehavioralSimulator.h"
+#include "WorkspaceDSL.h"
 
 #include <unordered_set>
 #include <utility>
@@ -64,13 +64,13 @@ namespace WorkspaceModelUnitTests
         return (it == _tabLabels.end()) ? TabId{} : it->second;
     }
 
-    void Script::runMutatorStep(std::function<void()> step)
+    void Script::runActionStep(std::function<void()> step)
     {
         _steps.push_back(std::move(step));
     }
 
     // ------------------------------------------------------------------
-    // Workspace mutators
+    // Workspace actions
     // ------------------------------------------------------------------
 
     Script& Script::newWorkspace(std::string label,
@@ -88,7 +88,7 @@ namespace WorkspaceModelUnitTests
                                  std::string firstTabLabel,
                                  std::string firstLeafLabel)
     {
-        runMutatorStep([this,
+        runActionStep([this,
                         label = std::move(label),
                         name = std::move(name),
                         initialTab = std::move(initialTab),
@@ -115,7 +115,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::closeWorkspace(std::string label)
     {
-        runMutatorStep([this, label = std::move(label)]() {
+        runActionStep([this, label = std::move(label)]() {
             _state = WorkspaceModel::closeWorkspace(_state, workspaceFor(label));
         });
         return *this;
@@ -123,7 +123,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::closeOtherWorkspaces(std::string keepLabel)
     {
-        runMutatorStep([this, keepLabel = std::move(keepLabel)]() {
+        runActionStep([this, keepLabel = std::move(keepLabel)]() {
             _state = WorkspaceModel::closeOtherWorkspaces(_state, workspaceFor(keepLabel));
         });
         return *this;
@@ -131,7 +131,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::closeAllWorkspaces()
     {
-        runMutatorStep([this]() {
+        runActionStep([this]() {
             _state = WorkspaceModel::closeAllWorkspaces(_state);
         });
         return *this;
@@ -139,7 +139,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::switchToWorkspace(std::string label)
     {
-        runMutatorStep([this, label = std::move(label)]() {
+        runActionStep([this, label = std::move(label)]() {
             _state = WorkspaceModel::switchToWorkspace(_state, workspaceFor(label));
         });
         return *this;
@@ -147,7 +147,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::renameWorkspace(std::string label, std::string name)
     {
-        runMutatorStep([this, label = std::move(label), name = std::move(name)]() {
+        runActionStep([this, label = std::move(label), name = std::move(name)]() {
             _state = WorkspaceModel::renameWorkspace(_state, workspaceFor(label), name);
         });
         return *this;
@@ -155,7 +155,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::setWorkspaceColor(std::string label, std::optional<Color> color)
     {
-        runMutatorStep([this, label = std::move(label), color]() {
+        runActionStep([this, label = std::move(label), color]() {
             _state = WorkspaceModel::setWorkspaceColor(_state, workspaceFor(label), color);
         });
         return *this;
@@ -163,7 +163,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::setWorkspaceDescription(std::string label, std::string description)
     {
-        runMutatorStep([this, label = std::move(label), description = std::move(description)]() {
+        runActionStep([this, label = std::move(label), description = std::move(description)]() {
             _state = WorkspaceModel::setWorkspaceDescription(_state, workspaceFor(label), description);
         });
         return *this;
@@ -171,7 +171,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::setWorkspacePinned(std::string label, bool pinned)
     {
-        runMutatorStep([this, label = std::move(label), pinned]() {
+        runActionStep([this, label = std::move(label), pinned]() {
             _state = WorkspaceModel::setWorkspacePinned(_state, workspaceFor(label), pinned);
         });
         return *this;
@@ -179,14 +179,14 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::reorderWorkspace(std::string label, std::size_t dstIdx)
     {
-        runMutatorStep([this, label = std::move(label), dstIdx]() {
+        runActionStep([this, label = std::move(label), dstIdx]() {
             _state = WorkspaceModel::reorderWorkspace(_state, workspaceFor(label), dstIdx);
         });
         return *this;
     }
 
     // ------------------------------------------------------------------
-    // Tab mutators
+    // Tab actions
     // ------------------------------------------------------------------
 
     Script& Script::newTab(std::string newTabLabel,
@@ -197,7 +197,7 @@ namespace WorkspaceModelUnitTests
                            std::optional<Color> color,
                            bool pinned)
     {
-        runMutatorStep([this,
+        runActionStep([this,
                         newTabLabel = std::move(newTabLabel),
                         workspaceLabel = std::move(workspaceLabel),
                         leafLabel = std::move(leafLabel),
@@ -222,56 +222,56 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::closeTab(std::string tabLabel)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel)]() {
+        runActionStep([this, tabLabel = std::move(tabLabel)]() {
             _state = WorkspaceModel::closeTab(_state, tabFor(tabLabel));
         });
         return *this;
     }
     Script& Script::closeTabsRight(std::string tabLabel)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel)]() {
+        runActionStep([this, tabLabel = std::move(tabLabel)]() {
             _state = WorkspaceModel::closeTabsRight(_state, tabFor(tabLabel));
         });
         return *this;
     }
     Script& Script::closeOtherTabs(std::string tabLabel)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel)]() {
+        runActionStep([this, tabLabel = std::move(tabLabel)]() {
             _state = WorkspaceModel::closeOtherTabs(_state, tabFor(tabLabel));
         });
         return *this;
     }
     Script& Script::selectTab(std::string tabLabel)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel)]() {
+        runActionStep([this, tabLabel = std::move(tabLabel)]() {
             _state = WorkspaceModel::selectTab(_state, tabFor(tabLabel));
         });
         return *this;
     }
     Script& Script::setTabTitle(std::string tabLabel, std::string title)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel), title = std::move(title)]() {
+        runActionStep([this, tabLabel = std::move(tabLabel), title = std::move(title)]() {
             _state = WorkspaceModel::setTabTitle(_state, tabFor(tabLabel), title);
         });
         return *this;
     }
     Script& Script::setTabColor(std::string tabLabel, std::optional<Color> color)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel), color]() {
+        runActionStep([this, tabLabel = std::move(tabLabel), color]() {
             _state = WorkspaceModel::setTabColor(_state, tabFor(tabLabel), color);
         });
         return *this;
     }
     Script& Script::setTabPinned(std::string tabLabel, bool pinned)
     {
-        runMutatorStep([this, tabLabel = std::move(tabLabel), pinned]() {
+        runActionStep([this, tabLabel = std::move(tabLabel), pinned]() {
             _state = WorkspaceModel::setTabPinned(_state, tabFor(tabLabel), pinned);
         });
         return *this;
     }
 
     // ------------------------------------------------------------------
-    // Pane mutators
+    // Pane actions
     // ------------------------------------------------------------------
 
     Script& Script::splitPane(std::string leafLabel,
@@ -281,7 +281,7 @@ namespace WorkspaceModelUnitTests
                               std::string newLeafLabel,
                               std::string newTabLabel)
     {
-        runMutatorStep([this,
+        runActionStep([this,
                         leafLabel = std::move(leafLabel),
                         axis,
                         ratio,
@@ -306,14 +306,14 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::closePane(std::string leafLabel)
     {
-        runMutatorStep([this, leafLabel = std::move(leafLabel)]() {
+        runActionStep([this, leafLabel = std::move(leafLabel)]() {
             _state = WorkspaceModel::closePane(_state, leafFor(leafLabel));
         });
         return *this;
     }
     Script& Script::resizePane(std::string splitLabel, double ratio)
     {
-        runMutatorStep([this, splitLabel = std::move(splitLabel), ratio]() {
+        runActionStep([this, splitLabel = std::move(splitLabel), ratio]() {
             // splitLabel may be looked up in either pane label map; we
             // store split ids in _paneLabels under their assigned name.
             _state = WorkspaceModel::resizePane(_state, leafFor(splitLabel), ratio);
@@ -322,19 +322,19 @@ namespace WorkspaceModelUnitTests
     }
     Script& Script::focusPane(std::string leafLabel)
     {
-        runMutatorStep([this, leafLabel = std::move(leafLabel)]() {
+        runActionStep([this, leafLabel = std::move(leafLabel)]() {
             _state = WorkspaceModel::focusPane(_state, leafFor(leafLabel));
         });
         return *this;
     }
 
     // ------------------------------------------------------------------
-    // Move mutators
+    // Move actions
     // ------------------------------------------------------------------
 
     Script& Script::moveTab(std::string tabLabel, std::string dstLeafLabel, std::size_t dstIdx)
     {
-        runMutatorStep([this,
+        runActionStep([this,
                         tabLabel = std::move(tabLabel),
                         dstLeafLabel = std::move(dstLeafLabel),
                         dstIdx]() {
@@ -348,7 +348,7 @@ namespace WorkspaceModelUnitTests
                                    Edge edge,
                                    std::string newLeafLabel)
     {
-        runMutatorStep([this,
+        runActionStep([this,
                         tabLabel = std::move(tabLabel),
                         dstLeafLabel = std::move(dstLeafLabel),
                         edge,
@@ -388,7 +388,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::setSidebarWidth(double width)
     {
-        runMutatorStep([this, width]() {
+        runActionStep([this, width]() {
             _state = WorkspaceModel::setSidebarWidth(_state, width);
         });
         return *this;
@@ -401,8 +401,8 @@ namespace WorkspaceModelUnitTests
     Script& Script::snapshot()
     {
         // Snapshot is recorded as a step so it interleaves correctly
-        // with the mutator sequence at run() time.
-        runMutatorStep([this]() {
+        // with the action sequence at run() time.
+        runActionStep([this]() {
             _snapshotState = _state;
         });
         return *this;
@@ -411,7 +411,7 @@ namespace WorkspaceModelUnitTests
     Script& Script::expect(std::function<bool(const WorkspaceModelData&)> predicate,
                            std::string msg)
     {
-        runMutatorStep([this, predicate = std::move(predicate), msg = std::move(msg)]() {
+        runActionStep([this, predicate = std::move(predicate), msg = std::move(msg)]() {
             if (!_state || !predicate(*_state))
             {
                 _failures.push_back("expect() failed: " + msg);
@@ -422,7 +422,7 @@ namespace WorkspaceModelUnitTests
 
     Script& Script::expectNoViolation()
     {
-        runMutatorStep([this]() {
+        runActionStep([this]() {
             if (_state)
             {
                 const auto v = validate(*_state);
@@ -436,23 +436,23 @@ namespace WorkspaceModelUnitTests
         return *this;
     }
 
-    Script& Script::expectRenderOpsSinceLast(
-        std::vector<std::function<bool(const RenderOp&)>> predicates)
+    Script& Script::expectChangesSinceLast(
+        std::vector<std::function<bool(const WorkspaceChange&)>> predicates)
     {
-        runMutatorStep([this, predicates = std::move(predicates)]() {
-            const auto ops = reconcile(_snapshotState, _state);
-            if (ops.size() != predicates.size())
+        runActionStep([this, predicates = std::move(predicates)]() {
+            const auto changes = diff(_snapshotState, _state);
+            if (changes.size() != predicates.size())
             {
-                _failures.push_back("expectRenderOpsSinceLast: size mismatch (expected " +
+                _failures.push_back("expectChangesSinceLast: size mismatch (expected " +
                                     std::to_string(predicates.size()) + ", got " +
-                                    std::to_string(ops.size()) + ")");
+                                    std::to_string(changes.size()) + ")");
                 return;
             }
-            for (std::size_t i = 0; i < ops.size(); ++i)
+            for (std::size_t i = 0; i < changes.size(); ++i)
             {
-                if (!predicates[i](ops[i]))
+                if (!predicates[i](changes[i]))
                 {
-                    _failures.push_back("expectRenderOpsSinceLast: predicate " +
+                    _failures.push_back("expectChangesSinceLast: predicate " +
                                         std::to_string(i) + " failed");
                 }
             }
@@ -460,19 +460,19 @@ namespace WorkspaceModelUnitTests
         return *this;
     }
 
-    Script& Script::expectRenderOpSinceLast(
-        std::function<bool(const RenderOp&)> predicate, std::string msg)
+    Script& Script::expectChangeSinceLast(
+        std::function<bool(const WorkspaceChange&)> predicate, std::string msg)
     {
-        runMutatorStep([this, predicate = std::move(predicate), msg = std::move(msg)]() {
-            const auto ops = reconcile(_snapshotState, _state);
-            for (const auto& op : ops)
+        runActionStep([this, predicate = std::move(predicate), msg = std::move(msg)]() {
+            const auto changes = diff(_snapshotState, _state);
+            for (const auto& change : changes)
             {
-                if (predicate(op))
+                if (predicate(change))
                 {
                     return;
                 }
             }
-            _failures.push_back("expectRenderOpSinceLast: no matching op (" + msg + ")");
+            _failures.push_back("expectChangeSinceLast: no matching change (" + msg + ")");
         });
         return *this;
     }
@@ -495,7 +495,7 @@ namespace WorkspaceModelUnitTests
                 if (const auto v = validate(*_state); v.has_value())
                 {
                     _violation = v;
-                    _failures.push_back("validator violation after mutator step");
+                    _failures.push_back("validator violation after action step");
                 }
             }
         }

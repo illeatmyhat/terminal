@@ -1,14 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Replay engine tests. Because replay calls the existing mutators -- which
+// Replay engine tests. Because replay calls the existing actions -- which
 // allocate fresh IDs -- the raw ID values in the replayed model generally
 // differ from the IDs in the model that produced the log. To assert
 // equivalence, we use a structural-equality helper that compares
 // everything except the IDs: workspace names, descriptions, colors,
 // pinned flags, tab contents, tab titles, pane axes/ratios, active-by-
-// position, and so on. This is the "structural equality" property the
-// Slice 4 plan calls out.
+// position, and so on.
 
 #include "pch.h"
 
@@ -145,7 +144,7 @@ namespace WorkspaceModelUnitTests
 
     void ReplayTests::SingleNewWorkspace_ReproducesShape()
     {
-        // Build "expected" via direct mutator chain.
+        // Build "expected" via direct action chain.
         auto expected = newWorkspace(emptyModel(), "alpha", termSpec(1)).state;
 
         // Build a log that does the same.
@@ -197,7 +196,7 @@ namespace WorkspaceModelUnitTests
     void ReplayTests::BadReferences_HaltReplaySafe()
     {
         // closeTab against a tab id that doesn't exist is a no-op in the
-        // mutator, so the resulting state is still valid. replaySafe
+        // action, so the resulting state is still valid. replaySafe
         // therefore should NOT halt -- it only halts on validator
         // failure or thrown exceptions. Verify the safe wrapper returns
         // a complete run with no error.

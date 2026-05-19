@@ -20,7 +20,7 @@
 #pragma once
 
 #include "../WorkspaceModel/ActionLog.h"
-#include "../WorkspaceModel/Mutators.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
 #include "../WorkspaceModel/Replay.h"
 #include "../WorkspaceModel/Serializer.h"
 #include "../WorkspaceModel/Validator.h"
@@ -66,7 +66,7 @@ namespace WorkspaceModelUnitTests
     public:
         explicit WorkspaceFuzzer(std::uint64_t seed) noexcept;
 
-        // Run a fixed number of mutator steps. Returns when steps are
+        // Run a fixed number of action steps. Returns when steps are
         // exhausted or a validate() violation is hit (whichever first).
         FuzzerOutcome runSteps(WorkspaceModel::ModelState start, std::size_t numSteps);
 

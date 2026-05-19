@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tests for moveTab and moveTabAsSplit, including the identity-preservation
-// and cross-workspace cases explicitly called out in issue #11.
+// Tests for moveTab and moveTabAsSplit, including the
+// identity-preservation and cross-workspace cases that the
+// reparent-survives-live-content contract depends on.
 
 #include "pch.h"
 
@@ -16,9 +17,9 @@ using namespace WorkspaceModelUnitTests;
 
 namespace WorkspaceModelUnitTests
 {
-    class MoveMutatorTests
+    class MoveActionTests
     {
-        TEST_CLASS(MoveMutatorTests);
+        TEST_CLASS(MoveActionTests);
 
         TEST_METHOD(MoveTab_WithinSameLeaf_Reorders);
         TEST_METHOD(MoveTab_AcrossLeafs_PreservesTabId);
@@ -36,7 +37,7 @@ namespace WorkspaceModelUnitTests
     };
 
     // -----------------------------------------------------------------
-    void MoveMutatorTests::MoveTab_WithinSameLeaf_Reorders()
+    void MoveActionTests::MoveTab_WithinSameLeaf_Reorders()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -51,7 +52,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[2].id == a.id);
     }
 
-    void MoveMutatorTests::MoveTab_AcrossLeafs_PreservesTabId()
+    void MoveActionTests::MoveTab_AcrossLeafs_PreservesTabId()
     {
         auto f = makeSingleWorkspace();
         auto sp = splitPane(f.state, f.leafId, Axis::Vertical, 0.5, termSpec(2));
@@ -76,7 +77,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs[0].id == srcTabId);
     }
 
-    void MoveMutatorTests::MoveTab_CrossWorkspace_PreservesTabIdAndMoves()
+    void MoveActionTests::MoveTab_CrossWorkspace_PreservesTabIdAndMoves()
     {
         auto a = newWorkspace(emptyModel(), "a", termSpec(1));
         auto b = newWorkspace(a.state, "b", termSpec(2));
@@ -115,7 +116,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(foundInB);
     }
 
-    void MoveMutatorTests::MoveTab_CascadesEmptySource()
+    void MoveActionTests::MoveTab_CascadesEmptySource()
     {
         // Two workspaces, each with a single-tab leaf. Move workspace a's
         // tab into workspace b — workspace a should disappear entirely
@@ -130,7 +131,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->workspaces[0].id == b.id);
     }
 
-    void MoveMutatorTests::MoveTab_ClampsDstIdx()
+    void MoveActionTests::MoveTab_ClampsDstIdx()
     {
         auto f = makeSingleWorkspace();
         auto a = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -142,14 +143,14 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(leaf.tabs.back().id == f.tabId);
     }
 
-    void MoveMutatorTests::MoveTab_UnknownTab_NoChange()
+    void MoveActionTests::MoveTab_UnknownTab_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = moveTab(f.state, TabId{ 9999 }, f.leafId, 0);
         VERIFY_IS_FALSE(validate(*next).has_value());
     }
 
-    void MoveMutatorTests::MoveTab_UnknownDst_NoChange()
+    void MoveActionTests::MoveTab_UnknownDst_NoChange()
     {
         auto f = makeSingleWorkspace();
         auto next = moveTab(f.state, f.tabId, PaneId{ 9999 }, 0);
@@ -157,7 +158,7 @@ namespace WorkspaceModelUnitTests
     }
 
     // -----------------------------------------------------------------
-    void MoveMutatorTests::MoveTabAsSplit_WrapsDestinationLeaf()
+    void MoveActionTests::MoveTabAsSplit_WrapsDestinationLeaf()
     {
         auto f = makeSingleWorkspace();
         // Add a tab so the source leaf can give one up without cascading
@@ -177,7 +178,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->parentOf(dstLeafId) != nullptr);
     }
 
-    void MoveMutatorTests::MoveTabAsSplit_PreservesDstPaneIdAndTabId()
+    void MoveActionTests::MoveTabAsSplit_PreservesDstPaneIdAndTabId()
     {
         auto f = makeSingleWorkspace();
         auto extra = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -194,7 +195,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->tab(srcTabId) != nullptr);
     }
 
-    void MoveMutatorTests::MoveTabAsSplit_CascadesEmptySource()
+    void MoveActionTests::MoveTabAsSplit_CascadesEmptySource()
     {
         // Workspace a has one tab. Workspace b has one tab. Move a's
         // single tab into b as a split. Source workspace a disappears.
@@ -212,7 +213,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(next->tab(aTabId) != nullptr);
     }
 
-    void MoveMutatorTests::MoveTabAsSplit_PlacesNewLeafByEdge()
+    void MoveActionTests::MoveTabAsSplit_PlacesNewLeafByEdge()
     {
         auto f = makeSingleWorkspace();
         auto extra = newTab(f.state, f.wsId, f.leafId, termSpec(2));
@@ -233,7 +234,7 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(std::get<LeafPane>(*parent->right).id == dstLeafId);
     }
 
-    void MoveMutatorTests::MoveTabAsSplit_SameLeaf_NoOp()
+    void MoveActionTests::MoveTabAsSplit_SameLeaf_NoOp()
     {
         auto f = makeSingleWorkspace();
         auto next = moveTabAsSplit(f.state, f.tabId, f.leafId, Edge::Right);

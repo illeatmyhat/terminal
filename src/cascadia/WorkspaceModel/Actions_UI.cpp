@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// UI prefs mutator: setSidebarWidth.
+// UI prefs action: setSidebarWidth.
 
 #include "pch.h"
 
-#include "MutatorHelpers.h"
-#include "Mutators.h"
+#include "WorkspaceActionHelpers.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {

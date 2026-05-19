@@ -28,8 +28,9 @@
 
 namespace WorkspaceModel
 {
-    // The on-disk schema version. Bump when the persisted shape changes in a
-    // way that's not backwards-compatible. Slice 4 introduces version 1.
+    // The on-disk schema version. Bump when the persisted shape changes in
+    // a way that's not backwards-compatible. The current shape is
+    // version 1.
     inline constexpr int kSchemaVersion = 1;
 
     // Thrown by fromJson() when the input JSON does not match the expected

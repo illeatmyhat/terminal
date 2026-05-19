@@ -17,25 +17,25 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="TestHelpers.h" />
-    <ClInclude Include="MockRenderSurface.h" />
-    <ClInclude Include="BehavioralSimulator.h" />
+    <ClInclude Include="MockWorkspaceView.h" />
+    <ClInclude Include="WorkspaceDSL.h" />
     <ClInclude Include="Fuzzer.h" />
   </ItemGroup>
 
   <!-- ========================= Cpp Files ======================== -->
   <ItemGroup>
     <ClCompile Include="ValidatorTests.cpp" />
-    <ClCompile Include="WorkspaceMutatorTests.cpp" />
-    <ClCompile Include="TabMutatorTests.cpp" />
-    <ClCompile Include="PaneMutatorTests.cpp" />
-    <ClCompile Include="MoveMutatorTests.cpp" />
+    <ClCompile Include="WorkspaceActionTests.cpp" />
+    <ClCompile Include="TabActionTests.cpp" />
+    <ClCompile Include="PaneActionTests.cpp" />
+    <ClCompile Include="MoveActionTests.cpp" />
     <ClCompile Include="QueryTests.cpp" />
-    <ClCompile Include="ReconcilerTests.cpp" />
+    <ClCompile Include="DiffTests.cpp" />
     <ClCompile Include="SerializerTests.cpp" />
     <ClCompile Include="WALTests.cpp" />
     <ClCompile Include="ReplayTests.cpp" />
-    <ClCompile Include="BehavioralSimulator.cpp" />
-    <ClCompile Include="BehavioralTests.cpp" />
+    <ClCompile Include="WorkspaceDSL.cpp" />
+    <ClCompile Include="WorkspaceDSLTests.cpp" />
     <ClCompile Include="Fuzzer.cpp" />
     <ClCompile Include="FuzzerTests.cpp" />
     <ClCompile Include="pch.cpp">
@@ -50,7 +50,7 @@
     </ProjectReference>
   </ItemGroup>
 
-  <!-- ========================= Regression files (Slice 5) ======================== -->
+  <!-- ========================= Fuzzer regression files ======================== -->
   <!--
     Checked-in fuzzer regression samples live alongside this vcxproj under
     regressions\*.json. FuzzerTests::Fuzzer_Regressions_ReplayClean walks

@@ -2,7 +2,7 @@
 // Licensed under the MIT license.
 //
 // Persistable description of what a tab "is", independent of any live
-// IPaneContent instance. The reconciler / content registry uses this to
+// IPaneContent instance. The view / content registry uses this to
 // materialise a live content object when the tab is mounted.
 //
 // Pure C++: no winrt::guid (we use a 16-byte array), no winrt::hstring,
@@ -36,7 +36,7 @@ namespace WorkspaceModel
                                              const SettingsSpec&) noexcept = default;
     };
 
-    // The Snippets browser. No per-tab parameters in this slice.
+    // The Snippets browser. No per-tab parameters.
     struct SnippetsSpec
     {
         [[nodiscard]] friend bool operator==(const SnippetsSpec&,

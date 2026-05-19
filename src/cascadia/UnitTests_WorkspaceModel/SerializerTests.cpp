@@ -195,7 +195,7 @@ namespace WorkspaceModelUnitTests
     {
         // Mount is runtime-only; even when set, it serializes as JSON null.
         auto f = makeSingleWorkspace();
-        // Pollute mount in a copy. This is contrived because mutators
+        // Pollute mount in a copy. This is contrived because actions
         // never set mount, but defense-in-depth.
         auto patched = std::make_shared<WorkspaceModelData>(*f.state);
         auto& leaf = std::get<LeafPane>(patched->workspaces[0].root);

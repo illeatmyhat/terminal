@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// Tab mutators: newTab, closeTab, closeTabsRight, closeOtherTabs,
+// Tab actions: newTab, closeTab, closeTabsRight, closeOtherTabs,
 // selectTab, setTabTitle, setTabColor, setTabPinned.
 //
 // closeTab is the centrepiece of the cascade-rule logic. Every other
-// "close-style" mutator (closePane, moveTab's source side, closeTabsRight,
+// "close-style" action (closePane, moveTab's source side, closeTabsRight,
 // closeOtherTabs) collapses to a leaf-rewrite of the same shape:
 //
 //   1. Find the leaf containing the tab.
@@ -18,8 +18,8 @@
 
 #include "pch.h"
 
-#include "MutatorHelpers.h"
-#include "Mutators.h"
+#include "WorkspaceActionHelpers.h"
+#include "WorkspaceActions.h"
 
 namespace WorkspaceModel
 {
