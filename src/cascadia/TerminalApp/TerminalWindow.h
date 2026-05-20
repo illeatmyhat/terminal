@@ -182,6 +182,14 @@ namespace winrt::TerminalApp::implementation
         std::optional<uint32_t> _loadFromPersistedLayoutIdx{};
         std::optional<winrt::Microsoft::Terminal::Settings::Model::WindowLayout> _cachedLayout{ std::nullopt };
 
+        // Launch-time override for experimental.workspaces.enabled, set
+        // from the `--workspaces` commandline flag. nullopt == no
+        // override. Applied onto _settings.GlobalSettings() so the page's
+        // _workspacesFlagEnabled() reads the overridden value. Re-applied
+        // on settings reload so the override survives Edit-settings.
+        std::optional<bool> _workspacesOverride{ std::nullopt };
+        void _applyWorkspacesOverride();
+
         Microsoft::Terminal::Settings::Model::CascadiaSettings _settings{ nullptr };
         TerminalApp::SettingsLoadEventArgs _initialLoadResult{ nullptr };
 

@@ -200,6 +200,22 @@ void AppCommandlineArgs::_buildParser()
                     _loadPersistedLayoutIdx,
                     RS_A(L"CmdSavedLayoutArgDesc"));
 
+    // --workspaces [true|false]: launch-time override for the
+    // experimental.workspaces.enabled global setting, without editing
+    // settings.json. Declared as a CLI11 flag bound to a bool, which
+    // gives us the desired optional-value semantics:
+    //   * bare `--workspaces`        -> true  (flag default)
+    //   * `--workspaces=false` / =0  -> false
+    //   * `--workspaces=true` / =1   -> true  (also yes/no, on/off)
+    //   * absent                     -> the option's count() is 0, so
+    //                                    GetWorkspacesOverride() reports
+    //                                    nullopt and the setting wins.
+    // We stash the Option* so the getter can distinguish "absent" from
+    // an explicit value (the bound bool alone can't tell those apart).
+    _workspacesOption = _app.add_flag("--workspaces",
+                                      _workspacesEnabledFlag,
+                                      RS_A(L"CmdWorkspacesDesc"));
+
     // Subcommands
     _buildNewTabParser();
     _buildSplitPaneParser();
@@ -1033,6 +1049,18 @@ std::optional<uint32_t> AppCommandlineArgs::GetPersistedLayoutIdx() const noexce
                std::nullopt;
 }
 
+// - Returns the launch-time override for experimental.workspaces.enabled
+//   requested via `--workspaces`. nullopt means the flag was not present,
+//   so the value from settings.json should be used unchanged.
+std::optional<bool> AppCommandlineArgs::GetWorkspacesOverride() const noexcept
+{
+    if (_workspacesOption != nullptr && _workspacesOption->count() > 0)
+    {
+        return _workspacesEnabledFlag;
+    }
+    return std::nullopt;
+}
+
 std::optional<winrt::Microsoft::Terminal::Settings::Model::LaunchMode> AppCommandlineArgs::GetLaunchMode() const noexcept
 {
     return _launchMode;
@@ -1183,6 +1211,15 @@ void AppCommandlineArgs::FullResetState()
     _shouldExitEarly = false;
 
     _windowTarget = {};
+
+    // Clear the --workspaces override. The bound bool is only meaningful
+    // when the option's count() > 0 (see GetWorkspacesOverride), and
+    // CLI11's parse() resets that count, but reset both for clarity.
+    _workspacesEnabledFlag = false;
+    if (_workspacesOption != nullptr)
+    {
+        _workspacesOption->clear();
+    }
 }
 
 std::string_view AppCommandlineArgs::GetTargetWindow() const noexcept

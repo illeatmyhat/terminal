@@ -149,6 +149,12 @@ namespace winrt::TerminalApp::implementation
     // - Implements the IInitializeWithWindow interface from shobjidl_core.
     HRESULT TerminalWindow::Initialize(HWND hwnd)
     {
+        // Re-apply the --workspaces override here too: this runs before the
+        // page's Create() first reads experimental.workspaces.enabled, and
+        // guards against _settings having been reassigned since
+        // SetStartupCommandline (e.g. an early settings reload).
+        _applyWorkspacesOverride();
+
         // Now that we know we can do XAML, build our page.
         _root = winrt::make_self<TerminalPage>(*_WindowProperties, _manager);
 
@@ -801,9 +807,26 @@ namespace winrt::TerminalApp::implementation
 
     // This may be called on a background thread, or the main thread, but almost
     // definitely not on OUR UI thread.
+    // Apply the launch-time --workspaces override onto the current
+    // settings, if one was provided. This forces
+    // experimental.workspaces.enabled to the requested value for this
+    // launch without touching settings.json. Idempotent and safe to call
+    // whenever _settings is (re)assigned.
+    void TerminalWindow::_applyWorkspacesOverride()
+    {
+        if (_workspacesOverride.has_value() && _settings != nullptr)
+        {
+            _settings.GlobalSettings().WorkspacesEnabled(_workspacesOverride.value());
+        }
+    }
+
     void TerminalWindow::UpdateSettings(winrt::TerminalApp::SettingsLoadEventArgs args)
     {
         _settings = args.NewSettings();
+
+        // Re-apply the --workspaces override after a settings reload so the
+        // launch-time flag continues to win over settings.json.
+        _applyWorkspacesOverride();
 
         // Update the settings in TerminalPage
         // We're on our UI thread right now, so this is safe
@@ -1090,6 +1113,14 @@ namespace winrt::TerminalApp::implementation
         {
             SetPersistedLayoutIdx(idx.value());
         }
+
+        // Capture the --workspaces launch-time override (if any) so we can
+        // apply it onto the loaded settings before the page first reads
+        // experimental.workspaces.enabled. Stored here because _appArgs is
+        // cleared/replaced over the window's lifetime, but the override
+        // must persist across settings reloads.
+        _workspacesOverride = parsedArgs.GetWorkspacesOverride();
+        _applyWorkspacesOverride();
 
         return _appArgs->ExitCode();
     }

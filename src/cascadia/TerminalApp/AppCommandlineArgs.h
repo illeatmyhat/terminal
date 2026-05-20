@@ -39,6 +39,7 @@ public:
     bool ShouldExitEarly() const noexcept;
 
     std::optional<uint32_t> GetPersistedLayoutIdx() const noexcept;
+    std::optional<bool> GetWorkspacesOverride() const noexcept;
     std::optional<winrt::Microsoft::Terminal::Settings::Model::LaunchMode> GetLaunchMode() const noexcept;
     std::optional<winrt::Microsoft::Terminal::Settings::Model::LaunchPosition> GetPosition() const noexcept;
     std::optional<til::size> GetSize() const noexcept;
@@ -128,6 +129,13 @@ private:
     // Are you adding more args here? Make sure to reset them in _resetStateToDefault
 
     const Commandline* _currentCommandline{ nullptr };
+    // --workspaces [true|false]: launch-time override for the
+    // experimental.workspaces.enabled global setting. The bound bool
+    // holds the parsed value (defaulting to true for the bare flag);
+    // _workspacesOption lets GetWorkspacesOverride() tell "flag absent"
+    // (count() == 0 -> nullopt) from an explicit true/false.
+    bool _workspacesEnabledFlag{ false };
+    CLI::Option* _workspacesOption{ nullptr };
     std::optional<winrt::Microsoft::Terminal::Settings::Model::LaunchMode> _launchMode{ std::nullopt };
     std::optional<winrt::Microsoft::Terminal::Settings::Model::LaunchPosition> _position{ std::nullopt };
     std::optional<til::size> _size{ std::nullopt };

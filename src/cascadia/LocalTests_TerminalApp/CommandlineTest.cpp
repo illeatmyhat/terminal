@@ -70,6 +70,7 @@ namespace TerminalAppLocalTests
         TEST_METHOD(TestInvalidExecuteCommandlineAction);
         TEST_METHOD(TestLaunchMode);
         TEST_METHOD(TestLaunchModeWithNoCommand);
+        TEST_METHOD(TestWorkspacesOverride);
 
         TEST_METHOD(TestMultipleSplitPaneSizes);
 
@@ -1752,6 +1753,77 @@ namespace TerminalAppLocalTests
 
             VERIFY_IS_TRUE(appArgs.GetLaunchMode().has_value());
             VERIFY_ARE_EQUAL(appArgs.GetLaunchMode().value(), LaunchMode::MaximizedFocusMode);
+        }
+    }
+
+    void CommandlineTest::TestWorkspacesOverride()
+    {
+        // Absent: no override, so the settings.json value wins.
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_FALSE(appArgs.GetWorkspacesOverride().has_value(),
+                            L"no --workspaces flag -> no override");
+        }
+        // Bare --workspaces -> implicit true.
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value(),
+                           L"bare --workspaces -> override present");
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().value(),
+                           L"bare --workspaces -> true");
+        }
+        // Explicit --workspaces=true.
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces=true" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value());
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().value());
+        }
+        // Explicit --workspaces=false forces the feature off.
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces=false" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value(),
+                           L"--workspaces=false is still an explicit override");
+            VERIFY_IS_FALSE(appArgs.GetWorkspacesOverride().value(),
+                            L"--workspaces=false -> false");
+        }
+        // 1/0 forms also accepted (CLI11 bool conversion).
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces=1" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value());
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().value());
+        }
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces=0" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value());
+            VERIFY_IS_FALSE(appArgs.GetWorkspacesOverride().value());
+        }
+        // The override is a global option: it survives even when an
+        // explicit subcommand follows it (mirrors -F new-tab).
+        {
+            AppCommandlineArgs appArgs{};
+            std::vector<const wchar_t*> rawCommands{ L"wt.exe", L"--workspaces", L"new-tab" };
+            _buildCommandlinesHelper(appArgs, 1u, rawCommands);
+
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().has_value());
+            VERIFY_IS_TRUE(appArgs.GetWorkspacesOverride().value());
         }
     }
 
