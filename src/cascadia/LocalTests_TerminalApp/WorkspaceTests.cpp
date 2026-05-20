@@ -48,6 +48,10 @@ namespace TerminalAppLocalTests
         TEST_METHOD(NewTab_FlagOn_AppendsTab);
         TEST_METHOD(NewTab_FlagOff_AppendsTabWithoutModel);
 
+        // #43: the keybinding-less _HandleNewTab(sender, nullptr) branch.
+        TEST_METHOD(NewTab_FlagOn_NullArgs_AppendsTabThroughModel);
+        TEST_METHOD(NewTab_FlagOff_NullArgs_AppendsTabWithoutModel);
+
         TEST_METHOD(SwitchToTab_FlagOn_ChangesActiveWorkspace);
         TEST_METHOD(SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel);
 
@@ -416,6 +420,100 @@ namespace TerminalAppLocalTests
                            L"flag-off new-tab must NOT populate the model state");
             VERIFY_IS_TRUE(page->_workspaceView == nullptr,
                            L"flag-off new-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #43: a keybinding-less / menu invocation reaches _HandleNewTab
+    // with a null ActionEventArgs (args == nullptr). Flag-on it must
+    // still route through the model — newWorkspace + apply — and land
+    // a second classic tab, exactly like the args-carrying default
+    // new-tab.
+    void WorkspaceTests::NewTab_FlagOn_NullArgs_AppendsTabThroughModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire _HandleNewTab with a null ActionEventArgs (keybinding-less path)");
+        result = RunOnUIThread([&page]() {
+            page->_HandleNewTab(nullptr, ActionEventArgs{ nullptr });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-on null-args new-tab should append a classic tab");
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on null-args new-tab should create a second workspace");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #43 flag-off mirror: the null-args branch must stay on the
+    // classic path and leave the workspace machinery dormant.
+    void WorkspaceTests::NewTab_FlagOff_NullArgs_AppendsTabWithoutModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off startup must NOT populate the model state");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire _HandleNewTab with a null ActionEventArgs (keybinding-less path)");
+        result = RunOnUIThread([&page]() {
+            page->_HandleNewTab(nullptr, ActionEventArgs{ nullptr });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-off null-args new-tab should append a classic tab");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off null-args new-tab must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off null-args new-tab must NOT instantiate WorkspaceView");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -11,6 +11,7 @@
 #include "../WinRTUtils/inc/WtExeUtils.h"
 #include "../../types/inc/utils.hpp"
 #include "../TerminalSettingsAppAdapterLib/TerminalSettings.h"
+#include "../WorkspaceModel/WorkspaceActions.h"
 #include "Utils.h"
 
 using namespace winrt::Windows::ApplicationModel::DataTransfer;
@@ -601,7 +602,10 @@ namespace winrt::TerminalApp::implementation
             {
                 LOG_IF_FAILED(_OpenNewTab(nullptr));
             }
-            args.Handled(true);
+            // No ActionEventArgs to mark handled on this keybinding-less
+            // path — calling args.Handled() here would deref a null
+            // projected reference.
+            return;
         }
         else if (const auto& realArgs = args.ActionArgs().try_as<NewTabArgs>())
         {
