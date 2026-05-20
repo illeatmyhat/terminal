@@ -103,27 +103,70 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& c)
     {
-        // Phase 1: each workspace has exactly one leaf, created
-        // implicitly by WorkspaceActions::newWorkspace. The classic
-        // window-level tab that backs the workspace already represents
-        // this leaf, so no extra XAML mutation is needed here.
+        // Phase 1 split topology: a non-root leaf appearing in an
+        // existing workspace means the user just split the workspace's
+        // focused pane. The classic representation is "add a sibling
+        // Pane inside the window-tab that backs the workspace".
+        //
+        // The split's axis and ratio come from the parent SplitPane node;
+        // the new sibling always lives on the right/bottom (matching
+        // WorkspaceActions::splitPane semantics).
+        //
+        // A leaf that has no parent is either the workspace's root (the
+        // implicit leaf created by newWorkspace; the classic tab is
+        // materialised by TabAdded) or a brand-new workspace, which is
+        // also handled by TabAdded. Skip in either case.
+        if (!c.parent.has_value())
+        {
+            return;
+        }
+        auto page = _page();
+        if (!page || !_state)
+        {
+            return;
+        }
+        const auto* parentNode = _state->pane(*c.parent);
+        if (!parentNode)
+        {
+            return;
+        }
+        const auto* parentSplit = std::get_if<::WorkspaceModel::SplitPane>(parentNode);
+        if (!parentSplit)
+        {
+            return;
+        }
+        page->_splitFocusedPaneForWorkspace(parentSplit->axis,
+                                            parentSplit->ratio);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCreated& /*c*/)
     {
-        // TODO(workspace-slice-5): split-pane tree topology. Issue #22.
+        // Phase 1 keeps the visible split topology rendered by the classic
+        // Pane tree inside the workspace's window-level tab. The structural
+        // split is materialised by apply(LeafPaneCreated) when the new
+        // sibling leaf is created; the SplitPane node itself has no
+        // dedicated XAML representation in Phase 1, so there is nothing
+        // for this arm to mutate.
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCollapsed& /*c*/)
     {
-        // TODO(workspace-slice-5): split-pane tree topology. Issue #22.
+        // The classic Pane tree collapses single-child splits internally
+        // when a sibling is removed (see Pane::Close / Tab::DetachPane).
+        // Phase 1's view layer does not need to re-drive that collapse —
+        // the model + classic representations end up consistent because
+        // both reach the same single-leaf shape from a shared origin
+        // (TabRemoved or TabMoved).
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitRatioChanged& /*c*/)
     {
-        // TODO(workspace-slice-5): split-pane tree topology. Issue #22.
+        // Phase 1: the classic Pane tree continues to own the rendered
+        // split ratio (drag-separator + ResizeDirection keyboard moves
+        // update it directly). The model arm exists so Phase 3 persistence
+        // sees ratio changes; no XAML mutation is needed here yet.
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabAdded& c)
@@ -149,6 +192,16 @@ namespace winrt::TerminalApp::implementation
         {
             // TODO(workspace-phase-2-slice-4): non-TerminalSpec
             // dispatch (Settings / Snippets / Markdown / Scratchpad).
+            return;
+        }
+
+        // If this leaf lives inside a split, it was just created as the
+        // sibling of an existing leaf — apply(LeafPaneCreated) has already
+        // driven the classic _SplitPane call (which creates the live
+        // Pane + TermControl) for it. Don't fire an additional new-tab,
+        // and don't bind a new workspace registry entry.
+        if (_state->parentOf(c.leafId) != nullptr)
+        {
             return;
         }
 
@@ -211,10 +264,31 @@ namespace winrt::TerminalApp::implementation
         // wires the per-leaf TabView teardown.
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& c)
     {
-        // TODO(workspace-slice-5): identity-preserving cross-leaf moves.
-        // Issue #22.
+        // CONTRACT-ONLY STUB until Phase 2 wires user-reachable cross-leaf
+        // moves. This arm is intentionally empty in Phase 1.
+        //
+        // Identity-preserving move. The model carries the source and
+        // destination leaf ids plus the destination tab index, and the
+        // moved TabId is the same as it was pre-move — diff() emits a
+        // single TabMoved (NOT TabRemoved + TabAdded) which is the
+        // signal that lets a view-layer apply arm preserve the live
+        // IPaneContent.
+        //
+        // What Phase 1 actually proves: the MoveTab_FlagOn_* tests call
+        // WorkspaceModel::moveTab directly and assert the identity-
+        // preserving DIFF CONTRACT (a single TabMoved is emitted). They do
+        // NOT exercise the AC's UX-level claim that a live TermControl /
+        // ConPTY / scrollback survives a move, because no user-reachable
+        // Phase 1 action emits TabMoved — the classic _MoveTab + _MovePane
+        // entry points still own the visible reparent (DetachPane +
+        // AttachPane already preserve the live TermControl + ConPTY there).
+        //
+        // Phase 2 lifts the "one tab per leaf" rule and replaces this stub
+        // with a real AttachPane call; the UX-survival claim is verified
+        // then, against a user-reachable cross-leaf move.
+        (void)c;
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ActiveTabChanged& /*c*/)

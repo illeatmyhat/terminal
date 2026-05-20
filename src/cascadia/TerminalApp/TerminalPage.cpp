@@ -6278,4 +6278,122 @@ namespace winrt::TerminalApp::implementation
         }
         return leaves[0]->tabs[0].id;
     }
+
+    void TerminalPage::_splitFocusedPaneForWorkspace(::WorkspaceModel::Axis axis,
+                                                     double ratio)
+    {
+        // Drive the classic _SplitPane on the currently focused window-
+        // level tab. Mirrors what _HandleSplitPane would do for a
+        // default-profile split: create the new pane via
+        // _MakePane(nullptr, ...) which yields a default-profile
+        // terminal, and split at the requested axis/ratio.
+        const auto focusedTabImpl = _GetFocusedTabImpl();
+        if (!focusedTabImpl)
+        {
+            return;
+        }
+        const auto focusedTab = _GetFocusedTab();
+        if (!focusedTab)
+        {
+            return;
+        }
+        const auto direction = axis == ::WorkspaceModel::Axis::Vertical
+                                   ? SplitDirection::Right
+                                   : SplitDirection::Down;
+        const auto splitSize = static_cast<float>(ratio);
+        auto newPane = _MakePane(nullptr, focusedTab, nullptr);
+        if (!newPane)
+        {
+            return;
+        }
+        _SplitPane(focusedTabImpl, direction, splitSize, std::move(newPane));
+    }
+
+    void TerminalPage::_mirrorResizeIntoModel(const ResizeDirection& direction)
+    {
+        const auto splitIdOpt = _focusedSplitIdInActiveWorkspace();
+        if (!splitIdOpt.has_value())
+        {
+            return;
+        }
+        // Mirror classic Pane::_Resize semantics:
+        //   Right / Down → first (left/top) child grows.
+        //   Left  / Up   → first child shrinks (right/bottom grows).
+        // The model's SplitPane.ratio is the first child's fraction so
+        // it moves in the same direction.
+        const bool grewFirstChild =
+            direction == ResizeDirection::Right ||
+            direction == ResizeDirection::Down;
+        const auto* node = _workspaceModelState->pane(*splitIdOpt);
+        double currentRatio = 0.5;
+        if (node)
+        {
+            if (const auto* split = std::get_if<::WorkspaceModel::SplitPane>(node))
+            {
+                currentRatio = split->ratio;
+            }
+        }
+        constexpr double kRatioStep = 0.05;
+        const double nextRatio = std::clamp(
+            currentRatio + (grewFirstChild ? kRatioStep : -kRatioStep),
+            0.0,
+            1.0);
+        auto newState = ::WorkspaceModel::resizePane(_workspaceModelState,
+                                                     *splitIdOpt,
+                                                     nextRatio);
+        _applyWorkspaceAction(std::move(newState));
+    }
+
+    std::optional<::WorkspaceModel::PaneId> TerminalPage::_activeLeafModelId() const
+    {
+        if (!_workspaceModelState)
+        {
+            return std::nullopt;
+        }
+        const auto activeWsId = _workspaceModelState->activeWorkspaceId_view();
+        if (!activeWsId.has_value())
+        {
+            return std::nullopt;
+        }
+        const auto* ws = _workspaceModelState->workspace(*activeWsId);
+        if (!ws)
+        {
+            return std::nullopt;
+        }
+        return ws->activePaneId;
+    }
+
+    std::optional<::WorkspaceModel::PaneId> TerminalPage::_focusedSplitIdInActiveWorkspace() const
+    {
+        if (!_workspaceModelState)
+        {
+            return std::nullopt;
+        }
+        const auto activeWsId = _workspaceModelState->activeWorkspaceId_view();
+        if (!activeWsId.has_value())
+        {
+            return std::nullopt;
+        }
+        const auto* ws = _workspaceModelState->workspace(*activeWsId);
+        if (!ws)
+        {
+            return std::nullopt;
+        }
+        // Address the split nearest the focused pane, not the workspace
+        // root. XAML's classic resize handler moves the separator that is
+        // the immediate parent of the focused pane; with nested splits the
+        // outermost (root) split is a different separator, so recording
+        // ratio drift against the root would diverge from what the user
+        // sees and corrupt Phase 3 persistence replay. Walk UP one level
+        // from the active leaf via WorkspaceModelData::parentOf.
+        //
+        // Returns std::nullopt when the active leaf has no parent split
+        // (single-pane workspace); _mirrorResizeIntoModel no-ops on that.
+        if (const auto* parent = _workspaceModelState->parentOf(ws->activePaneId))
+        {
+            return parent->id;
+        }
+        return std::nullopt;
+    }
+
 }

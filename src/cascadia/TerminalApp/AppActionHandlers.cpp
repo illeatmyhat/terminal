@@ -320,6 +320,55 @@ namespace winrt::TerminalApp::implementation
         return false;
     }
 
+    // Detects the "default profile, no extra arguments" shape of a
+    // NewTab action. Phase 1 Slice 2 routes only this case through the
+    // WorkspaceView. Any explicit-profile / commandline /
+    // tab-title customisation stays on the classic path.
+    static bool _isDefaultProfileNewTab(const INewContentArgs& contentArgs) noexcept
+    {
+        if (contentArgs == nullptr)
+        {
+            return true;
+        }
+        const auto terminalArgs = contentArgs.try_as<NewTerminalArgs>();
+        if (!terminalArgs)
+        {
+            return false;
+        }
+        return terminalArgs.ProfileIndex() == nullptr &&
+               terminalArgs.Profile().empty() &&
+               terminalArgs.Commandline().empty() &&
+               terminalArgs.StartingDirectory().empty() &&
+               terminalArgs.TabTitle().empty() &&
+               terminalArgs.ContentId() == 0u;
+    }
+
+    // Detects the "default profile, no duplicate, simple cardinal
+    // direction" shape of a SplitPane action. Slice 5 routes only this
+    // case through the WorkspaceView. Any explicit-profile / duplicate
+    // / Automatic-direction case stays on the classic path.
+    static bool _isDefaultProfileSplit(const SplitPaneArgs& args) noexcept
+    {
+        if (args == nullptr)
+        {
+            return false;
+        }
+        if (args.SplitMode() == SplitType::Duplicate)
+        {
+            return false;
+        }
+        const auto dir = args.SplitDirection();
+        if (dir != SplitDirection::Right && dir != SplitDirection::Down)
+        {
+            // Phase 1's model-side splitPane action plants the new
+            // sibling on the right/bottom; Up/Left/Automatic routing
+            // would need either a new model action or pre-rotation,
+            // both deferred.
+            return false;
+        }
+        return _isDefaultProfileNewTab(args.ContentArgs());
+    }
+
     void TerminalPage::_HandleSplitPane(const IInspectable& sender,
                                         const ActionEventArgs& args)
     {
@@ -333,6 +382,32 @@ namespace winrt::TerminalApp::implementation
             {
                 args.Handled(false);
                 return;
+            }
+
+            if (_workspacesFlagEnabled() && _isDefaultProfileSplit(realArgs))
+            {
+                // Slice 5 flag-on route: drive the model action, then
+                // let apply(LeafPaneCreated) reach back into _SplitPane
+                // for the visible mutation. We need an active leaf to
+                // split — if the model isn't seeded (no active
+                // workspace yet) fall through to the classic path.
+                const auto activeLeafIdOpt = _activeLeafModelId();
+                if (activeLeafIdOpt.has_value())
+                {
+                    const auto axis = realArgs.SplitDirection() == SplitDirection::Down
+                                          ? ::WorkspaceModel::Axis::Horizontal
+                                          : ::WorkspaceModel::Axis::Vertical;
+                    const auto ratio = static_cast<double>(realArgs.SplitSize());
+                    ::WorkspaceModel::TerminalSpec spec{};
+                    auto result = ::WorkspaceModel::splitPane(_workspaceModelState,
+                                                              *activeLeafIdOpt,
+                                                              axis,
+                                                              ratio,
+                                                              ::WorkspaceModel::TabContent{ spec });
+                    _applyWorkspaceAction(std::move(result.state));
+                    args.Handled(true);
+                    return;
+                }
             }
 
             const auto& duplicateFromTab{ realArgs.SplitMode() == SplitType::Duplicate ? _GetFocusedTab() : nullptr };
@@ -511,29 +586,6 @@ namespace winrt::TerminalApp::implementation
         args.Handled(true);
     }
 
-    // Detects the "default profile, no extra arguments" shape of a
-    // NewTab action. Phase 1 Slice 2 routes only this case through the
-    // WorkspaceView. Any explicit-profile / commandline /
-    // tab-title customisation stays on the classic path.
-    static bool _isDefaultProfileNewTab(const INewContentArgs& contentArgs) noexcept
-    {
-        if (contentArgs == nullptr)
-        {
-            return true;
-        }
-        const auto terminalArgs = contentArgs.try_as<NewTerminalArgs>();
-        if (!terminalArgs)
-        {
-            return false;
-        }
-        return terminalArgs.ProfileIndex() == nullptr &&
-               terminalArgs.Profile().empty() &&
-               terminalArgs.Commandline().empty() &&
-               terminalArgs.StartingDirectory().empty() &&
-               terminalArgs.TabTitle().empty() &&
-               terminalArgs.ContentId() == 0u;
-    }
-
     void TerminalPage::_HandleNewTab(const IInspectable& /*sender*/,
                                      const ActionEventArgs& args)
     {
@@ -666,6 +718,15 @@ namespace winrt::TerminalApp::implementation
             else
             {
                 const auto resizeSucceeded = _ResizePane(realArgs.ResizeDirection());
+
+                // Slice 5 flag-on route: classic resize already mutated
+                // the visible split. Mirror the change into the model
+                // so Phase 3 persistence captures it.
+                if (_workspacesFlagEnabled() && resizeSucceeded)
+                {
+                    _mirrorResizeIntoModel(realArgs.ResizeDirection());
+                }
+
                 args.Handled(resizeSucceeded);
             }
         }

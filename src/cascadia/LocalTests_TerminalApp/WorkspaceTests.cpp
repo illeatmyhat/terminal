@@ -74,6 +74,15 @@ namespace TerminalAppLocalTests
         TEST_METHOD(NewTab_FlagOn_LeavesModelValidatorClean);
         TEST_METHOD(NewTab_FlagOn_SpawnFailure_LeavesNoZombieWorkspace);
 
+        // Slice 5: split + resize + identity-preserving move.
+        TEST_METHOD(SplitPane_FlagOn_GrowsActiveWorkspaceTree);
+        TEST_METHOD(SplitPane_FlagOn_GrowsActiveWorkspaceTree_Horizontal);
+        TEST_METHOD(SplitPane_FlagOff_GrowsClassicPaneTreeWithoutModel);
+        TEST_METHOD(ResizePane_FlagOn_UpdatesModelSplitRatio);
+        TEST_METHOD(ResizePane_FlagOff_LeavesModelDormant);
+        TEST_METHOD(MoveTab_FlagOn_DiffEmitsTabMovedPreservingId);
+        TEST_METHOD(MoveTab_FlagOn_CrossWorkspaceTabMovedPreservingId);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -1475,6 +1484,622 @@ namespace TerminalAppLocalTests
             const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
             VERIFY_IS_FALSE(violation.has_value(),
                             L"model state after failed spawn must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // ---------------------------------------------------------------------
+    // Slice 5: split + resize + identity-preserving move.
+    //
+    // The settings JSON used by the split / resize tests is shared
+    // between the flag-on and flag-off variants — they only differ in
+    // the experimental.workspaces.enabled key, which the harness
+    // helpers (_initializeTerminalPageWithFlagOn / FlagOff) inject.
+    // ---------------------------------------------------------------------
+
+    // AC: "Flag-on split (vert + horiz) observably matches flag-off."
+    //
+    // After one default-profile split on the focused tab, the classic
+    // pane tree grows to two leaves AND the model's active workspace
+    // has a SplitPane root with two LeafPane children. The flag-on
+    // path's pane count matches the flag-off path's pane count.
+    void WorkspaceTests::SplitPane_FlagOn_GrowsActiveWorkspaceTree()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Pre-condition: startup-replay landed one tab containing one
+        // pane; the model has one workspace whose root is a LeafPane.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(workspaces[0].root),
+                           L"fresh workspace root must be a single leaf");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a default-profile vertical SplitPane action");
+        result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // The classic Pane tree on the focused tab grew to 2 leaves.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"split must not create a new classic tab");
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
+                             L"classic pane tree must have two leaves after a split");
+
+            // Model: active workspace's root is now a SplitPane carrying
+            // two LeafPane children (the original on the left, the new
+            // sibling on the right) with Axis::Vertical.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split, L"model root must be a SplitPane after vertical split");
+            VERIFY_ARE_EQUAL(static_cast<int>(::WorkspaceModel::Axis::Vertical),
+                             static_cast<int>(split->axis));
+            VERIFY_IS_NOT_NULL(split->left);
+            VERIFY_IS_NOT_NULL(split->right);
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(*split->left),
+                           L"left child must be a leaf in Phase 1");
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(*split->right),
+                           L"right child must be a leaf in Phase 1");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Horizontal counterpart of SplitPane_FlagOn_GrowsActiveWorkspaceTree:
+    // SplitDirection::Down stacks the new pane below the original, which
+    // the model records as an Axis::Horizontal split (a horizontal
+    // splitter line between two vertically-stacked children).
+    void WorkspaceTests::SplitPane_FlagOn_GrowsActiveWorkspaceTree_Horizontal()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Pre-condition: startup-replay landed one tab containing one
+        // pane; the model has one workspace whose root is a LeafPane.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(workspaces[0].root),
+                           L"fresh workspace root must be a single leaf");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a default-profile horizontal SplitPane action");
+        result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitDirection::Down, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // The classic Pane tree on the focused tab grew to 2 leaves.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"split must not create a new classic tab");
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
+                             L"classic pane tree must have two leaves after a split");
+
+            // Model: active workspace's root is now a SplitPane carrying
+            // two LeafPane children (the original on top, the new sibling
+            // on the bottom) with Axis::Horizontal.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split, L"model root must be a SplitPane after horizontal split");
+            VERIFY_ARE_EQUAL(static_cast<int>(::WorkspaceModel::Axis::Horizontal),
+                             static_cast<int>(split->axis));
+            VERIFY_IS_NOT_NULL(split->left);
+            VERIFY_IS_NOT_NULL(split->right);
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(*split->left),
+                           L"left (top) child must be a leaf in Phase 1");
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(*split->right),
+                           L"right (bottom) child must be a leaf in Phase 1");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig contract pin for split: flag-off split must mutate
+    // only the classic pane tree and leave the model machinery dormant.
+    void WorkspaceTests::SplitPane_FlagOff_GrowsClassicPaneTreeWithoutModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off startup must NOT populate the model state");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a default-profile vertical SplitPane action (flag off)");
+        result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // Classic pane tree grew the same way as the flag-on path:
+            // one classic tab, two leaves.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
+                             L"flag-off split must produce two classic leaves");
+
+            // Model machinery stays dormant.
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off split must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off split must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: "Flag-on resize-split observably matches flag-off; split
+    // ratios persist."
+    //
+    // Resize after a split must update the model's SplitPane.ratio
+    // in the same direction the classic _ResizePane moves the visible
+    // separator. We can't construct a parameterised ResizePaneArgs
+    // through the WinRT projection (the IDL only exposes the default
+    // constructor) so we drive the slice 5 helper
+    // _mirrorResizeIntoModel directly — this is the same code path
+    // _HandleResizePane runs flag-on after _ResizePane succeeds.
+    void WorkspaceTests::ResizePane_FlagOn_UpdatesModelSplitRatio()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Set up a split first.
+        auto result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Capture the pre-resize ratio.
+        double preRatio = 0.5;
+        ::WorkspaceModel::PaneId splitId{ 0 };
+        result = RunOnUIThread([&page, &preRatio, &splitId]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split);
+            preRatio = split->ratio;
+            splitId = split->id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Mirror a ResizeDirection::Right into the model");
+        result = RunOnUIThread([&page]() {
+            page->_mirrorResizeIntoModel(ResizeDirection::Right);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, preRatio, splitId]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split, L"split node must still exist post-resize");
+            VERIFY_ARE_EQUAL(splitId.value, split->id.value,
+                             L"split id must be preserved across resize");
+            VERIFY_IS_GREATER_THAN(split->ratio, preRatio,
+                                   L"ResizeDirection::Right must grow the first/left child's ratio");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Mirror a ResizeDirection::Left brings the ratio back down");
+        result = RunOnUIThread([&page]() {
+            page->_mirrorResizeIntoModel(ResizeDirection::Left);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, preRatio]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split);
+            // After +0.05 then -0.05, we should land back near preRatio
+            // (allow a small epsilon for double rounding).
+            const auto delta = split->ratio - preRatio;
+            VERIFY_IS_LESS_THAN(delta, 0.0001,
+                                L"ResizeDirection::Left must shrink the first/left child's ratio back");
+            VERIFY_IS_GREATER_THAN(delta, -0.0001,
+                                   L"and not overshoot");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig contract pin for resize: flag-off split must keep
+    // the model machinery dormant. The classic _ResizePane direction-
+    // based path is exercised by TabTests; we just verify the flag-off
+    // _HandleResizePane / _ResizePane sequence leaves the model state
+    // untouched.
+    void WorkspaceTests::ResizePane_FlagOff_LeavesModelDormant()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // Split classically so a separator exists; then exercise
+            // _ResizePane (the same entry point _HandleResizePane uses
+            // post-direction-check).
+            SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
+            ActionEventArgs splitEventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, splitEventArgs);
+
+            (void)page->_ResizePane(ResizeDirection::Right);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off resize must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off resize must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: "Flag-on tab move ... preserves the live `TermControl` —
+    // same backing `ConPTY` after the move; no scrollback loss."
+    //
+    // The load-bearing property is the diff contract: a TabId that
+    // appears at the same (workspace, leaf, idx) in prev and next is
+    // emitted as `TabMoved`, NOT as `TabRemoved + TabAdded`. The
+    // identity is what lets the view-layer apply arm preserve the live
+    // IPaneContent. We assert that contract directly off the model
+    // state the harness has primed during startup-replay.
+    //
+    // This test exercises a cross-leaf (within-workspace) move by
+    // first splitting the active workspace into two leaves, then
+    // calling moveTab to take the new leaf's tab back to the original
+    // leaf at idx=1. The diff between the pre-split state and the
+    // post-move state must emit a single TabMoved arm for the new tab.
+    void WorkspaceTests::MoveTab_FlagOn_DiffEmitsTabMovedPreservingId()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Set up a split so the workspace has two leaves.
+        auto result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Capture the new sibling leaf's tab id + original leaf id.
+        ::WorkspaceModel::TabId siblingTabId{ 0 };
+        ::WorkspaceModel::PaneId originalLeafId{ 0 };
+        ::WorkspaceModel::ModelState preState{ nullptr };
+        result = RunOnUIThread([&page, &siblingTabId, &originalLeafId, &preState]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split);
+            // Phase 1 places the original on the left, new sibling on
+            // the right.
+            const auto* originalLeaf = std::get_if<::WorkspaceModel::LeafPane>(split->left.get());
+            const auto* siblingLeaf = std::get_if<::WorkspaceModel::LeafPane>(split->right.get());
+            VERIFY_IS_NOT_NULL(originalLeaf);
+            VERIFY_IS_NOT_NULL(siblingLeaf);
+            VERIFY_ARE_EQUAL(1u, siblingLeaf->tabs.size());
+            originalLeafId = originalLeaf->id;
+            siblingTabId = siblingLeaf->tabs[0].id;
+            preState = page->_workspaceModelState;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Move the sibling's tab back to the original leaf at idx=1");
+        ::WorkspaceModel::ModelState postState{ nullptr };
+        result = RunOnUIThread([&page, &postState, siblingTabId, originalLeafId]() {
+            auto next = ::WorkspaceModel::moveTab(page->_workspaceModelState,
+                                                  siblingTabId,
+                                                  originalLeafId,
+                                                  1u);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(next);
+            postState = page->_workspaceModelState;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Diff(pre, post) must emit exactly one TabMoved for the
+        // sibling's tab id; it must NOT emit a TabRemoved+TabAdded for
+        // it. (Other arms — e.g. SplitPaneCollapsed, ActiveTabChanged,
+        // ActiveWorkspaceChanged — are allowed.)
+        result = RunOnUIThread([preState, postState, siblingTabId]() {
+            const auto changes = ::WorkspaceModel::diff(preState, postState);
+
+            std::size_t tabMovedHits = 0;
+            std::size_t tabAddedHits = 0;
+            std::size_t tabRemovedHits = 0;
+            for (const auto& ch : changes)
+            {
+                if (const auto* moved = std::get_if<::WorkspaceModel::TabMoved>(&ch))
+                {
+                    if (moved->id == siblingTabId)
+                    {
+                        tabMovedHits += 1;
+                    }
+                }
+                else if (const auto* added = std::get_if<::WorkspaceModel::TabAdded>(&ch))
+                {
+                    if (added->id == siblingTabId)
+                    {
+                        tabAddedHits += 1;
+                    }
+                }
+                else if (const auto* removed = std::get_if<::WorkspaceModel::TabRemoved>(&ch))
+                {
+                    if (removed->id == siblingTabId)
+                    {
+                        tabRemovedHits += 1;
+                    }
+                }
+            }
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), tabMovedHits,
+                             L"identity-preserving move must emit exactly one TabMoved");
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), tabAddedHits,
+                             L"moved tab must NOT appear as TabAdded");
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), tabRemovedHits,
+                             L"moved tab must NOT appear as TabRemoved");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC echo: "Identity-preserving move should be exercised across
+    // leaves AND across workspaces."
+    //
+    // Two workspaces, each with one leaf and one tab. Move workspace
+    // A's tab into workspace B's leaf at idx=1. Diff must emit a
+    // single TabMoved with srcLeafId/dstLeafId crossing workspace
+    // boundaries; the moved TabId must persist post-move.
+    void WorkspaceTests::MoveTab_FlagOn_CrossWorkspaceTabMovedPreservingId()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Create a second workspace via a default new-tab.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Capture pre-move state + the moving TabId + destination leaf
+        // id (the OTHER workspace's only leaf).
+        ::WorkspaceModel::ModelState preState{ nullptr };
+        ::WorkspaceModel::TabId movingTabId{ 0 };
+        ::WorkspaceModel::PaneId dstLeafId{ 0 };
+        result = RunOnUIThread([&page, &preState, &movingTabId, &dstLeafId]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(2u, workspaces.size());
+
+            // Workspace 0's tab is the one we'll move; workspace 1's
+            // leaf is the destination.
+            const auto* srcLeaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            const auto* dstLeaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[1].root);
+            VERIFY_IS_NOT_NULL(srcLeaf);
+            VERIFY_IS_NOT_NULL(dstLeaf);
+            VERIFY_ARE_EQUAL(1u, srcLeaf->tabs.size());
+            VERIFY_ARE_EQUAL(1u, dstLeaf->tabs.size());
+
+            movingTabId = srcLeaf->tabs[0].id;
+            dstLeafId = dstLeaf->id;
+            preState = page->_workspaceModelState;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Move workspace A's tab into workspace B's leaf at idx=1");
+        ::WorkspaceModel::ModelState postState{ nullptr };
+        result = RunOnUIThread([&page, &postState, movingTabId, dstLeafId]() {
+            auto next = ::WorkspaceModel::moveTab(page->_workspaceModelState,
+                                                  movingTabId,
+                                                  dstLeafId,
+                                                  1u);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(next);
+            postState = page->_workspaceModelState;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([preState, postState, movingTabId, dstLeafId]() {
+            // The moved TabId must still be reachable in the post
+            // state, AND it must now live in the destination leaf.
+            const auto* movedRecord = postState->tab(movingTabId);
+            VERIFY_IS_NOT_NULL(movedRecord,
+                               L"moved TabId must persist across the move");
+
+            const auto* dstNode = postState->pane(dstLeafId);
+            VERIFY_IS_NOT_NULL(dstNode);
+            const auto* dstLeaf = std::get_if<::WorkspaceModel::LeafPane>(dstNode);
+            VERIFY_IS_NOT_NULL(dstLeaf);
+            bool foundInDst = false;
+            for (const auto& t : dstLeaf->tabs)
+            {
+                if (t.id == movingTabId)
+                {
+                    foundInDst = true;
+                    break;
+                }
+            }
+            VERIFY_IS_TRUE(foundInDst, L"moved tab must live in the destination leaf");
+
+            // Diff(pre, post) must emit TabMoved (NOT TabRemoved +
+            // TabAdded) for movingTabId, even across workspaces.
+            const auto changes = ::WorkspaceModel::diff(preState, postState);
+            std::size_t movedHits = 0;
+            std::size_t addedHits = 0;
+            std::size_t removedHits = 0;
+            for (const auto& ch : changes)
+            {
+                if (const auto* moved = std::get_if<::WorkspaceModel::TabMoved>(&ch))
+                {
+                    if (moved->id == movingTabId)
+                    {
+                        VERIFY_ARE_EQUAL(dstLeafId.value, moved->dstLeafId.value,
+                                         L"TabMoved.dstLeafId must point at the destination workspace's leaf");
+                        movedHits += 1;
+                    }
+                }
+                else if (const auto* added = std::get_if<::WorkspaceModel::TabAdded>(&ch))
+                {
+                    if (added->id == movingTabId)
+                    {
+                        addedHits += 1;
+                    }
+                }
+                else if (const auto* removed = std::get_if<::WorkspaceModel::TabRemoved>(&ch))
+                {
+                    if (removed->id == movingTabId)
+                    {
+                        removedHits += 1;
+                    }
+                }
+            }
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), movedHits,
+                             L"cross-workspace move must emit exactly one TabMoved");
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), addedHits,
+                             L"moved tab must NOT appear as TabAdded across workspaces");
+            VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), removedHits,
+                             L"moved tab must NOT appear as TabRemoved across workspaces");
         });
         VERIFY_SUCCEEDED(result);
     }

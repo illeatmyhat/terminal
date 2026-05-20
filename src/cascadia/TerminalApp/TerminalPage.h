@@ -697,6 +697,30 @@ namespace winrt::TerminalApp::implementation
         // per workspace.
         std::optional<::WorkspaceModel::TabId> _modelIdForTab(const winrt::TerminalApp::Tab& tab) const;
 
+        // Called by WorkspaceView::apply(LeafPaneCreated) when a new
+        // sibling leaf is added inside an existing workspace's split
+        // tree. Drives the classic _SplitPane on the focused window-
+        // tab so the visible Pane tree matches the model.
+        void _splitFocusedPaneForWorkspace(::WorkspaceModel::Axis axis,
+                                           double ratio);
+
+        // Slice 5: after a classic _ResizePane has moved the visible
+        // separator, nudge the focused-pane-adjacent SplitPane ratio in
+        // the same direction so the model stays in step. A no-op when the
+        // active leaf has no parent split (single-pane workspace).
+        void _mirrorResizeIntoModel(const winrt::Microsoft::Terminal::Settings::Model::ResizeDirection& direction);
+
+        // Helpers used by the slice 5 flag-on routes. They look up the
+        // active workspace's active leaf model id (or std::nullopt when
+        // the model is empty / the active leaf isn't known yet).
+        std::optional<::WorkspaceModel::PaneId> _activeLeafModelId() const;
+        // Find the SplitPane that is the immediate parent of the active
+        // leaf in the active workspace, or std::nullopt when the active
+        // leaf is the workspace root (single-pane workspace). This is the
+        // separator XAML resizes nearest the focused pane, so it is the
+        // split resize-pane must address for the model's resizePane action.
+        std::optional<::WorkspaceModel::PaneId> _focusedSplitIdInActiveWorkspace() const;
+
         friend class WorkspaceView;
         friend class TerminalAppLocalTests::TabTests;
         friend class TerminalAppLocalTests::SettingsTests;

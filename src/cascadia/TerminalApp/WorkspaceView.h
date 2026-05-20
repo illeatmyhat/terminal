@@ -11,11 +11,8 @@
 // and owned by TerminalPage and lives for the lifetime of the page.
 //
 // Each apply() overload corresponds to one WorkspaceChange arm. The
-// arms used by the Phase 1 Slice 2 migrated actions (startup-replay,
-// default-profile new-tab) and the Phase 1 Slice 6 migrated actions
-// (rename / color decoration, explicit-profile new-tab) carry real
-// logic; the remaining arms are stubs that will be filled in by
-// subsequent slices.
+// arms a migrated Phase 1 action can actually emit carry real logic;
+// the remaining arms are stubs that later slices fill in.
 //
 // The view also holds the latest ModelState. Some change arms
 // (notably TabAdded) describe a state transition without carrying every
