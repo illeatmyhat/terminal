@@ -63,6 +63,16 @@ namespace TerminalAppLocalTests
         TEST_METHOD(NewTab_FlagOn_ExplicitProfileByName_AppendsTab);
         TEST_METHOD(NewTab_FlagOff_ExplicitProfileByName_AppendsTab);
 
+        // #41: any non-default NewTerminalArgs field (beyond the profile
+        // selector) must keep a flag-on new-tab on the classic path.
+        TEST_METHOD(NewTab_FlagOn_TabColorField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_SessionIdField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_AppendCommandLineField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_SuppressApplicationTitleField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_ColorSchemeField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_ElevateField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesClassic);
+
         // Slice 6 review fixes:
         //  - sender-bypass: flag-on rename/color must honour the
         //    `sender` argument (right-clicked tab) instead of always
@@ -105,6 +115,13 @@ namespace TerminalAppLocalTests
                                                CascadiaSettings initialSettings);
         void _initializeTerminalPageWithFlagOff(winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage>& page,
                                                 CascadiaSettings initialSettings);
+
+        // #41 shared body: fire a flag-on default-profile NewTab whose
+        // NewTerminalArgs carries a single non-default field, and assert
+        // the model was NOT grown (the new tab took the classic path).
+        void _verifyFlagOnNonDefaultFieldRoutesClassic(
+            std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs&)> setField,
+            const wchar_t* fieldLabel);
 
         winrt::com_ptr<winrt::TerminalApp::implementation::WindowProperties> _windowProperties;
         winrt::com_ptr<winrt::TerminalApp::implementation::ContentManager> _contentManager;
@@ -516,6 +533,106 @@ namespace TerminalAppLocalTests
                            L"flag-off null-args new-tab must NOT instantiate WorkspaceView");
         });
         VERIFY_SUCCEEDED(result);
+    }
+
+    // #41 shared body. See declaration.
+    void WorkspaceTests::_verifyFlagOnNonDefaultFieldRoutesClassic(
+        std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs&)> setField,
+        const wchar_t* fieldLabel)
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"startup-replay should produce exactly one workspace");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a flag-on NewTab carrying a single non-default field");
+        result = RunOnUIThread([&page, &setField]() {
+            NewTerminalArgs newTerminalArgs{};
+            setField(newTerminalArgs);
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, fieldLabel]() {
+            // The field is not modelled in Phase 1, so the new tab must
+            // take the classic path: the workspace model stays at its
+            // single startup workspace rather than growing to two.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             fieldLabel);
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_TabColorField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.TabColor(winrt::Windows::UI::Color{ 255, 10, 20, 30 }); },
+            L"a TabColor override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_SessionIdField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.SessionId(winrt::guid{ 0x12345678, 0x1234, 0x1234, { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 } }); },
+            L"a SessionId override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_AppendCommandLineField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.AppendCommandLine(true); },
+            L"an AppendCommandLine override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_SuppressApplicationTitleField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.SuppressApplicationTitle(true); },
+            L"a SuppressApplicationTitle override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_ColorSchemeField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.ColorScheme(L"Campbell"); },
+            L"a ColorScheme override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_ElevateField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.Elevate(true); },
+            L"an Elevate override must keep the new tab on the classic path");
+    }
+
+    void WorkspaceTests::NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesClassic()
+    {
+        _verifyFlagOnNonDefaultFieldRoutesClassic(
+            [](NewTerminalArgs& a) { a.ReloadEnvironmentVariables(true); },
+            L"a ReloadEnvironmentVariables override must keep the new tab on the classic path");
     }
 
     // -------------------------------------------------------------------

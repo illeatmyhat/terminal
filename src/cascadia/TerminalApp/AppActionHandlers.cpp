@@ -321,10 +321,30 @@ namespace winrt::TerminalApp::implementation
         return false;
     }
 
+    // True if any NewTerminalArgs field other than the profile selector
+    // (Profile / ProfileIndex) carries a non-default value. Phase 1 only
+    // models the profile selector, so any of these overrides means the
+    // new tab must take the classic path or the override is silently
+    // dropped. Covers all 11 settable NewTerminalArgs fields.
+    static bool _hasUnmodelledNewTabFields(const NewTerminalArgs& terminalArgs) noexcept
+    {
+        return !terminalArgs.Commandline().empty() ||
+               !terminalArgs.StartingDirectory().empty() ||
+               !terminalArgs.TabTitle().empty() ||
+               terminalArgs.ContentId() != 0u ||
+               terminalArgs.TabColor() != nullptr ||
+               terminalArgs.SessionId() != winrt::guid{} ||
+               terminalArgs.AppendCommandLine() ||
+               terminalArgs.SuppressApplicationTitle() != nullptr ||
+               !terminalArgs.ColorScheme().empty() ||
+               terminalArgs.Elevate() != nullptr ||
+               terminalArgs.ReloadEnvironmentVariables() != nullptr;
+    }
+
     // Detects the "default profile, no extra arguments" shape of a
     // NewTab action. Phase 1 Slice 2 routes only this case through the
-    // WorkspaceView. Any explicit-profile / commandline /
-    // tab-title customisation stays on the classic path.
+    // WorkspaceView (as a default-spec workspace). Any explicit profile
+    // or any non-default field stays on the classic path.
     static bool _isDefaultProfileNewTab(const INewContentArgs& contentArgs) noexcept
     {
         if (contentArgs == nullptr)
@@ -338,10 +358,7 @@ namespace winrt::TerminalApp::implementation
         }
         return terminalArgs.ProfileIndex() == nullptr &&
                terminalArgs.Profile().empty() &&
-               terminalArgs.Commandline().empty() &&
-               terminalArgs.StartingDirectory().empty() &&
-               terminalArgs.TabTitle().empty() &&
-               terminalArgs.ContentId() == 0u;
+               !_hasUnmodelledNewTabFields(terminalArgs);
     }
 
     // Detects the "default profile, no duplicate, simple cardinal
@@ -632,16 +649,13 @@ namespace winrt::TerminalApp::implementation
                     // the resolved bytes back to _OpenNewTab via
                     // _openProfileTabForWorkspace.
                     //
-                    // Commandline / starting-directory / tab-title
-                    // overrides are intentionally NOT modelled in
-                    // Phase 1 — they fall back to the classic path
-                    // below.
+                    // Only the profile selector is modelled in Phase 1.
+                    // Any other non-default field (commandline, starting
+                    // directory, tab title, color, color scheme, etc.)
+                    // falls back to the classic path below so the
+                    // override isn't silently dropped.
                     const auto terminalArgs = realArgs.ContentArgs().try_as<NewTerminalArgs>();
-                    if (terminalArgs &&
-                        terminalArgs.Commandline().empty() &&
-                        terminalArgs.StartingDirectory().empty() &&
-                        terminalArgs.TabTitle().empty() &&
-                        terminalArgs.ContentId() == 0u)
+                    if (terminalArgs && !_hasUnmodelledNewTabFields(terminalArgs))
                     {
                         if (const auto profile = _settings.GetProfileForArgs(terminalArgs))
                         {
