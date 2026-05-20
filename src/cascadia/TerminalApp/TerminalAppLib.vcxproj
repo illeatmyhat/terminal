@@ -183,6 +183,7 @@
       <DependentUpon>MarkdownPaneContent.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="WindowsPackageManagerFactory.h" />
+    <ClInclude Include="ContentRegistry.h" />
     <ClInclude Include="WorkspaceView.h" />
   </ItemGroup>
   <!-- ========================= Cpp Files ======================== -->

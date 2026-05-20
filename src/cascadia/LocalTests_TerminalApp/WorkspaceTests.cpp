@@ -6,6 +6,8 @@
 #include "../TerminalApp/TerminalPage.h"
 #include "../TerminalApp/TerminalWindow.h"
 #include "../TerminalApp/ContentManager.h"
+#include "../TerminalApp/ContentRegistry.h"
+#include "../TerminalApp/BasicPaneEvents.h"
 #include "../TerminalApp/WorkspaceView.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
 #include "../WorkspaceModel/Diff.h"
@@ -118,6 +120,17 @@ namespace TerminalAppLocalTests
         TEST_METHOD(Sidebar_FlagOff_IsCollapsedAndZeroWidth);
         TEST_METHOD(Sidebar_FlagOn_MirrorsWorkspacesInDeclaredOrder);
         TEST_METHOD(Sidebar_FlagOn_RowIsReadOnly_NoModelMutation);
+
+        // Phase 2 Slice 3 (#47): the ContentRegistry lifetime contract.
+        //  - mount-then-unmount keeps the SAME live IPaneContent instance
+        //    alive and resolvable (its ConPTY survives an inactive workspace);
+        //  - removal erases the entry, tears the content down (Close()), and a
+        //    subsequent resolve fails EXPLICITLY (null), so a stale id can
+        //    never be re-attached;
+        //  - mounting an id the registry does not own is unrepresentable: the
+        //    only way to obtain mountable content is EnsureMounted, which
+        //    either resolves an owned id or creates+inserts it.
+        TEST_METHOD(ContentRegistry_UnmountKeepsAlive_RemoveTearsDown);
 
         TEST_CLASS_SETUP(ClassSetup)
         {
@@ -2737,5 +2750,108 @@ namespace TerminalAppLocalTests
                              L"touching the sidebar must not change the workspace set");
         });
         VERIFY_SUCCEEDED(result);
+    }
+
+    namespace
+    {
+        // A minimal test-only IPaneContent that stands in for a live
+        // TermControl/ConPTY-backed content. It records how many times Close()
+        // was called (the registry calls Close() exactly once, on removal —
+        // the ConPTY-teardown point) and carries a unique tag so the test can
+        // assert that a re-mount resolves the SAME instance the registry kept
+        // alive across an unmount.
+        struct MockPaneContent : public winrt::implements<MockPaneContent, winrt::TerminalApp::IPaneContent>,
+                                 public winrt::TerminalApp::implementation::BasicPaneEvents
+        {
+            explicit MockPaneContent(uint64_t tag) :
+                _tag{ tag } {}
+
+            uint64_t Tag() const noexcept { return _tag; }
+            int CloseCount() const noexcept { return _closeCount; }
+
+            // -- IPaneContent --
+            winrt::Windows::UI::Xaml::FrameworkElement GetRoot() { return nullptr; }
+            void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings&) {}
+            winrt::Windows::Foundation::Size MinimumSize() { return { 0, 0 }; }
+            winrt::hstring Title() { return L"mock"; }
+            uint64_t TaskbarState() { return 0; }
+            uint64_t TaskbarProgress() { return 0; }
+            bool ReadOnly() { return false; }
+            winrt::hstring Icon() { return {}; }
+            winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> TabColor() const noexcept { return nullptr; }
+            winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush() { return nullptr; }
+            winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(winrt::TerminalApp::BuildStartupKind) { return nullptr; }
+            void Focus(winrt::Windows::UI::Xaml::FocusState) {}
+            void Close() { ++_closeCount; }
+
+        private:
+            uint64_t _tag{ 0 };
+            int _closeCount{ 0 };
+        };
+    }
+
+    // Phase 2 Slice 3 (#47): proves the ContentRegistry lifetime contract end
+    // to end at the registry layer. This is the contract that the
+    // ContentMounted / ContentUnmounted / removal arms project onto; the arms'
+    // user-reachable wiring (which workspace's tree to (de)parent into) lands
+    // in S4, so the lifetime guarantee itself is proved directly here.
+    void WorkspaceTests::ContentRegistry_UnmountKeepsAlive_RemoveTearsDown()
+    {
+        using namespace winrt::TerminalApp::implementation;
+        using ::WorkspaceModel::ContentId;
+
+        ContentRegistry registry;
+        const ContentId id{ 7 };
+
+        // Unowned id resolves to an EXPLICIT null — not silent garbage.
+        VERIFY_IS_FALSE(registry.Contains(id));
+        VERIFY_IS_NULL(registry.Find(id));
+
+        // EnsureMounted is the only way to obtain mountable content: it creates
+        // + inserts via the factory for a new id and returns the live instance.
+        const auto mock = winrt::make_self<MockPaneContent>(0xABCDull);
+        int factoryCalls = 0;
+        const auto first = registry.EnsureMounted(id, [&]() -> winrt::TerminalApp::IPaneContent {
+            ++factoryCalls;
+            return mock.as<winrt::TerminalApp::IPaneContent>();
+        });
+        VERIFY_IS_NOT_NULL(first);
+        VERIFY_ARE_EQUAL(1, factoryCalls);
+        VERIFY_IS_TRUE(registry.Contains(id));
+        VERIFY_ARE_EQUAL(static_cast<size_t>(1), registry.Size());
+
+        // Unmount: the registry KEEPS the strong ref (the ConPTY stays alive).
+        // Close() must NOT have been called — an unmount is not a teardown.
+        registry.NoteUnmounted(id);
+        VERIFY_IS_TRUE(registry.Contains(id));
+        VERIFY_ARE_EQUAL(0, mock->CloseCount(), L"unmount must not tear down content");
+
+        // Re-mount resolves the SAME live instance the registry kept alive —
+        // the factory is NOT invoked again, so the surviving TermControl/ConPTY
+        // is what gets re-attached, not a fresh one.
+        const auto second = registry.EnsureMounted(id, [&]() -> winrt::TerminalApp::IPaneContent {
+            ++factoryCalls;
+            return winrt::make_self<MockPaneContent>(0x9999ull).as<winrt::TerminalApp::IPaneContent>();
+        });
+        VERIFY_ARE_EQUAL(1, factoryCalls, L"re-mount of an owned id must not re-create content");
+        VERIFY_IS_TRUE(first == second, L"re-mount must resolve the SAME live instance");
+        VERIFY_ARE_EQUAL(0xABCDull, second.as<MockPaneContent>()->Tag());
+
+        // Find resolves the same owned instance too.
+        VERIFY_IS_TRUE(registry.Find(id) == first);
+
+        // Removal erases the entry and tears the content down (Close() once).
+        VERIFY_IS_TRUE(registry.Remove(id));
+        VERIFY_ARE_EQUAL(1, mock->CloseCount(), L"removal is the one place ConPTY tears down");
+        VERIFY_ARE_EQUAL(static_cast<size_t>(0), registry.Size());
+
+        // A subsequent resolve fails EXPLICITLY — a stale id can never re-attach
+        // content that no longer exists.
+        VERIFY_IS_FALSE(registry.Contains(id));
+        VERIFY_IS_NULL(registry.Find(id));
+
+        // Removing an unowned id is a benign explicit no-op (returns false).
+        VERIFY_IS_FALSE(registry.Remove(id));
+        VERIFY_IS_FALSE(registry.Remove(ContentId{ 999 }));
     }
 }

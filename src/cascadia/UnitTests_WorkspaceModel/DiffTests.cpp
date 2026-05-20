@@ -158,6 +158,12 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(ActiveTabChanged_SurvivingLeaf);
         TEST_METHOD(ContentMounted_FirstMount);
         TEST_METHOD(ContentUnmounted_OnTabRemove);
+        // Phase 2 Slice 3 (#47): a workspace-switch-like prev->next where the
+        // newly-active workspace's tab gains a mount (ContentMounted) and the
+        // now-inactive workspace's tab loses its mount (ContentUnmounted) in
+        // the SAME diff. This is the prev->next shape that drives the
+        // ContentRegistry's mount/keep-alive lifecycle once S4 wires switching.
+        TEST_METHOD(WorkspaceSwitch_MountsActive_UnmountsInactive);
         TEST_METHOD(TabDecorationUpdated_TitleChanged);
 
         // ---- Enriched-payload coverage (the model->view contract that
@@ -435,6 +441,57 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), unmounts.size());
         VERIFY_ARE_EQUAL(TabId{ 100 }.v, unmounts[0].tabId.v);
         VERIFY_ARE_EQUAL(ContentId{ 555 }.v, unmounts[0].contentId.v);
+    }
+
+    void DiffTests::WorkspaceSwitch_MountsActive_UnmountsInactive()
+    {
+        // Two workspaces. In prev, ws1 is active and its tab is mounted
+        // (ContentId 901); ws2 is inactive and unmounted. A workspace switch
+        // makes ws2 active: the model mounts ws2's content (902) and unmounts
+        // ws1's (901, which becomes detached but — at the ContentRegistry layer
+        // — stays alive). This is the prev->next shape S4 will produce.
+        auto ws1TabPrev = makeTab(100);
+        ws1TabPrev.mount = ContentId{ 901 }; // ws1 active+mounted in prev
+        auto ws2TabPrev = makeTab(200); // ws2 inactive, no mount in prev
+
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { ws1TabPrev }), PaneId{ 10 }, "alpha"),
+              makeWs(2, makeLeaf(20, { ws2TabPrev }), PaneId{ 20 }, "beta") },
+            WorkspaceId{ 1 });
+
+        auto ws1TabNext = makeTab(100); // ws1 now inactive: mount cleared
+        auto ws2TabNext = makeTab(200);
+        ws2TabNext.mount = ContentId{ 902 }; // ws2 now active+mounted
+
+        auto next = makeState(
+            { makeWs(1, makeLeaf(10, { ws1TabNext }), PaneId{ 10 }, "alpha"),
+              makeWs(2, makeLeaf(20, { ws2TabNext }), PaneId{ 20 }, "beta") },
+            WorkspaceId{ 2 });
+
+        const auto ops = diff(prev, next);
+
+        // The newly-active workspace's content is mounted.
+        const auto mounts = changesOfKind<ContentMounted>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), mounts.size());
+        VERIFY_ARE_EQUAL(TabId{ 200 }.v, mounts[0].tabId.v);
+        VERIFY_ARE_EQUAL(ContentId{ 902 }.v, mounts[0].contentId.v);
+
+        // The now-inactive workspace's content is unmounted (NOT removed — the
+        // tab still exists in next, so the registry keeps it alive).
+        const auto unmounts = changesOfKind<ContentUnmounted>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), unmounts.size());
+        VERIFY_ARE_EQUAL(TabId{ 100 }.v, unmounts[0].tabId.v);
+        VERIFY_ARE_EQUAL(ContentId{ 901 }.v, unmounts[0].contentId.v);
+
+        // No tab was removed: both tabs survive the switch, so the unmount is a
+        // keep-alive detach, not a teardown.
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<TabRemoved>(ops));
+
+        // And the active workspace flips to ws2.
+        const auto active = changesOfKind<ActiveWorkspaceChanged>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), active.size());
+        VERIFY_IS_TRUE(active[0].id.has_value());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, active[0].id->v);
     }
 
     void DiffTests::TabDecorationUpdated_TitleChanged()

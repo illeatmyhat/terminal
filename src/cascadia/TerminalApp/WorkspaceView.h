@@ -21,8 +21,12 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include "../WorkspaceModel/IWorkspaceView.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
+
+#include "ContentRegistry.h"
 
 namespace winrt::TerminalApp::implementation
 {
@@ -63,5 +67,26 @@ namespace winrt::TerminalApp::implementation
         std::optional<std::uint32_t> _resolveClassicTabIndex(::WorkspaceModel::WorkspaceId ws) const;
 
         winrt::weak_ref<TerminalPage> _owner;
+
+        // Phase 2 Slice 3 (#47): the single strong owner of every live
+        // IPaneContent in this window, keyed by the model's ContentId. This is
+        // the content arm of the S1 id-resolver — the ContentMounted /
+        // ContentUnmounted / content-removal arms resolve and mutate it. An
+        // unmounted (inactive-workspace) content stays owned here so its
+        // TermControl / ConPTY survives detachment from the visual tree; the
+        // entry is only erased — and its ConPTY only torn down — on removal.
+        ContentRegistry _contentRegistry;
+
+        // tab -> content binding, populated by the ContentMounted arm. The
+        // removal arms (TabRemoved / WorkspaceRemoved) carry only a TabId, so
+        // this is how they resolve which ContentId to erase from the registry.
+        // A node-based map; the registry is the strong owner, this only maps
+        // ids to ids.
+        std::unordered_map<::WorkspaceModel::TabId, ::WorkspaceModel::ContentId> _contentByTab;
+
+        // Erase the content bound to `tabId` (if any) from the registry — the
+        // only place a single content's ConPTY tears down. Called by the
+        // removal arms. A no-op when the tab had no mounted content.
+        void _removeContentForTab(::WorkspaceModel::TabId tabId);
     };
 }

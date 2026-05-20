@@ -35,6 +35,24 @@ namespace winrt::TerminalApp::implementation
         return page->_classicTabIndexForWorkspace(ws);
     }
 
+    // Phase 2 Slice 3 (#47): the removal path. The removal arms carry only a
+    // TabId; this resolves the tab's bound ContentId (recorded by the
+    // ContentMounted arm) and erases it from the registry — the ONLY place a
+    // single content's ConPTY tears down. A no-op when the tab had no mounted
+    // content (e.g. a not-yet-materialised tab, or a flag-on Phase-1 tab whose
+    // content the classic path still owns).
+    void WorkspaceView::_removeContentForTab(::WorkspaceModel::TabId tabId)
+    {
+        const auto it = _contentByTab.find(tabId);
+        if (it == _contentByTab.end())
+        {
+            return;
+        }
+        const auto contentId = it->second;
+        _contentByTab.erase(it);
+        _contentRegistry.Remove(contentId);
+    }
+
     // -------------------------------------------------------------------
     // Each apply() overload corresponds to one WorkspaceChange arm. Arms
     // that a migrated Phase 1 action can actually emit carry real logic;
@@ -245,13 +263,25 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::TabRemoved& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::TabRemoved& c)
     {
         // Phase 1 maps one tab per leaf per workspace, so a tab close
         // always cascades to WorkspaceRemoved (which carries the classic
         // teardown). TabRemoved on its own only fires when a leaf has
         // multiple tabs — Phase 2 Slice 9 lifts that constraint and
         // wires the per-leaf TabView teardown.
+        //
+        // Phase 2 Slice 3 (#47): a TabRemoved means this tab — and therefore
+        // its content — is structurally destroyed, so erase the registry entry
+        // (the ConPTY teardown for that content). NOTE this only fires when a
+        // leaf has MULTIPLE tabs; Phase 1 holds one tab per leaf, so the
+        // DOMINANT close path is a whole-workspace close, which diff() emits as
+        // WorkspaceRemoved (NOT TabRemoved). apply(WorkspaceRemoved) does NOT
+        // yet erase registry content — that teardown, plus a workspace->contents
+        // reverse index, is an S4 (#48) prerequisite tracked on that issue.
+        // Until S4 makes the factory real nothing is ever inserted, so neither
+        // path can leak today.
+        _removeContentForTab(c.id);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& c)
@@ -294,20 +324,70 @@ namespace winrt::TerminalApp::implementation
         // stays a no-op until per-leaf tab strips exist.
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& c)
     {
-        // Phase 1: classic _CreateNewTabFromPane already materialises
-        // the IPaneContent during the TabAdded arm. The dedicated
-        // ContentRegistry/mount lifecycle lands in Phase 2 Slice 4.
+        // Phase 2 Slice 3 (#47): bind the model's ContentId to a live
+        // IPaneContent in the registry — the single strong owner of every
+        // live content in this window.
+        //
+        // EnsureMounted is the only way to obtain a mountable content: it
+        // returns the SAME instance if `contentId` is already owned (so a
+        // re-mount after a switch reattaches the live TermControl / ConPTY /
+        // scrollback that the registry kept alive across the unmount), or
+        // creates+inserts one from the spec when the id is new. Mounting an id
+        // the registry does not own is therefore unrepresentable: there is no
+        // path that attaches a bare ContentId with no content behind it.
+        //
+        // Record the tab -> content binding so TabRemoved can resolve which
+        // ContentId to erase. (WorkspaceRemoved is the dominant Phase-1 close
+        // path but does NOT yet erase registry content — that, plus a
+        // workspace->contents reverse index, is an S4 (#48) prerequisite.)
+        // ContentUnmounted is NOT a removal — it only detaches for an inactive
+        // workspace.
+        //
+        // What this slice does NOT do: the actual XAML reparent into the active
+        // workspace's leaf (which workspace, which Pane) is driven by S4 (#48,
+        // workspace switching). The registry + binding stood up here are what
+        // S4 attaches; the live content's lifetime is owned here regardless of
+        // whether it is currently parented into the tree.
+        const auto live = _contentRegistry.EnsureMounted(
+            c.contentId,
+            [&c]() -> winrt::TerminalApp::IPaneContent {
+                // TODO(workspace-phase-2-slice-4): materialise the live
+                // IPaneContent from c.description (TerminalSpec ->
+                // _OpenNewTab content, Settings/Snippets/Markdown/Scratchpad
+                // -> their content classes) and hand it back. Until S4 drives
+                // a user-reachable mount, no diff path that constructs content
+                // here is reachable; the contract is proved by the direct
+                // ContentRegistry lifetime test instead.
+                return nullptr;
+            });
+        if (live)
+        {
+            _contentByTab[c.tabId] = c.contentId;
+        }
+        (void)live;
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::ContentUnmounted& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::ContentUnmounted& c)
     {
-        // Phase 1: the classic Tab teardown (driven by the
-        // WorkspaceRemoved arm via _RemoveTab -> tab.Shutdown -> Pane
-        // -> _setPaneContent(nullptr)) already disposes IPaneContent.
-        // The dedicated ContentRegistry mount/unmount lifecycle lands in
-        // Phase 2 Slice 4.
+        // Phase 2 Slice 3 (#47): an unmount detaches the content from the
+        // active visual tree but the registry KEEPS its strong ref, so the
+        // TermControl / ConPTY / scrollback stays alive while the workspace is
+        // inactive. This is the whole point of the registry: inactive content
+        // survives detachment.
+        //
+        // Crucially this arm does NOT erase the registry entry — diff() emits
+        // ContentUnmounted both on a switch-away (keep alive) and immediately
+        // before TabRemoved when a tab is genuinely destroyed. Treating either
+        // as a teardown here would kill a ConPTY that should have survived a
+        // switch. Teardown is TabRemoved's job (and, once S4 (#48) wires it,
+        // the WorkspaceRemoved close path); this arm only notes the keep-alive.
+        //
+        // The detach from the live tree (which Pane / leaf to unparent) is
+        // driven by S4 (#48); pre-S4 there is no user-reachable switch to
+        // exercise it.
+        _contentRegistry.NoteUnmounted(c.contentId);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabDecorationUpdated& c)
