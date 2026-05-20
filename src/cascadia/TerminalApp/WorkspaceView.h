@@ -35,7 +35,7 @@ namespace winrt::TerminalApp::implementation
     class WorkspaceView final : public ::WorkspaceModel::IWorkspaceView
     {
     public:
-        explicit WorkspaceView(winrt::weak_ref<winrt::TerminalApp::TerminalPage> owner) noexcept;
+        explicit WorkspaceView(winrt::weak_ref<TerminalPage> owner) noexcept;
 
         // The latest ModelState the view should resolve id lookups
         // against. Set this to `next` BEFORE calling applyChanges() so
@@ -62,7 +62,7 @@ namespace winrt::TerminalApp::implementation
         // an empty com_ptr if the page is gone.
         winrt::com_ptr<TerminalPage> _page() const;
 
-        winrt::weak_ref<winrt::TerminalApp::TerminalPage> _owner;
+        winrt::weak_ref<TerminalPage> _owner;
         ::WorkspaceModel::ModelState _state;
     };
 }

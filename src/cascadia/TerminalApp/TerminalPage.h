@@ -108,6 +108,7 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager);
+        ~TerminalPage();
 
         // This implements shobjidl's IInitializeWithWindow, but due to a XAML Compiler bug we cannot
         // put it in our inheritance graph. https://github.com/microsoft/microsoft-ui-xaml/issues/3331

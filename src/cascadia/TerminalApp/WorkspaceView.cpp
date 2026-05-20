@@ -8,7 +8,7 @@
 
 namespace winrt::TerminalApp::implementation
 {
-    WorkspaceView::WorkspaceView(winrt::weak_ref<winrt::TerminalApp::TerminalPage> owner) noexcept :
+    WorkspaceView::WorkspaceView(winrt::weak_ref<TerminalPage> owner) noexcept :
         _owner{ std::move(owner) }
     {
     }
@@ -20,12 +20,7 @@ namespace winrt::TerminalApp::implementation
 
     winrt::com_ptr<TerminalPage> WorkspaceView::_page() const
     {
-        winrt::com_ptr<TerminalPage> p{ nullptr };
-        if (auto strong{ _owner.get() })
-        {
-            p.copy_from(winrt::get_self<TerminalPage>(strong));
-        }
-        return p;
+        return _owner.get();
     }
 
     // -------------------------------------------------------------------

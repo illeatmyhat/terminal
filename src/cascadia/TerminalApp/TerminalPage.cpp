@@ -218,6 +218,8 @@ namespace clipboard
 
 namespace winrt::TerminalApp::implementation
 {
+    TerminalPage::~TerminalPage() = default;
+
     TerminalPage::TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager) :
         _tabs{ winrt::single_threaded_observable_vector<TerminalApp::Tab>() },
         _mruTabs{ winrt::single_threaded_observable_vector<TerminalApp::Tab>() },
