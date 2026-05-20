@@ -5993,9 +5993,6 @@ namespace winrt::TerminalApp::implementation
         if (!_workspaceView)
         {
             _workspaceView = std::make_unique<WorkspaceView>(get_weak());
-            // Seed the view with the current (empty) state so id
-            // lookups during the first applyChanges() resolve correctly.
-            _workspaceView->setState(_workspaceModelState);
         }
     }
 
@@ -6004,7 +6001,8 @@ namespace winrt::TerminalApp::implementation
         _ensureWorkspaceView();
         auto changes = ::WorkspaceModel::diff(_workspaceModelState, newState);
         _workspaceModelState = std::move(newState);
-        _workspaceView->setState(_workspaceModelState);
+        // Each WorkspaceChange is self-describing — the view resolves no
+        // model state of its own, so there is no held state to seed here.
         ::WorkspaceModel::applyChanges(*_workspaceView, std::span<const ::WorkspaceModel::WorkspaceChange>{ changes });
     }
 

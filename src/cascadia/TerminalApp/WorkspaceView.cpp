@@ -13,11 +13,6 @@ namespace winrt::TerminalApp::implementation
     {
     }
 
-    void WorkspaceView::setState(::WorkspaceModel::ModelState state) noexcept
-    {
-        _state = std::move(state);
-    }
-
     winrt::com_ptr<TerminalPage> WorkspaceView::_page() const
     {
         return _owner.get();
@@ -59,46 +54,35 @@ namespace winrt::TerminalApp::implementation
     {
         // Phase 1 maps one model workspace == one classic window-level tab.
         // Switching the active workspace therefore corresponds to selecting
-        // the classic tab whose index in _tabs matches the new active
-        // workspace's index in workspaces_view(). When activeWorkspaceId is
-        // std::nullopt (the empty-model case), there is no classic tab to
-        // select.
+        // the classic tab whose index matches the new active workspace's
+        // display index, which diff() carries in `index`. When the model is
+        // empty (activeWorkspaceId std::nullopt) `index` is also nullopt and
+        // there is no classic tab to select.
         auto page = _page();
-        if (!page || !_state)
-        {
-            return;
-        }
-        if (!c.id.has_value())
+        if (!page || !c.index.has_value())
         {
             return;
         }
 
-        const auto& workspaces = _state->workspaces_view();
-        for (std::size_t i = 0; i < workspaces.size(); ++i)
+        const auto i = *c.index;
+        // _SelectTab is responsible for both _tabView.SelectedItem mutation
+        // and the focus-tracking downstream (see the _UpdatedSelectedTab /
+        // _SetFocusedTab branches in its implementation). This is the same
+        // entry point clicks on a TabViewItem already use on the flag-off
+        // path.
+        //
+        // Skip when the target tab is already selected. The Slice-2 new-
+        // workspace case fires TabAdded immediately before this
+        // ActiveWorkspaceChanged; the classic _OpenNewTab inside TabAdded
+        // already selected the new tab via _tabView.SelectedItem(newItem).
+        // Re-entering _SelectTab here would post a redundant _SetFocusedTab
+        // dispatcher hop.
+        if (i < page->_tabs.Size())
         {
-            if (workspaces[i].id == *c.id)
+            const auto idx = static_cast<uint32_t>(i);
+            if (page->_GetFocusedTabIndex() != idx)
             {
-                // _SelectTab is responsible for both _tabView.SelectedItem
-                // mutation and the focus-tracking downstream (see the
-                // _UpdatedSelectedTab / _SetFocusedTab branches in its
-                // implementation). This is the same entry point clicks on
-                // a TabViewItem already use on the flag-off path.
-                //
-                // Skip when the target tab is already selected. The Slice-2
-                // new-workspace case fires TabAdded immediately before this
-                // ActiveWorkspaceChanged; the classic _OpenNewTab inside
-                // TabAdded already selected the new tab via
-                // _tabView.SelectedItem(newItem). Re-entering _SelectTab
-                // here would post a redundant _SetFocusedTab dispatcher hop.
-                if (i < page->_tabs.Size())
-                {
-                    const auto idx = static_cast<uint32_t>(i);
-                    if (page->_GetFocusedTabIndex() != idx)
-                    {
-                        page->_SelectTab(idx);
-                    }
-                }
-                return;
+                page->_SelectTab(idx);
             }
         }
     }
@@ -123,22 +107,14 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         auto page = _page();
-        if (!page || !_state)
+        if (!page)
         {
             return;
         }
-        const auto* parentNode = _state->pane(*c.parent);
-        if (!parentNode)
-        {
-            return;
-        }
-        const auto* parentSplit = std::get_if<::WorkspaceModel::SplitPane>(parentNode);
-        if (!parentSplit)
-        {
-            return;
-        }
-        page->_splitFocusedPaneForWorkspace(parentSplit->axis,
-                                            parentSplit->ratio);
+        // The containing split's axis/ratio ride along on the change; a
+        // leaf with a parent is always nested under a SplitPane, so no
+        // node-kind re-resolution is needed.
+        page->_splitFocusedPaneForWorkspace(c.parent->axis, c.parent->ratio);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCreated& /*c*/)
@@ -178,17 +154,12 @@ namespace winrt::TerminalApp::implementation
         // Snippets, Markdown, Scratchpad) still have no user-action
         // entry point in classic Terminal and are not exercised here.
         auto page = _page();
-        if (!page || !_state)
+        if (!page)
         {
             return;
         }
 
-        const auto* record = _state->tab(c.id);
-        if (!record)
-        {
-            return;
-        }
-        if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(record->description))
+        if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(c.description))
         {
             // TODO(workspace-phase-2-slice-4): non-TerminalSpec
             // dispatch (Settings / Snippets / Markdown / Scratchpad).
@@ -200,40 +171,12 @@ namespace winrt::TerminalApp::implementation
         // driven the classic _SplitPane call (which creates the live
         // Pane + TermControl) for it. Don't fire an additional new-tab,
         // and don't bind a new workspace registry entry.
-        if (_state->parentOf(c.leafId) != nullptr)
+        if (c.leafInsideSplit)
         {
             return;
         }
 
-        const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(record->description);
-
-        // Locate the workspace that owns this tab BEFORE creating the
-        // classic Tab, so the registry binding step has the id ready.
-        // Phase 1 holds one tab per leaf per workspace, so the scan is
-        // bounded by workspaces.size().
-        ::WorkspaceModel::WorkspaceId owningWs{};
-        for (const auto& ws : _state->workspaces_view())
-        {
-            for (const auto* leaf : _state->leaves(ws.id))
-            {
-                for (const auto& t : leaf->tabs)
-                {
-                    if (t.id == c.id)
-                    {
-                        owningWs = ws.id;
-                        break;
-                    }
-                }
-                if (owningWs.valid())
-                {
-                    break;
-                }
-            }
-            if (owningWs.valid())
-            {
-                break;
-            }
-        }
+        const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(c.description);
 
         // The zero GUID is the model's "no explicit profile" sentinel:
         // ask the classic path for the default profile (Slice 2);
@@ -249,9 +192,12 @@ namespace winrt::TerminalApp::implementation
                                 ? page->_openDefaultTabForWorkspace()
                                 : page->_openProfileTabForWorkspace(spec.profile);
 
-        if (owningWs.valid() && newTab)
+        // The owning workspace rides along on the change (diff resolved it
+        // against the post-action state). Phase 1 holds one tab per leaf
+        // per workspace, so this is the workspace to bind the classic Tab to.
+        if (c.owningWorkspace.valid() && newTab)
         {
-            page->_registerClassicTabForWorkspace(owningWs, newTab);
+            page->_registerClassicTabForWorkspace(c.owningWorkspace, newTab);
         }
     }
 
@@ -325,44 +271,16 @@ namespace winrt::TerminalApp::implementation
         // Phase 1 maps each model workspace 1:1 to a classic window-
         // level tab and pins exactly one model tab per workspace, so
         // the workspace's display index doubles as the classic tab
-        // index. Locate the workspace whose leaf contains this TabId,
-        // then route the rename/color back to the classic Tab.
+        // index. diff() carries that index in `workspaceIndex`; route the
+        // rename/color straight back to the classic Tab.
         //
         // Pinning is carried by the model but has no classic XAML
         // surface yet — the dedicated pin glyph lands in Phase 2.
         auto page = _page();
-        if (!page || !_state)
+        if (!page)
         {
             return;
         }
-
-        const auto& workspaces = _state->workspaces_view();
-        for (std::size_t idx = 0; idx < workspaces.size(); ++idx)
-        {
-            const auto& ws = workspaces[idx];
-            const auto leaves = _state->leaves(ws.id);
-            bool found = false;
-            for (const auto* leaf : leaves)
-            {
-                for (const auto& t : leaf->tabs)
-                {
-                    if (t.id == c.id)
-                    {
-                        found = true;
-                        break;
-                    }
-                }
-                if (found)
-                {
-                    break;
-                }
-            }
-            if (!found)
-            {
-                continue;
-            }
-            page->_applyTabDecoration(static_cast<uint32_t>(idx), c.customTitle, c.runtimeColor);
-            return;
-        }
+        page->_applyTabDecoration(static_cast<uint32_t>(c.workspaceIndex), c.customTitle, c.runtimeColor);
     }
 }

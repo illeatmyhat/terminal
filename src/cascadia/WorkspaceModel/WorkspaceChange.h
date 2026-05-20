@@ -55,6 +55,11 @@ namespace WorkspaceModel
     struct ActiveWorkspaceChanged
     {
         std::optional<WorkspaceId> id{};
+        // Display position of `id` in the workspaces vector at emission
+        // time. Phase 1 maps that index 1:1 to the classic tab index the
+        // view should select. std::nullopt exactly when `id` is nullopt
+        // (the empty-model case, no tab to select).
+        std::optional<std::size_t> index{};
 
         [[nodiscard]] friend bool operator==(const ActiveWorkspaceChanged&, const ActiveWorkspaceChanged&) noexcept = default;
     };
@@ -63,14 +68,29 @@ namespace WorkspaceModel
     // Pane-tree changes
     // ---------------------------------------------------------------------
 
+    // The SplitPane that contains a newly-created leaf: its id plus the
+    // orientation/ratio the view needs to drive the classic split. Bundling
+    // these together (rather than carrying loose parent-axis / parent-ratio
+    // fields on LeafPaneCreated) makes the "axis/ratio are meaningless unless
+    // there is a parent" state unrepresentable.
+    struct ParentSplit
+    {
+        PaneId id{};
+        Axis axis{ Axis::Vertical };
+        double ratio{ 0.5 };
+
+        [[nodiscard]] friend bool operator==(const ParentSplit&, const ParentSplit&) noexcept = default;
+    };
+
     // A brand-new leaf pane has appeared. `parent` is std::nullopt when this
-    // leaf is the workspace's root; otherwise it is the SplitPane id that
-    // contains the leaf. The view can use `parent` to decide which existing
-    // container to insert the new element under.
+    // leaf is the workspace's root; otherwise it carries the containing
+    // SplitPane (id + axis + ratio) so the view can both decide which
+    // container to insert under and drive the classic split without
+    // re-resolving the parent node.
     struct LeafPaneCreated
     {
         PaneId id{};
-        std::optional<PaneId> parent{};
+        std::optional<ParentSplit> parent{};
 
         [[nodiscard]] friend bool operator==(const LeafPaneCreated&, const LeafPaneCreated&) noexcept = default;
     };
@@ -122,6 +142,17 @@ namespace WorkspaceModel
         std::string customTitle{};
         std::optional<Color> runtimeColor{};
         bool pinned{ false };
+        // The tab's persistable content spec — the view materialises the
+        // classic Tab from this without resolving the record by id.
+        TabContent description{};
+        // True when leafId lives inside a SplitPane. The split's new
+        // sibling leaf is materialised by apply(LeafPaneCreated); when this
+        // is set the TabAdded arm must NOT open an additional classic tab.
+        bool leafInsideSplit{ false };
+        // The workspace that owns this tab, for the classic-tab registry
+        // binding. Always valid for a diff-emitted TabAdded (every tab lives
+        // in exactly one workspace); the view's valid() check is defensive.
+        WorkspaceId owningWorkspace{};
 
         [[nodiscard]] friend bool operator==(const TabAdded&, const TabAdded&) noexcept = default;
     };
@@ -197,6 +228,10 @@ namespace WorkspaceModel
         std::string customTitle{};
         std::optional<Color> runtimeColor{};
         bool pinned{ false };
+        // Display position of the owning workspace at emission time. Phase 1
+        // maps that index 1:1 to the classic tab index the decoration
+        // applies to.
+        std::size_t workspaceIndex{ 0 };
 
         [[nodiscard]] friend bool operator==(const TabDecorationUpdated&, const TabDecorationUpdated&) noexcept = default;
     };

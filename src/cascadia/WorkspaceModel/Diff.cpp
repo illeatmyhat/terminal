@@ -206,7 +206,7 @@ namespace WorkspaceModel
         // ContentMounted for any already-mounted tab in the new subtree.
         void emitCreatesForNewSubtree(const PaneNode& subtree,
                                       const StateIndex& prevIndex,
-                                      std::optional<PaneId> parentInNext,
+                                      std::optional<ParentSplit> parentInNext,
                                       std::vector<WorkspaceChange>& out)
         {
             if (const auto* leaf = std::get_if<LeafPane>(&subtree))
@@ -255,13 +255,14 @@ namespace WorkspaceModel
                 }
                 out.push_back(SplitPaneCreated{ split.id, split.axis, split.ratio, leftId, rightId });
             }
+            const ParentSplit childParent{ split.id, split.axis, split.ratio };
             if (split.left)
             {
-                emitCreatesForNewSubtree(*split.left, prevIndex, split.id, out);
+                emitCreatesForNewSubtree(*split.left, prevIndex, childParent, out);
             }
             if (split.right)
             {
-                emitCreatesForNewSubtree(*split.right, prevIndex, split.id, out);
+                emitCreatesForNewSubtree(*split.right, prevIndex, childParent, out);
             }
         }
 
@@ -369,6 +370,7 @@ namespace WorkspaceModel
         // are TabMoved or unchanged).
         void emitTabAdds(const WorkspaceModelData* next,
                          const StateIndex& prevIndex,
+                         const StateIndex& nextIndex,
                          std::vector<WorkspaceChange>& out)
         {
             if (!next)
@@ -381,6 +383,15 @@ namespace WorkspaceModel
                 detail::collectLeaves(ws.root, leaves);
                 for (const auto* leaf : leaves)
                 {
+                    // A leaf nested under a SplitPane carries a parent in the
+                    // next-state index; the view treats that tab's classic
+                    // materialisation as already driven by LeafPaneCreated.
+                    bool leafInsideSplit = false;
+                    if (const auto paneIt = nextIndex.panes.find(leaf->id);
+                        paneIt != nextIndex.panes.end())
+                    {
+                        leafInsideSplit = paneIt->second.parent.has_value();
+                    }
                     for (std::size_t i = 0; i < leaf->tabs.size(); ++i)
                     {
                         const auto& t = leaf->tabs[i];
@@ -394,7 +405,10 @@ namespace WorkspaceModel
                             t.id,
                             t.customTitle,
                             t.runtimeColor,
-                            t.pinned });
+                            t.pinned,
+                            t.description,
+                            leafInsideSplit,
+                            ws.id });
                     }
                 }
             }
@@ -483,11 +497,24 @@ namespace WorkspaceModel
                     a->runtimeColor != b->runtimeColor ||
                     a->pinned != b->pinned)
                 {
+                    // Resolve the owning workspace's display index so the
+                    // view can route the decoration without scanning state.
+                    std::size_t workspaceIndex = 0;
+                    if (const auto leafIt = nextIndex.panes.find(nextInfo.leafId);
+                        leafIt != nextIndex.panes.end())
+                    {
+                        if (const auto posIt = nextIndex.workspacePosition.find(leafIt->second.workspaceId);
+                            posIt != nextIndex.workspacePosition.end())
+                        {
+                            workspaceIndex = posIt->second;
+                        }
+                    }
                     out.push_back(TabDecorationUpdated{
                         tid,
                         b->customTitle,
                         b->runtimeColor,
-                        b->pinned });
+                        b->pinned,
+                        workspaceIndex });
                 }
             }
         }
@@ -632,7 +659,7 @@ namespace WorkspaceModel
         }
 
         // TabAdded for every new tab.
-        emitTabAdds(next, prevIndex, additive);
+        emitTabAdds(next, prevIndex, nextIndex, additive);
 
         // ContentMounted: collected jointly with unmounts below to keep
         // logic in one place, but mount entries go in `additive`.
@@ -658,7 +685,16 @@ namespace WorkspaceModel
             std::optional<WorkspaceId> nextActive = next ? next->activeWorkspaceId : std::nullopt;
             if (prevActive != nextActive)
             {
-                mutation.push_back(ActiveWorkspaceChanged{ nextActive });
+                std::optional<std::size_t> activeIndex{};
+                if (nextActive.has_value())
+                {
+                    if (const auto it = nextIndex.workspacePosition.find(*nextActive);
+                        it != nextIndex.workspacePosition.end())
+                    {
+                        activeIndex = it->second;
+                    }
+                }
+                mutation.push_back(ActiveWorkspaceChanged{ nextActive, activeIndex });
             }
         }
 

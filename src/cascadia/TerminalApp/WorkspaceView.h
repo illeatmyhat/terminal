@@ -14,17 +14,14 @@
 // arms a migrated Phase 1 action can actually emit carry real logic;
 // the remaining arms are stubs that later slices fill in.
 //
-// The view also holds the latest ModelState. Some change arms
-// (notably TabAdded) describe a state transition without carrying every
-// field of the affected record — the view looks the rest up by id
-// against the held state. Callers must call setState() with the new
-// state BEFORE invoking applyChanges() so lookups resolve against the
-// post-diff state.
+// Every change arm is self-describing: diff() enriches each WorkspaceChange
+// with the payload its apply() overload needs (e.g. TabAdded carries the
+// content spec, the owning workspace, and a "leaf nested in a split" flag),
+// so the view never holds or resolves model state of its own.
 
 #pragma once
 
 #include "../WorkspaceModel/IWorkspaceView.h"
-#include "../WorkspaceModel/WorkspaceActions.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
 
 namespace winrt::TerminalApp::implementation
@@ -35,11 +32,6 @@ namespace winrt::TerminalApp::implementation
     {
     public:
         explicit WorkspaceView(winrt::weak_ref<TerminalPage> owner) noexcept;
-
-        // The latest ModelState the view should resolve id lookups
-        // against. Set this to `next` BEFORE calling applyChanges() so
-        // arms like TabAdded can find the post-diff TabRecord.
-        void setState(::WorkspaceModel::ModelState state) noexcept;
 
         void apply(const ::WorkspaceModel::WorkspaceAdded& c) override;
         void apply(const ::WorkspaceModel::WorkspaceRemoved& c) override;
@@ -62,6 +54,5 @@ namespace winrt::TerminalApp::implementation
         winrt::com_ptr<TerminalPage> _page() const;
 
         winrt::weak_ref<TerminalPage> _owner;
-        ::WorkspaceModel::ModelState _state;
     };
 }

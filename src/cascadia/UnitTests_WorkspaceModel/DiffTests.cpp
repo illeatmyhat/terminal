@@ -160,6 +160,12 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(ContentUnmounted_OnTabRemove);
         TEST_METHOD(TabDecorationUpdated_TitleChanged);
 
+        // ---- Enriched-payload coverage (the model->view contract that
+        //      replaced WorkspaceView's held state) ----
+        TEST_METHOD(LeafPaneCreated_InSplit_CarriesParentAxisRatio);
+        TEST_METHOD(TabDecorationUpdated_SecondWorkspace_CarriesIndex);
+        TEST_METHOD(TabAdded_SecondWorkspace_CarriesOwningWorkspace);
+
         // ---- Identity-keyed move detection (the load-bearing case) ----
         TEST_METHOD(TabMoved_CrossLeaf_SingleChange);
         TEST_METHOD(TabMoved_CrossWorkspace_SingleChange);
@@ -226,6 +232,10 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), setActive.size());
         VERIFY_IS_TRUE(setActive[0].id.has_value());
         VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, setActive[0].id->v);
+        // Enriched payload: workspace 2 is at display index 1, which the
+        // view maps 1:1 to the classic tab to select.
+        VERIFY_IS_TRUE(setActive[0].index.has_value());
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), *setActive[0].index);
     }
 
     void DiffTests::LeafPaneCreated_NewWorkspace()
@@ -324,6 +334,13 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(PaneId{ 10 }.v, adds[0].leafId.v);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds[0].idx);
         VERIFY_ARE_EQUAL(TabId{ 101 }.v, adds[0].id.v);
+        // Enriched payload: the change carries the content spec, the owning
+        // workspace, and a "leaf is nested in a split" flag (false here —
+        // leaf 10 is the workspace root).
+        VERIFY_IS_TRUE(std::holds_alternative<TerminalSpec>(adds[0].description));
+        VERIFY_IS_TRUE(std::get<TerminalSpec>(adds[0].description) == spec(101));
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, adds[0].owningWorkspace.v);
+        VERIFY_IS_FALSE(adds[0].leafInsideSplit);
     }
 
     void DiffTests::TabRemoved_TabGoneFromSurvivingLeaf()
@@ -435,6 +452,99 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos.size());
         VERIFY_ARE_EQUAL(TabId{ 100 }.v, decos[0].id.v);
         VERIFY_IS_TRUE(decos[0].customTitle == "new title");
+        // Enriched payload: the only workspace is at display index 0.
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), decos[0].workspaceIndex);
+    }
+
+    // =====================================================================
+    // Enriched-payload coverage
+    // =====================================================================
+
+    void DiffTests::LeafPaneCreated_InSplit_CarriesParentAxisRatio()
+    {
+        // prev: ws1 is a single leaf (id=10).
+        // next: ws1 root is split(50, leaf10, newLeaf20) with a non-default
+        //       orientation + ratio, so the carried fields are meaningful.
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }) },
+            WorkspaceId{ 1 });
+
+        PaneNode leftLeaf = makeLeaf(10, { makeTab(100) });
+        PaneNode rightLeaf = makeLeaf(20, { makeTab(200) });
+        auto split = makeSplit(50, std::move(leftLeaf), std::move(rightLeaf), Axis::Horizontal, 0.3);
+        auto next = makeState(
+            { makeWs(1, PaneNode{ split }, PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+
+        const auto ops = diff(prev, next);
+
+        // The new sibling leaf carries its containing split's axis + ratio.
+        const auto creates = changesOfKind<LeafPaneCreated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), creates.size());
+        VERIFY_ARE_EQUAL(PaneId{ 20 }.v, creates[0].id.v);
+        VERIFY_IS_TRUE(creates[0].parent.has_value());
+        VERIFY_ARE_EQUAL(PaneId{ 50 }.v, creates[0].parent->id.v);
+        VERIFY_IS_TRUE(creates[0].parent->axis == Axis::Horizontal);
+        VERIFY_ARE_EQUAL(0.3, creates[0].parent->ratio);
+
+        // The new sibling's tab must be flagged as living inside a split so
+        // the view skips opening an additional classic tab for it — and the
+        // rest of its payload must still be correct on that special path.
+        const auto adds = changesOfKind<TabAdded>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds.size());
+        VERIFY_ARE_EQUAL(TabId{ 200 }.v, adds[0].id.v);
+        VERIFY_IS_TRUE(adds[0].leafInsideSplit);
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, adds[0].owningWorkspace.v);
+        VERIFY_IS_TRUE(std::holds_alternative<TerminalSpec>(adds[0].description));
+        VERIFY_IS_TRUE(std::get<TerminalSpec>(adds[0].description) == spec(200));
+    }
+
+    void DiffTests::TabAdded_SecondWorkspace_CarriesOwningWorkspace()
+    {
+        // Two workspaces; add a new tab to the SECOND workspace's leaf. The
+        // owner must be resolved to ws 2 — a single-workspace fixture would
+        // pass even if emitTabAdds mis-attributed the owner.
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { makeTab(200) }), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+        auto next = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { makeTab(200), makeTab(201) }, 1), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+
+        const auto ops = diff(prev, next);
+        const auto adds = changesOfKind<TabAdded>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds.size());
+        VERIFY_ARE_EQUAL(TabId{ 201 }.v, adds[0].id.v);
+        VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, adds[0].owningWorkspace.v);
+        VERIFY_IS_FALSE(adds[0].leafInsideSplit);
+    }
+
+    void DiffTests::TabDecorationUpdated_SecondWorkspace_CarriesIndex()
+    {
+        // Two workspaces; the decoration changes on a tab in the SECOND
+        // workspace (display index 1), so the carried index isn't the
+        // trivial 0.
+        auto t200Prev = makeTab(200);
+        t200Prev.customTitle = "old";
+        auto t200Next = makeTab(200);
+        t200Next.customTitle = "new";
+
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { t200Prev }), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+        auto next = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { t200Next }), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+
+        const auto ops = diff(prev, next);
+        const auto decos = changesOfKind<TabDecorationUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos.size());
+        VERIFY_ARE_EQUAL(TabId{ 200 }.v, decos[0].id.v);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos[0].workspaceIndex);
     }
 
     // =====================================================================
