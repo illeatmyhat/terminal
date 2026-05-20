@@ -733,6 +733,34 @@ namespace winrt::TerminalApp::implementation
         // split resize-pane must address for the model's resizePane action.
         std::optional<::WorkspaceModel::PaneId> _focusedSplitIdInActiveWorkspace() const;
 
+        // ----------------------------------------------------------------
+        // Phase 2 Slice 2 (#46): the visible workspaces UI shell. None of
+        // this drives the model — the sidebar is a pure read-only mirror of
+        // workspace state projected through the WorkspaceView arms, and the
+        // chrome buttons are present-but-inert this slice.
+        // ----------------------------------------------------------------
+
+        // Realized only on the flag-on path from Create(): loads the inline
+        // WorkspaceChrome + sidebar (x:Load="False" elements), shows the
+        // sidebar column, and hands the chrome to the host titlebar so the
+        // window tab strip drops into the client area under it. A no-op when
+        // the flag is off, so flag-off rendering is byte-for-byte upstream.
+        void _initializeWorkspaceShell();
+
+        // Sidebar projection helpers, called by the WorkspaceView arms.
+        // Each sidebar row stores its WorkspaceId on the TextBlock's Tag, so
+        // the active-row highlight resolves by id identity (matching the S1
+        // resolver philosophy) rather than by a positional index into the
+        // workspace list.
+        void _addWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws, const std::string& name);
+        void _removeWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws);
+        void _highlightActiveWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId active);
+
+        // The realized sidebar StackPanel, or nullptr when the flag is off /
+        // the shell hasn't been initialized. Children are one TextBlock per
+        // workspace, in declared (top→bottom) order.
+        winrt::Windows::UI::Xaml::Controls::StackPanel _workspaceSidebar{ nullptr };
+
         friend class WorkspaceView;
         friend class TerminalAppLocalTests::TabTests;
         friend class TerminalAppLocalTests::SettingsTests;

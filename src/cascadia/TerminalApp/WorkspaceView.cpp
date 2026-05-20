@@ -41,12 +41,23 @@ namespace winrt::TerminalApp::implementation
     // the rest are intentional stubs that later slices fill in.
     // -------------------------------------------------------------------
 
-    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceAdded& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceAdded& c)
     {
-        // Phase 1: one model workspace == one classic window-level tab.
-        // The classic tab is materialised by the TabAdded arm; there is
-        // no separate workspace-level XAML object yet (that lands in
-        // Phase 2's sidebar slice).
+        // Phase 2 Slice 2 (#46): each model workspace gets one read-only
+        // sidebar row, appended in declared order. WorkspaceAdded is emitted
+        // in diff Phase 1 (before any ActiveWorkspaceChanged) and in workspace
+        // display order, so appending here keeps the sidebar in the workspaces'
+        // declared top→bottom order with no positional bookkeeping.
+        //
+        // The classic window-level tab that also backs this workspace in
+        // Phase 1 is still materialised by the TabAdded arm; this arm only
+        // maintains the sidebar projection and drives nothing.
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_addWorkspaceSidebarRow(c.id, c.name);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceRemoved& c)
@@ -64,6 +75,12 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+        // Phase 2 Slice 2 (#46): drop the read-only sidebar row that mirrored
+        // this workspace (located by id, not slot), then tear down the classic
+        // tab. Order is not load-bearing — the sidebar row carries no model
+        // state — but removing it first keeps the projection consistent before
+        // the tab teardown can re-enter the page.
+        page->_removeWorkspaceSidebarRow(c.id);
         page->_removeClassicTabForRemovedWorkspace(c.id);
     }
 
@@ -81,6 +98,14 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // Phase 2 Slice 2 (#46): move the read-only sidebar's active-row
+        // highlight to the newly-active workspace. Resolved by id identity
+        // (the row stores its WorkspaceId), never by a positional index into
+        // the workspace list. Done before the tab-selection resolve below so a
+        // workspace that has a sidebar row but no resolvable classic tab still
+        // gets its highlight updated.
+        page->_highlightActiveWorkspaceSidebarRow(*c.id);
 
         const auto resolved = _resolveClassicTabIndex(*c.id);
         if (!resolved.has_value())

@@ -342,10 +342,26 @@ namespace winrt::TerminalApp::implementation
         auto tabRowImpl = winrt::get_self<implementation::TabRowControl>(_tabRow);
         _newTabButton = tabRowImpl->NewTabButton();
 
-        if (_settings.GlobalSettings().ShowTabsInTitlebar())
+        // Phase 2 Slice 2 (#46): when the workspaces flag is ON, the chrome
+        // (hamburger + new-workspace split-button) takes the window titlebar
+        // and the tab strip stays in the client area UNDER it — i.e. we reuse
+        // the existing "tabs under titlebar" rendering by simply leaving the
+        // TabRow in the page rather than handing it to the host. The sidebar
+        // also gets realized here. When the flag is OFF, _initializeWorkspaceShell
+        // is a no-op and we fall through to the byte-for-byte upstream path
+        // below (sidebar collapsed, tabs in titlebar exactly as today).
+        if (_workspacesFlagEnabled())
+        {
+            _initializeWorkspaceShell();
+        }
+        else if (_settings.GlobalSettings().ShowTabsInTitlebar())
         {
             // Remove the TabView from the page. We'll hang on to it, we need to
             // put it in the titlebar.
+            //
+            // The #46 root restructure keeps TabRow a DIRECT child of Root (now
+            // at row 1 / column 1 via attached properties), so this is the exact
+            // upstream removal — flag-off tabs-in-titlebar is byte-for-byte.
             uint32_t index = 0;
             if (this->Root().Children().IndexOf(_tabRow, index))
             {
@@ -6424,6 +6440,120 @@ namespace winrt::TerminalApp::implementation
             return parent->id;
         }
         return std::nullopt;
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 2 Slice 2 (#46): the workspaces UI shell.
+    // -----------------------------------------------------------------
+
+    // Realize and show the flag-on chrome: the inline WorkspaceChrome (loaded
+    // via FindName because it is x:Load="False") is lifted into the host
+    // titlebar via SetTitleBarContent, which leaves the page's tab strip in
+    // the client area UNDER the titlebar (reusing the existing tabs-under-
+    // titlebar rendering — we simply do NOT hand the TabRow to the host). The
+    // sidebar StackPanel is realized and made visible so its Auto column takes
+    // up width. Called only when _workspacesFlagEnabled() is true, so the
+    // flag-off path never touches any of this and stays byte-for-byte upstream.
+    void TerminalPage::_initializeWorkspaceShell()
+    {
+        // Realize the chrome (hamburger + new-workspace split-button) and hand
+        // it to the host titlebar. The host's TitlebarControl supplies the
+        // min/max/close caption buttons + drag bar around our content, so the
+        // chrome only carries the workspace-specific buttons (inert this slice).
+        //
+        // The host sets the chrome as its titlebar ContentPresenter content,
+        // which reparents it — so it must be detached from Root first, exactly
+        // like the classic tabs-in-titlebar path detaches the TabRow. (Skip the
+        // raise if no host is listening, e.g. headless LocalTests; the chrome
+        // then simply stays in Root row 0, still satisfying "chrome present".)
+        if (const auto chrome = FindName(L"WorkspaceChrome").try_as<UIElement>())
+        {
+            if (const auto chromeParent = chrome.try_as<FrameworkElement>().Parent().try_as<Controls::Panel>())
+            {
+                uint32_t index = 0;
+                if (chromeParent.Children().IndexOf(chrome, index))
+                {
+                    chromeParent.Children().RemoveAt(index);
+                }
+            }
+            SetTitleBarContent.raise(*this, chrome);
+        }
+
+        // Realize the sidebar and make its column take width. Flag-off it
+        // stays x:Load="False" / Collapsed, so the Auto column is zero-width.
+        _workspaceSidebar = FindName(L"WorkspaceSidebar").try_as<Controls::StackPanel>();
+        if (_workspaceSidebar)
+        {
+            _workspaceSidebar.Visibility(Visibility::Visible);
+        }
+    }
+
+    // Append one read-only sidebar row for a newly-added workspace, in
+    // declared order (WorkspaceAdded arrives in diff Phase 1, i.e. before any
+    // ActiveWorkspaceChanged, and in workspace display order). The row stores
+    // its WorkspaceId on the TextBlock Tag so the active-row highlight resolves
+    // by id identity rather than positional index. Read-only: the TextBlock has
+    // no input handlers, so a click does nothing and never mutates the model.
+    void TerminalPage::_addWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws, const std::string& name)
+    {
+        if (!_workspaceSidebar || !ws.valid())
+        {
+            return;
+        }
+
+        auto row = Controls::TextBlock{};
+        row.Text(winrt::hstring{ til::u8u16(name.empty() ? std::string{ "Workspace" } : name) });
+        row.Padding(Thickness{ 12, 8, 12, 8 });
+        row.TextTrimming(TextTrimming::CharacterEllipsis);
+        // Stash the stable WorkspaceId so the active-row highlight + removal can
+        // resolve this row by id, not by slot.
+        row.Tag(winrt::box_value(static_cast<uint64_t>(ws.v)));
+        _workspaceSidebar.Children().Append(row);
+    }
+
+    // Remove the sidebar row that backs a removed workspace, located by its
+    // stored WorkspaceId (id identity, not positional).
+    void TerminalPage::_removeWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws)
+    {
+        if (!_workspaceSidebar || !ws.valid())
+        {
+            return;
+        }
+        const auto children = _workspaceSidebar.Children();
+        for (uint32_t i = 0; i < children.Size(); ++i)
+        {
+            if (const auto tb = children.GetAt(i).try_as<Controls::TextBlock>())
+            {
+                if (const auto boxed = tb.Tag().try_as<uint64_t>(); boxed && *boxed == ws.v)
+                {
+                    children.RemoveAt(i);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Highlight the sidebar row whose stored WorkspaceId matches the newly
+    // active workspace, clearing the highlight from the others. Resolution is
+    // by id identity (the S1-resolver philosophy): we never index the workspace
+    // list positionally to find the active row.
+    void TerminalPage::_highlightActiveWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId active)
+    {
+        if (!_workspaceSidebar)
+        {
+            return;
+        }
+        const auto children = _workspaceSidebar.Children();
+        for (const auto& child : children)
+        {
+            if (const auto tb = child.try_as<Controls::TextBlock>())
+            {
+                const auto boxed = tb.Tag().try_as<uint64_t>();
+                const bool isActive = active.valid() && boxed && *boxed == active.v;
+                tb.FontWeight(isActive ? Windows::UI::Text::FontWeights::Bold()
+                                       : Windows::UI::Text::FontWeights::Normal());
+            }
+        }
     }
 
 }

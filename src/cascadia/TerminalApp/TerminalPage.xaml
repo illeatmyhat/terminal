@@ -13,19 +13,119 @@
       Background="Transparent"
       mc:Ignorable="d">
 
+    <!--
+        Workspaces (experimental.workspaces.enabled) shell restructure (#46).
+
+        The page root is now a vertical stack of two regions:
+          Row 0 — a full-width titlebar chrome row. When the workspaces flag
+                  is ON, the inline WorkspaceChrome (hamburger + new-workspace
+                  split-button; min/max/close come from the host TitlebarControl
+                  once the chrome is handed to it via SetTitleBarContent) is
+                  realized here and then lifted into the window titlebar. When
+                  the flag is OFF the chrome is never realized and this Auto row
+                  collapses to zero height.
+          Row 1 — the body, a two-column [sidebar | content] grid. The sidebar
+                  column is Width=Auto and its StackPanel is Collapsed unless the
+                  flag is ON, so flag-off collapses it to zero width and the
+                  content column fills the entire body — byte-for-byte upstream.
+                  The content column holds the original three rows (TabRow,
+                  InfoBar stack, TabContent) unchanged, plus the dialogs/toasts.
+
+        Keeping the titlebar as its own full-width top row (rather than letting
+        the sidebar run full-height) preserves the custom non-client caption
+        drag area / min-max-close hit-testing — the sidebar lives in the CLIENT
+        area below the titlebar.
+    -->
     <Grid x:Name="Root"
           Background="Transparent">
         <Grid.RowDefinitions>
+            <!--  Row 0 — full-width titlebar chrome row (collapses to 0 when WorkspaceChrome is unrealized).  -->
+            <RowDefinition Height="Auto" />
+            <!--  Rows 1-3 — the original TabRow / InfoBar stack / TabContent rows, unchanged.  -->
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
         </Grid.RowDefinitions>
 
+        <!--
+            Column 0 is the workspaces sidebar (Auto width; zero when its
+            content is unrealized/Collapsed). Column 1 is the classic content.
+            Flag-off, the sidebar is never realized, so column 0 is zero-width
+            and column 1 fills the whole grid — byte-for-byte upstream.
+        -->
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!--
+            Inline WorkspaceChrome shell, spanning the full width of the top
+            row. Realized via FindName only on the flag-on path (see
+            TerminalPage::_initializeWorkspaceShell), then re-parented into the
+            host titlebar through SetTitleBarContent so the window's
+            min/max/close caption buttons sit beside it. The hamburger and
+            new-workspace split-button are present-but-inert this slice.
+        -->
+        <Grid x:Name="WorkspaceChrome"
+              Grid.Row="0"
+              Grid.Column="0"
+              Grid.ColumnSpan="2"
+              x:Load="False"
+              Background="Transparent">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <Button x:Name="WorkspaceHamburgerButton"
+                    Grid.Column="0"
+                    Width="40"
+                    Height="36"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Content="&#xE700;"
+                    FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                    FontSize="14"
+                    IsEnabled="False" />
+
+            <mux:SplitButton x:Name="NewWorkspaceButton"
+                             Grid.Column="1"
+                             Height="32"
+                             Margin="4,0,0,0"
+                             VerticalAlignment="Center"
+                             Content="&#xE710;"
+                             FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                             FontSize="12"
+                             IsEnabled="False" />
+        </Grid>
+
+        <!--
+            Read-only workspace sidebar. Lives in the CLIENT area BELOW the
+            titlebar (rows 1-3, column 0), so it never interferes with the
+            custom non-client caption drag area / min-max-close hit-testing.
+            Collapsed (zero-width Auto column) unless the flag is on; on the
+            flag-on path TerminalPage realizes it via FindName, flips Visibility
+            to Visible, and maintains one row per workspace in declared order
+            from the WorkspaceView projection. Read-only this slice: rows are
+            non-interactive TextBlocks.
+        -->
+        <StackPanel x:Name="WorkspaceSidebar"
+                    Grid.Row="1"
+                    Grid.RowSpan="3"
+                    Grid.Column="0"
+                    x:Load="False"
+                    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+                    Orientation="Vertical"
+                    Visibility="Collapsed" />
+
         <local:TabRowControl x:Name="TabRow"
-                             Grid.Row="0"
+                             Grid.Row="1"
+                             Grid.Column="1"
                              KeyUp="_KeyDownHandler" />
 
-        <StackPanel Grid.Row="1"
+        <StackPanel Grid.Row="2"
+                    Grid.Column="1"
                     Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
             <mux:InfoBar x:Name="KeyboardServiceWarningInfoBar"
                          x:Load="False"
@@ -57,7 +157,8 @@
         </StackPanel>
 
         <Grid x:Name="TabContent"
-              Grid.Row="2"
+              Grid.Row="3"
+              Grid.Column="1"
               HorizontalAlignment="Stretch"
               VerticalAlignment="Stretch">
             <Grid.Background>
@@ -83,11 +184,13 @@
         -->
 
         <local:AboutDialog x:Name="AboutDialog"
-                           Grid.Row="2"
+                           Grid.Row="3"
+                           Grid.Column="1"
                            x:Load="False" />
 
         <ContentDialog x:Name="ConfirmCloseDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <CheckBox x:Uid="DontAskAgainCheckBox" />
@@ -95,13 +198,15 @@
 
         <ContentDialog x:Name="CloseReadOnlyDialog"
                        x:Uid="CloseReadOnlyDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Close" />
 
         <ContentDialog x:Name="MultiLinePasteDialog"
                        x:Uid="MultiLinePasteDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <StackPanel>
@@ -121,13 +226,15 @@
 
         <ContentDialog x:Name="LargePasteDialog"
                        x:Uid="LargePasteDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary" />
 
         <ContentDialog x:Name="ControlNoticeDialog"
                        x:Uid="ControlNoticeDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Primary">
             <TextBlock IsTextSelectionEnabled="True"
@@ -141,7 +248,8 @@
 
         <ContentDialog x:Name="UriErrorDialog"
                        x:Uid="UriErrorDialog"
-                       Grid.Row="2"
+                       Grid.Row="3"
+                       Grid.Column="1"
                        x:Load="False"
                        DefaultButton="Close">
             <TextBlock IsTextSelectionEnabled="True"
@@ -156,14 +264,16 @@
         </ContentDialog>
 
         <local:CommandPalette x:Name="CommandPaletteElement"
-                              Grid.Row="2"
+                              Grid.Row="3"
+                              Grid.Column="1"
                               VerticalAlignment="Stretch"
                               x:Load="False"
                               PreviewKeyDown="_KeyDownHandler"
                               Visibility="Collapsed" />
 
         <local:SuggestionsControl x:Name="SuggestionsElement"
-                                  Grid.Row="2"
+                                  Grid.Row="3"
+                                  Grid.Column="1"
                                   HorizontalAlignment="Left"
                                   VerticalAlignment="Top"
                                   x:Load="False"
@@ -176,6 +286,7 @@
             tracked by MUX#4382
         -->
         <mux:TeachingTip x:Name="WindowIdToast"
+                         Grid.Column="1"
                          Title="{x:Bind WindowProperties.WindowIdForDisplay}"
                          x:Load="False"
                          IsLightDismissEnabled="True"
@@ -183,6 +294,7 @@
 
         <mux:TeachingTip x:Name="WindowRenamer"
                          x:Uid="WindowRenamer"
+                         Grid.Column="1"
                          Title="{x:Bind WindowProperties.WindowIdForDisplay}"
                          x:Load="False"
                          ActionButtonClick="_WindowRenamerActionClick"
@@ -202,12 +314,14 @@
 
         <mux:TeachingTip x:Name="WindowCwdToast"
                          x:Uid="WindowCwdToast"
+                         Grid.Column="1"
                          Title="{x:Bind WindowProperties.VirtualWorkingDirectory, Mode=OneWay}"
                          x:Load="False"
                          IsLightDismissEnabled="True" />
 
         <mux:TeachingTip x:Name="ActionSavedToast"
                          x:Uid="ActionSavedToast"
+                         Grid.Column="1"
                          Title="Action Saved"
                          HorizontalAlignment="Stretch"
                          x:Load="False"
@@ -235,6 +349,7 @@
         </mux:TeachingTip>
         <mux:TeachingTip x:Name="ActionSaveFailedToast"
                          x:Uid="ActionSaveFailedToast"
+                         Grid.Column="1"
                          Title="Action Save Failed"
                          x:Load="False"
                          IsLightDismissEnabled="True">

@@ -109,6 +109,16 @@ namespace TerminalAppLocalTests
         TEST_METHOD(MoveTab_FlagOn_DiffEmitsTabMovedPreservingId);
         TEST_METHOD(MoveTab_FlagOn_CrossWorkspaceTabMovedPreservingId);
 
+        // Slice 2 / Phase 2 Visible #2 (#46): the workspaces UI shell.
+        //  - flag-off: the sidebar column is collapsed / zero-width and the
+        //    page renders byte-for-byte upstream;
+        //  - flag-on: the sidebar mirrors one read-only row per workspace in
+        //    declared order;
+        //  - clicking a sidebar row mutates nothing in the model.
+        TEST_METHOD(Sidebar_FlagOff_IsCollapsedAndZeroWidth);
+        TEST_METHOD(Sidebar_FlagOn_MirrorsWorkspacesInDeclaredOrder);
+        TEST_METHOD(Sidebar_FlagOn_RowIsReadOnly_NoModelMutation);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -2530,6 +2540,201 @@ namespace TerminalAppLocalTests
                              L"moved tab must NOT appear as TabAdded across workspaces");
             VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), removedHits,
                              L"moved tab must NOT appear as TabRemoved across workspaces");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // -------------------------------------------------------------------
+    // Slice 2 / Phase 2 Visible #2 (#46): the workspaces UI shell.
+    // -------------------------------------------------------------------
+
+    // AC (the cardinal one): flag-off, the sidebar column is collapsed /
+    // zero-width and the page is byte-for-byte upstream. The sidebar element
+    // is x:Load="False" and is realized ONLY on the flag-on path, so flag-off
+    // it is never instantiated and the Auto sidebar column carries no content
+    // (zero width). The WorkspaceChrome is likewise never realized, so its
+    // titlebar row collapses too. We assert the unrealized + zero-width state
+    // directly.
+    void WorkspaceTests::Sidebar_FlagOff_IsCollapsedAndZeroWidth()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // The shell is never initialized on the flag-off path, so the
+            // sidebar StackPanel member stays null — nothing was lifted into
+            // the titlebar, nothing was given width.
+            VERIFY_IS_TRUE(page->_workspaceSidebar == nullptr,
+                           L"flag-off must NOT realize/show the sidebar StackPanel");
+
+            // The classic content (TabContent / TabRow) still lives, and the
+            // single startup tab landed exactly as upstream.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"flag-off startup must render the classic single-tab UI");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off must leave the workspace model dormant");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off must NOT instantiate WorkspaceView");
+
+            // Zero-width assertion: even if the x:Load element is force-realized
+            // (FindName triggers realization), its AUTHORED default visibility
+            // is Collapsed, so the Auto sidebar column contributes zero width.
+            // This is the structural guarantee that flag-off layout is upstream.
+            auto realized = page->FindName(L"WorkspaceSidebar")
+                                .try_as<winrt::Windows::UI::Xaml::Controls::StackPanel>();
+            VERIFY_IS_NOT_NULL(realized, L"the sidebar element should exist in the tree");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             realized.Visibility(),
+                             L"flag-off the sidebar must be Collapsed -> zero-width Auto column");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: flag-on, the sidebar shows one read-only row per workspace in the
+    // workspaces' declared order. After startup-replay (workspace 0) + one
+    // NewTab (workspace 1) the model holds two workspaces; the sidebar must
+    // hold two rows whose stored WorkspaceIds match workspaces_view() in order.
+    void WorkspaceTests::Sidebar_FlagOn_MirrorsWorkspacesInDeclaredOrder()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Startup gives workspace 0 (one row). Add a second workspace.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_TRUE(page->_workspaceSidebar != nullptr,
+                           L"flag-on must realize the sidebar StackPanel");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                             page->_workspaceSidebar.Visibility(),
+                             L"flag-on sidebar must be visible (non-zero-width column)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceSidebar.Children().Size(),
+                             L"startup-replay must produce exactly one sidebar row");
+
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size());
+
+            const auto children = page->_workspaceSidebar.Children();
+            VERIFY_ARE_EQUAL(2u, children.Size(),
+                             L"sidebar row count must equal the workspace count");
+
+            // Each row, in order, carries the matching workspace's id on its
+            // Tag — proving declared-order projection by id identity (no
+            // positional indexing into the workspace list).
+            for (uint32_t i = 0; i < children.Size(); ++i)
+            {
+                auto tb = children.GetAt(i).try_as<winrt::Windows::UI::Xaml::Controls::TextBlock>();
+                VERIFY_IS_NOT_NULL(tb, L"every sidebar row must be a read-only TextBlock");
+                const auto boxed = tb.Tag().try_as<uint64_t>();
+                VERIFY_IS_TRUE(boxed.has_value(), L"each row must stash its WorkspaceId on Tag");
+                VERIFY_ARE_EQUAL(workspaces[i].id.v, boxed.value(),
+                                 L"sidebar rows must mirror workspaces in declared order");
+            }
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: the sidebar is read-only this slice — clicking a row does nothing
+    // and never mutates the model. There is no clickable control: each row is
+    // a plain TextBlock (not a ButtonBase / Control / ListViewItem), so there
+    // is no input path from the sidebar into a model action. We assert the row
+    // type is non-interactive and that the model state object is identical
+    // (same shared_ptr, same workspace count) before and after touching it.
+    void WorkspaceTests::Sidebar_FlagOn_RowIsReadOnly_NoModelMutation()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // One workspace from startup. Capture the model identity + count.
+        const void* modelBefore = nullptr;
+        size_t countBefore = 0;
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceSidebar != nullptr);
+            VERIFY_ARE_EQUAL(1u, page->_workspaceSidebar.Children().Size());
+
+            modelBefore = page->_workspaceModelState.get();
+            countBefore = page->_workspaceModelState->workspaces_view().size();
+
+            // The row exposes no interactive surface a click could route
+            // through: it is a TextBlock, not a ButtonBase or even a Control.
+            auto row = page->_workspaceSidebar.Children().GetAt(0);
+            VERIFY_IS_NOT_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::TextBlock>(),
+                               L"sidebar row must be a read-only TextBlock");
+            VERIFY_IS_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::Primitives::ButtonBase>(),
+                           L"sidebar row must NOT be a clickable ButtonBase");
+            VERIFY_IS_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::Control>(),
+                           L"sidebar row must NOT be an interactive Control");
+
+            // Re-running the active-row highlight (the only sidebar-facing
+            // entry point this slice exposes) is a pure view mutation: it must
+            // not allocate a new model state nor change the workspace set.
+            const auto active = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(active.has_value());
+            page->_highlightActiveWorkspaceSidebarRow(active.value());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(modelBefore, static_cast<const void*>(page->_workspaceModelState.get()),
+                             L"touching the sidebar must not replace the model state");
+            VERIFY_ARE_EQUAL(countBefore, page->_workspaceModelState->workspaces_view().size(),
+                             L"touching the sidebar must not change the workspace set");
         });
         VERIFY_SUCCEEDED(result);
     }
