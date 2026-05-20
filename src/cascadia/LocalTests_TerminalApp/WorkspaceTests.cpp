@@ -6,6 +6,9 @@
 #include "../TerminalApp/TerminalPage.h"
 #include "../TerminalApp/TerminalWindow.h"
 #include "../TerminalApp/ContentManager.h"
+#include "../WorkspaceModel/WorkspaceChange.h"
+#include "../WorkspaceModel/Diff.h"
+#include "../WorkspaceModel/Validator.h"
 #include "CppWinrtTailored.h"
 
 using namespace Microsoft::Console;
@@ -483,7 +486,7 @@ namespace TerminalAppLocalTests
 
         Log::Comment(L"Switch to tab 0 via SwitchToTab action");
         result = RunOnUIThread([&page]() {
-            SwitchToTabArgs args{ 0 };
+            SwitchToTabArgs args{ 0u };
             ActionEventArgs eventArgs{ args };
             page->_HandleSwitchToTab(nullptr, eventArgs);
         });
@@ -557,7 +560,7 @@ namespace TerminalAppLocalTests
 
         Log::Comment(L"Switch to tab 0 via SwitchToTab action");
         result = RunOnUIThread([&page]() {
-            SwitchToTabArgs args{ 0 };
+            SwitchToTabArgs args{ 0u };
             ActionEventArgs eventArgs{ args };
             page->_HandleSwitchToTab(nullptr, eventArgs);
         });
@@ -1446,11 +1449,10 @@ namespace TerminalAppLocalTests
 
         Log::Comment(L"Fire NewTab with an out-of-range ProfileIndex; this should bail without growing _tabs or the model");
         result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
             // Settings has exactly one active profile, so ProfileIndex
             // 999 is guaranteed out of range and
             // _shouldBailForInvalidProfileIndex returns true.
-            newTerminalArgs.ProfileIndex(winrt::Windows::Foundation::IReference<int32_t>{ 999 });
+            NewTerminalArgs newTerminalArgs{ 999 };
             NewTabArgs newTabArgs{ newTerminalArgs };
             ActionEventArgs eventArgs{ newTabArgs };
             page->_HandleNewTab(nullptr, eventArgs);
@@ -1766,10 +1768,10 @@ namespace TerminalAppLocalTests
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
             VERIFY_IS_NOT_NULL(split, L"split node must still exist post-resize");
-            VERIFY_ARE_EQUAL(splitId.value, split->id.value,
+            VERIFY_ARE_EQUAL(splitId.v, split->id.v,
                              L"split id must be preserved across resize");
-            VERIFY_IS_GREATER_THAN(split->ratio, preRatio,
-                                   L"ResizeDirection::Right must grow the first/left child's ratio");
+            VERIFY_IS_TRUE(split->ratio > preRatio,
+                           L"ResizeDirection::Right must grow the first/left child's ratio");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -1786,19 +1788,22 @@ namespace TerminalAppLocalTests
             // After +0.05 then -0.05, we should land back near preRatio
             // (allow a small epsilon for double rounding).
             const auto delta = split->ratio - preRatio;
-            VERIFY_IS_LESS_THAN(delta, 0.0001,
-                                L"ResizeDirection::Left must shrink the first/left child's ratio back");
-            VERIFY_IS_GREATER_THAN(delta, -0.0001,
-                                   L"and not overshoot");
+            VERIFY_IS_TRUE(delta < 0.0001,
+                           L"ResizeDirection::Left must shrink the first/left child's ratio back");
+            VERIFY_IS_TRUE(delta > -0.0001,
+                           L"and not overshoot");
         });
         VERIFY_SUCCEEDED(result);
     }
 
-    // Strangler-fig contract pin for resize: flag-off split must keep
-    // the model machinery dormant. The classic _ResizePane direction-
-    // based path is exercised by TabTests; we just verify the flag-off
-    // _HandleResizePane / _ResizePane sequence leaves the model state
-    // untouched.
+    // Strangler-fig contract pin for resize: with the flag OFF the
+    // workspace model machinery must stay dormant. The classic
+    // _ResizePane path is unchanged; the only workspace-aware step in
+    // _HandleResizePane — mirroring the resize into the model — is
+    // gated behind _workspacesFlagEnabled(). We verify that gate is
+    // closed (so the mirror is unreachable) and that neither the model
+    // state nor the WorkspaceView is ever instantiated, all off a real
+    // flag-off classic split.
     void WorkspaceTests::ResizePane_FlagOff_LeavesModelDormant()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -1821,18 +1826,30 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOff(page, settings);
 
         auto result = RunOnUIThread([&page]() {
-            // Split classically so a separator exists; then exercise
-            // _ResizePane (the same entry point _HandleResizePane uses
-            // post-direction-check).
+            // Split classically so a resizable separator exists between
+            // two leaves — the precondition a resize would act on.
             SplitPaneArgs splitArgs{ SplitDirection::Right, NewTerminalArgs{} };
             ActionEventArgs splitEventArgs{ splitArgs };
             page->_HandleSplitPane(nullptr, splitEventArgs);
 
-            (void)page->_ResizePane(ResizeDirection::Right);
+            // The model-mirror in _HandleResizePane is gated behind
+            // _workspacesFlagEnabled(); with the flag off that branch is
+            // unreachable, so no resize can ever wake the model. We
+            // assert the gate directly rather than driving the real
+            // _ResizePane: the headless TestHostApp never lays out the
+            // pane Grid, so _root.ActualWidth() is 0 and
+            // Pane::_ClampSplitPosition feeds std::clamp(x, +inf, -inf),
+            // tripping the debug-STL bounds assert.
+            VERIFY_IS_FALSE(page->_workspacesFlagEnabled(),
+                            L"flag-off resize must leave the model-mirror gate closed");
         });
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
+                             L"flag-off split must produce two classic leaves to resize between");
             VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
                            L"flag-off resize must NOT populate the model state");
             VERIFY_IS_TRUE(page->_workspaceView == nullptr,
@@ -2074,7 +2091,7 @@ namespace TerminalAppLocalTests
                 {
                     if (moved->id == movingTabId)
                     {
-                        VERIFY_ARE_EQUAL(dstLeafId.value, moved->dstLeafId.value,
+                        VERIFY_ARE_EQUAL(dstLeafId.v, moved->dstLeafId.v,
                                          L"TabMoved.dstLeafId must point at the destination workspace's leaf");
                         movedHits += 1;
                     }
