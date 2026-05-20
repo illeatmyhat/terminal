@@ -620,6 +620,40 @@ namespace winrt::TerminalApp::implementation
         // the observable result is identical to the flag-off path.
         void _openDefaultTabForWorkspace();
 
+        // Called by WorkspaceView::apply(TabAdded) for a non-default
+        // TerminalSpec. `profileBytes` is the 16-byte canonical GUID
+        // layout that the model carries (matches winrt::guid in-memory
+        // order on Windows). Routes through _OpenNewTab so the
+        // observable result mirrors flag-off explicit-profile new-tab.
+        void _openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes);
+
+        // Called by WorkspaceView::apply(TabDecorationUpdated). Applies
+        // the rename + color combination to the classic Tab at index
+        // `classicTabIdx` (which Phase 1 keeps in lockstep with the
+        // workspace's display index).
+        void _applyTabDecoration(std::uint32_t classicTabIdx,
+                                 const std::string& customTitle,
+                                 const std::optional<::WorkspaceModel::Color>& runtimeColor);
+
+        // Slice 6 helpers used by the AppActionHandlers when the
+        // workspaces flag is on. Each one resolves the focused classic
+        // Tab to its model TabId (Phase 1: tab idx == workspace idx)
+        // and returns std::nullopt if the focused tab has no model
+        // counterpart (which means the action should fall back to the
+        // classic path).
+        std::optional<::WorkspaceModel::TabId> _focusedTabModelId() const;
+
+        // Slice 6 review fix: maps an arbitrary classic Tab back to its
+        // model TabId. Right-click tab-strip actions (rename / color)
+        // arrive with `sender` = the right-clicked tab, which may not
+        // be the focused tab. Using _focusedTabModelId there mutates
+        // the wrong workspace; use this helper instead so the flag-on
+        // path matches the classic `_senderOrFocusedTab(sender)`
+        // semantics. Phase 1 invariant: classic _tabs index ==
+        // workspace display index, with exactly one leaf and one tab
+        // per workspace.
+        std::optional<::WorkspaceModel::TabId> _modelIdForTab(const winrt::TerminalApp::Tab& tab) const;
+
         friend class WorkspaceView;
         friend class TerminalAppLocalTests::TabTests;
         friend class TerminalAppLocalTests::SettingsTests;

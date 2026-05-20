@@ -24,10 +24,9 @@ namespace winrt::TerminalApp::implementation
     }
 
     // -------------------------------------------------------------------
-    // Phase 1 progress:
-    //   Slice 2: TabAdded routes default-profile new-tab.
-    //   Slice 4: ActiveWorkspaceChanged routes classic-tab selection.
-    // Remaining arms are intentional stubs — subsequent slices fill them in.
+    // Each apply() overload corresponds to one WorkspaceChange arm. Arms
+    // that a migrated Phase 1 action can actually emit carry real logic;
+    // the rest are intentional stubs that later slices fill in.
     // -------------------------------------------------------------------
 
     void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceAdded& /*c*/)
@@ -117,10 +116,11 @@ namespace winrt::TerminalApp::implementation
     void WorkspaceView::apply(const ::WorkspaceModel::TabAdded& c)
     {
         // The classic window-level tab that materialises this model tab
-        // is the only XAML we own at Phase 1. For Slice 2 we route only
-        // the default-profile TerminalSpec case; other content kinds
-        // (Settings, Snippets, Markdown, Scratchpad) are exercised by
-        // Slice 6.
+        // is the only XAML we own at Phase 1. Slice 2 routed the
+        // default-profile TerminalSpec case; Slice 6 adds the explicit-
+        // profile dispatch. Non-TerminalSpec content kinds (Settings,
+        // Snippets, Markdown, Scratchpad) still have no user-action
+        // entry point in classic Terminal and are not exercised here.
         auto page = _page();
         if (!page || !_state)
         {
@@ -134,14 +134,24 @@ namespace winrt::TerminalApp::implementation
         }
         if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(record->description))
         {
+            // TODO(workspace-phase-2-slice-4): non-TerminalSpec
+            // dispatch (Settings / Snippets / Markdown / Scratchpad).
             return;
         }
 
-        // For a default-profile spec the profile bytes are the zero
-        // GUID; in that case we ask the classic path to use whatever
-        // CascadiaSettings picks as the default profile. Explicit-
-        // profile dispatch lands in Slice 6.
-        page->_openDefaultTabForWorkspace();
+        const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(record->description);
+        // The zero GUID is the model's "no explicit profile" sentinel —
+        // ask the classic path to use whatever CascadiaSettings picks
+        // as the default profile.
+        const ::WorkspaceModel::TerminalSpec defaultSentinel{};
+        if (spec == defaultSentinel)
+        {
+            page->_openDefaultTabForWorkspace();
+        }
+        else
+        {
+            page->_openProfileTabForWorkspace(spec.profile);
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabRemoved& /*c*/)
@@ -180,9 +190,49 @@ namespace winrt::TerminalApp::implementation
         // TODO(workspace-phase-2-slice-4): ContentRegistry. Issue #20+.
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::TabDecorationUpdated& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::TabDecorationUpdated& c)
     {
-        // TODO(workspace-slice-6): rename / color / pin decoration.
-        // Issue #23.
+        // Phase 1 maps each model workspace 1:1 to a classic window-
+        // level tab and pins exactly one model tab per workspace, so
+        // the workspace's display index doubles as the classic tab
+        // index. Locate the workspace whose leaf contains this TabId,
+        // then route the rename/color back to the classic Tab.
+        //
+        // Pinning is carried by the model but has no classic XAML
+        // surface yet — the dedicated pin glyph lands in Phase 2.
+        auto page = _page();
+        if (!page || !_state)
+        {
+            return;
+        }
+
+        const auto& workspaces = _state->workspaces_view();
+        for (std::size_t idx = 0; idx < workspaces.size(); ++idx)
+        {
+            const auto& ws = workspaces[idx];
+            const auto leaves = _state->leaves(ws.id);
+            bool found = false;
+            for (const auto* leaf : leaves)
+            {
+                for (const auto& t : leaf->tabs)
+                {
+                    if (t.id == c.id)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (found)
+                {
+                    break;
+                }
+            }
+            if (!found)
+            {
+                continue;
+            }
+            page->_applyTabDecoration(static_cast<uint32_t>(idx), c.customTitle, c.runtimeColor);
+            return;
+        }
     }
 }

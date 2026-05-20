@@ -4,6 +4,8 @@
 #include "pch.h"
 #include "App.h"
 
+#include <cstring>
+
 #include "TerminalPage.h"
 #include "ScratchpadContent.h"
 #include "../WinRTUtils/inc/WtExeUtils.h"
@@ -64,6 +66,59 @@ namespace winrt::TerminalApp::implementation
     void TerminalPage::_HandleDuplicateTab(const IInspectable& /*sender*/,
                                            const ActionEventArgs& args)
     {
+        if (_workspacesFlagEnabled())
+        {
+            // Slice 6 review fix: duplicate-tab observable parity.
+            // Phase 1 maps one classic tab per workspace, so a
+            // "duplicate" creates a new workspace whose only tab
+            // inherits the source tab's TerminalSpec (i.e. the same
+            // profile GUID). This matches the classic _DuplicateTab
+            // behaviour observable in flag-off mode (a new tab opened
+            // against the same profile), while keeping the model the
+            // source of truth on the flag-on path.
+            const auto sourceTabId = _focusedTabModelId();
+            if (sourceTabId.has_value())
+            {
+                // Find the source tab's description in the model so we
+                // can inherit its profile. Phase 1 invariant guarantees
+                // one workspace == one leaf == one tab, so the focused
+                // workspace's first leaf's first tab IS the source.
+                const auto& workspaces = _workspaceModelState->workspaces_view();
+                const auto focusedIdx = _GetFocusedTabIndex();
+                if (focusedIdx && static_cast<std::size_t>(focusedIdx.value()) < workspaces.size())
+                {
+                    const auto leaves = _workspaceModelState->leaves(workspaces[focusedIdx.value()].id);
+                    if (!leaves.empty() && !leaves[0]->tabs.empty())
+                    {
+                        const auto& sourceDescription = leaves[0]->tabs[0].description;
+                        if (std::holds_alternative<::WorkspaceModel::TerminalSpec>(sourceDescription))
+                        {
+                            // Inherit the profile bytes. Other
+                            // TerminalSpec fields are not yet modelled
+                            // (Phase 1 limitation); future slices that
+                            // add commandline / startingDirectory /
+                            // tabTitle will also carry through here
+                            // automatically.
+                            const auto sourceSpec = std::get<::WorkspaceModel::TerminalSpec>(sourceDescription);
+                            auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState,
+                                                                          std::string{},
+                                                                          ::WorkspaceModel::TabContent{ sourceSpec });
+                            _applyWorkspaceAction(std::move(created.state));
+                            args.Handled(true);
+                            return;
+                        }
+                        // Non-terminal tab kinds (Settings / Snippets /
+                        // Markdown / Scratchpad) don't have a model-
+                        // aware duplicate semantic yet. Fall through to
+                        // the classic path so the action isn't dropped.
+                    }
+                }
+            }
+            // Defensive fall-through: if there's no model counterpart
+            // for the focused tab (shouldn't happen in Phase 1), let
+            // the classic path handle the duplicate.
+        }
+
         _DuplicateFocusedTab();
         args.Handled(true);
     }
@@ -504,17 +559,55 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
 
-            if (_workspacesFlagEnabled() && _isDefaultProfileNewTab(realArgs.ContentArgs()))
+            if (_workspacesFlagEnabled())
             {
                 // Phase 1 maps each classic window-level tab onto its
                 // own model workspace (one tab per leaf). A user-level
                 // "new tab" therefore dispatches newWorkspace; per-leaf
                 // multi-tab support lands in Phase 2 slices 9-10.
                 ::WorkspaceModel::TerminalSpec spec{};
-                auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
-                _applyWorkspaceAction(std::move(created.state));
-                args.Handled(true);
-                return;
+                if (!_isDefaultProfileNewTab(realArgs.ContentArgs()))
+                {
+                    // Slice 6: explicit-profile dispatch. Resolve the
+                    // NewTerminalArgs through CascadiaSettings (same
+                    // resolver _OpenNewTab uses) so the model carries
+                    // the canonical profile GUID rather than a free-
+                    // form name / index. The view's TabAdded arm hands
+                    // the resolved bytes back to _OpenNewTab via
+                    // _openProfileTabForWorkspace.
+                    //
+                    // Commandline / starting-directory / tab-title
+                    // overrides are intentionally NOT modelled in
+                    // Phase 1 — they fall back to the classic path
+                    // below.
+                    const auto terminalArgs = realArgs.ContentArgs().try_as<NewTerminalArgs>();
+                    if (terminalArgs &&
+                        terminalArgs.Commandline().empty() &&
+                        terminalArgs.StartingDirectory().empty() &&
+                        terminalArgs.TabTitle().empty() &&
+                        terminalArgs.ContentId() == 0u)
+                    {
+                        if (const auto profile = _settings.GetProfileForArgs(terminalArgs))
+                        {
+                            const auto g = profile.Guid();
+                            std::memcpy(spec.profile.data(), &g, sizeof(g));
+                            auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+                            _applyWorkspaceAction(std::move(created.state));
+                            args.Handled(true);
+                            return;
+                        }
+                    }
+                }
+                else
+                {
+                    auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+                    _applyWorkspaceAction(std::move(created.state));
+                    args.Handled(true);
+                    return;
+                }
+                // Fall through to classic path for the un-modelled
+                // shapes (commandline / startingDirectory / tabTitle /
+                // contentId carries).
             }
 
             LOG_IF_FAILED(_OpenNewTab(realArgs.ContentArgs()));
@@ -762,7 +855,40 @@ namespace winrt::TerminalApp::implementation
             tabColor = realArgs.TabColor();
         }
 
-        if (const auto activeTab{ _senderOrFocusedTab(sender) })
+        // Resolve the target tab the same way the classic path below
+        // does: sender-or-focused. Right-click tab-strip context menus
+        // hand the clicked tab in via `sender`; using the focused tab
+        // there would mutate the wrong workspace.
+        const auto activeTab = _senderOrFocusedTab(sender);
+
+        if (_workspacesFlagEnabled())
+        {
+            // Route through WorkspaceActions::setTabColor so the model
+            // is the source of truth for tab decoration. The
+            // TabDecorationUpdated arm of WorkspaceView reaches back
+            // into the classic Tab and applies the change, keeping the
+            // observable end state identical to the flag-off path.
+            const std::optional<::WorkspaceModel::TabId> modelTabId = activeTab ? _modelIdForTab(*activeTab) : std::optional<::WorkspaceModel::TabId>{};
+            if (modelTabId.has_value())
+            {
+                std::optional<::WorkspaceModel::Color> modelColor;
+                if (tabColor)
+                {
+                    const auto uiColor = tabColor.Value();
+                    modelColor = ::WorkspaceModel::Color{ uiColor.R, uiColor.G, uiColor.B, uiColor.A };
+                }
+                auto newState = ::WorkspaceModel::setTabColor(_workspaceModelState, modelTabId.value(), modelColor);
+                _applyWorkspaceAction(std::move(newState));
+                args.Handled(true);
+                return;
+            }
+            // Fall through to the classic path if the sender/focused
+            // tab has no model counterpart (defensive: shouldn't
+            // happen in Phase 1, but the strangler-fig contract
+            // demands we don't drop the action on the floor).
+        }
+
+        if (activeTab)
         {
             if (tabColor)
             {
@@ -801,7 +927,34 @@ namespace winrt::TerminalApp::implementation
             title = realArgs.Title();
         }
 
-        if (const auto activeTab{ _senderOrFocusedTab(sender) })
+        // Same sender-or-focused resolution as the classic path so the
+        // tab-strip context menu's right-click rename targets the
+        // right-clicked tab, not the focused tab.
+        const auto activeTab = _senderOrFocusedTab(sender);
+
+        if (_workspacesFlagEnabled())
+        {
+            // Route through WorkspaceActions::setTabTitle. See the
+            // SetTabColor mirror above for the wiring rationale.
+            const std::optional<::WorkspaceModel::TabId> modelTabId = activeTab ? _modelIdForTab(*activeTab) : std::optional<::WorkspaceModel::TabId>{};
+            if (modelTabId.has_value())
+            {
+                // setTabTitle takes a std::string. nullopt-in-classic =
+                // "reset" -> empty std::string in the model, which the
+                // TabDecorationUpdated arm interprets as ResetTabText.
+                std::string modelTitle;
+                if (title.has_value())
+                {
+                    modelTitle = winrt::to_string(title.value());
+                }
+                auto newState = ::WorkspaceModel::setTabTitle(_workspaceModelState, modelTabId.value(), std::move(modelTitle));
+                _applyWorkspaceAction(std::move(newState));
+                args.Handled(true);
+                return;
+            }
+        }
+
+        if (activeTab)
         {
             if (title.has_value())
             {

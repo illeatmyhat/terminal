@@ -48,6 +48,24 @@ namespace TerminalAppLocalTests
         TEST_METHOD(SwitchToTab_FlagOn_ChangesActiveWorkspace);
         TEST_METHOD(SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel);
 
+        // Slice 6: decoration + explicit-profile dispatch.
+        TEST_METHOD(RenameTab_FlagOn_UpdatesClassicTabAndModel);
+        TEST_METHOD(RenameTab_FlagOff_UpdatesClassicTabOnly);
+        TEST_METHOD(SetTabColor_FlagOn_UpdatesClassicTabAndModel);
+        TEST_METHOD(SetTabColor_FlagOff_UpdatesClassicTabOnly);
+        TEST_METHOD(NewTab_FlagOn_ExplicitProfileByName_AppendsTab);
+        TEST_METHOD(NewTab_FlagOff_ExplicitProfileByName_AppendsTab);
+
+        // Slice 6 review fixes:
+        //  - sender-bypass: flag-on rename/color must honour the
+        //    `sender` argument (right-clicked tab) instead of always
+        //    routing to the focused tab.
+        //  - DuplicateTab observable parity (skipped in the original
+        //    slice).
+        TEST_METHOD(SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab);
+        TEST_METHOD(DuplicateTab_FlagOn_AppendsWorkspaceWithSameProfile);
+        TEST_METHOD(DuplicateTab_FlagOff_AppendsTabWithoutModel);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -542,4 +560,479 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
+    // ------------------------------------------------------------------
+    // Slice 6: decoration (rename + color) + explicit-profile new-tab.
+    // ------------------------------------------------------------------
+
+    // Shared settings JSON for the decoration tests. Single profile with a
+    // known GUID so the explicit-profile dispatch tests can name it.
+    static constexpr std::wstring_view settingsJsonFlagOn{ LR"(
+    {
+        "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+        "experimental.workspaces.enabled": true,
+        "profiles": [
+            {
+                "name" : "profile0",
+                "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                "historySize": 1,
+                "closeOnExit": "never"
+            },
+            {
+                "name" : "profile1",
+                "guid": "{6239a42c-2222-49a3-80bd-e8fdd045185c}",
+                "historySize": 1,
+                "closeOnExit": "never"
+            }
+        ]
+    })" };
+
+    static constexpr std::wstring_view settingsJsonFlagOff{ LR"(
+    {
+        "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+        "profiles": [
+            {
+                "name" : "profile0",
+                "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                "historySize": 1,
+                "closeOnExit": "never"
+            },
+            {
+                "name" : "profile1",
+                "guid": "{6239a42c-2222-49a3-80bd-e8fdd045185c}",
+                "historySize": 1,
+                "closeOnExit": "never"
+            }
+        ]
+    })" };
+
+    // AC: "Rename observable parity with flag-off." Firing a RenameTab
+    // action with the workspaces flag on must update both the classic
+    // Tab's text (matching flag-off) AND the model's customTitle field.
+    void WorkspaceTests::RenameTab_FlagOn_UpdatesClassicTabAndModel()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            RenameTabArgs renameArgs{ L"renamed" };
+            ActionEventArgs eventArgs{ renameArgs };
+            page->_HandleRenameTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // Classic Tab observable: GetTabText returns the new title.
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"renamed" }, tab->GetTabText(),
+                             L"flag-on rename must update the classic Tab text");
+
+            // Model carries the same customTitle on the workspace's
+            // only tab.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
+            VERIFY_ARE_EQUAL(1u, leaves.size());
+            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
+            VERIFY_ARE_EQUAL(std::string{ "renamed" }, leaves[0]->tabs[0].customTitle,
+                             L"model state must record the rename");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror: same observable end-state for the classic
+    // Tab text, but the workspace machinery stays dormant.
+    void WorkspaceTests::RenameTab_FlagOff_UpdatesClassicTabOnly()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOff, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            RenameTabArgs renameArgs{ L"renamed" };
+            ActionEventArgs eventArgs{ renameArgs };
+            page->_HandleRenameTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"renamed" }, tab->GetTabText(),
+                             L"flag-off rename must update the classic Tab text");
+
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off rename must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off rename must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: "Color observable parity with flag-off." Firing a SetTabColor
+    // action with the workspaces flag on must update both the classic
+    // Tab's runtime color AND the model's runtimeColor field.
+    void WorkspaceTests::SetTabColor_FlagOn_UpdatesClassicTabAndModel()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        constexpr winrt::Windows::UI::Color expected{ .A = 0xFF, .R = 0x11, .G = 0x22, .B = 0x33 };
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            SetTabColorArgs colorArgs{ expected };
+            ActionEventArgs eventArgs{ colorArgs };
+            page->_HandleSetTabColor(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            const auto classic = tab->GetTabColor();
+            VERIFY_IS_TRUE(classic.has_value(), L"flag-on color must populate the classic Tab runtime color");
+            VERIFY_ARE_EQUAL(expected.R, classic.value().R);
+            VERIFY_ARE_EQUAL(expected.G, classic.value().G);
+            VERIFY_ARE_EQUAL(expected.B, classic.value().B);
+            VERIFY_ARE_EQUAL(expected.A, classic.value().A);
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
+            VERIFY_ARE_EQUAL(1u, leaves.size());
+            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
+            const auto& modelColor = leaves[0]->tabs[0].runtimeColor;
+            VERIFY_IS_TRUE(modelColor.has_value(), L"model must carry the runtime color");
+            VERIFY_ARE_EQUAL(expected.R, modelColor.value().r);
+            VERIFY_ARE_EQUAL(expected.G, modelColor.value().g);
+            VERIFY_ARE_EQUAL(expected.B, modelColor.value().b);
+            VERIFY_ARE_EQUAL(expected.A, modelColor.value().a);
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror for SetTabColor.
+    void WorkspaceTests::SetTabColor_FlagOff_UpdatesClassicTabOnly()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOff, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        constexpr winrt::Windows::UI::Color expected{ .A = 0xFF, .R = 0x11, .G = 0x22, .B = 0x33 };
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            SetTabColorArgs colorArgs{ expected };
+            ActionEventArgs eventArgs{ colorArgs };
+            page->_HandleSetTabColor(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            const auto classic = tab->GetTabColor();
+            VERIFY_IS_TRUE(classic.has_value(), L"flag-off color must populate the classic Tab runtime color");
+            VERIFY_ARE_EQUAL(expected.R, classic.value().R);
+
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off color must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off color must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: "Explicit-profile new-tab observable parity." Firing a
+    // NewTab action whose NewTerminalArgs names profile1 (the non-
+    // default profile) with the flag on must:
+    //  - Append a second classic tab (matches flag-off).
+    //  - Append a second model workspace whose only tab's TerminalSpec
+    //    carries profile1's GUID, NOT the zero-GUID sentinel.
+    void WorkspaceTests::NewTab_FlagOn_ExplicitProfileByName_AppendsTab()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            NewTerminalArgs newTerminalArgs{};
+            newTerminalArgs.Profile(L"profile1");
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-on explicit-profile new-tab should append a classic tab");
+
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on explicit-profile new-tab should create a second workspace");
+
+            // The most-recently-added workspace is the active one.
+            const auto activeId = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeId.has_value());
+            const auto leaves = page->_workspaceModelState->leaves(activeId.value());
+            VERIFY_ARE_EQUAL(1u, leaves.size());
+            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
+            const auto& description = leaves[0]->tabs[0].description;
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(description));
+            const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(description);
+
+            // The profile bytes must equal profile1's GUID, not the
+            // zero-GUID sentinel that default-profile dispatch uses.
+            const ::WorkspaceModel::TerminalSpec defaultSentinel{};
+            VERIFY_IS_FALSE(spec == defaultSentinel,
+                            L"explicit-profile dispatch must carry the resolved profile GUID, not the zero sentinel");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror for explicit-profile new-tab.
+    void WorkspaceTests::NewTab_FlagOff_ExplicitProfileByName_AppendsTab()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOff, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            NewTerminalArgs newTerminalArgs{};
+            newTerminalArgs.Profile(L"profile1");
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-off explicit-profile new-tab should append a classic tab");
+
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off explicit-profile new-tab must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off explicit-profile new-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // ------------------------------------------------------------------
+    // Slice 6 review fixes.
+    // ------------------------------------------------------------------
+
+    // Regression guard for the sender-bypass bug: when a user right-
+    // clicks tab 1 in the tab strip context menu while tab 0 is focused,
+    // the flag-on path used to call _focusedTabModelId() and mutate tab
+    // 0 (the wrong tab) while the classic flag-off path correctly used
+    // _senderOrFocusedTab(sender) and mutated tab 1.
+    //
+    // After the fix, the flag-on path resolves through _modelIdForTab
+    // and matches the classic semantics: rename/color on a non-focused
+    // tab targets the right-clicked tab.
+    void WorkspaceTests::SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Append a second tab so we have two distinct workspaces to
+        // route between.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        constexpr winrt::Windows::UI::Color senderColor{ .A = 0xFF, .R = 0x44, .G = 0x55, .B = 0x66 };
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+
+            // Focus tab 0 explicitly. The sender we pass below is
+            // tab 1, so the right-clicked-tab semantics must override
+            // focus.
+            VERIFY_IS_TRUE(page->_SelectTab(0));
+
+            // Pre-condition: neither tab has a runtime color.
+            auto tab0 = page->_GetTabImpl(page->_tabs.GetAt(0));
+            auto tab1 = page->_GetTabImpl(page->_tabs.GetAt(1));
+            VERIFY_IS_NOT_NULL(tab0);
+            VERIFY_IS_NOT_NULL(tab1);
+            VERIFY_IS_FALSE(tab0->GetTabColor().has_value(), L"pre-condition: tab 0 has no color");
+            VERIFY_IS_FALSE(tab1->GetTabColor().has_value(), L"pre-condition: tab 1 has no color");
+
+            // Fire SetTabColor with sender = tab 1 (the projected
+            // type), simulating the tab-strip context menu firing
+            // from tab 1 while tab 0 holds focus.
+            SetTabColorArgs colorArgs{ senderColor };
+            ActionEventArgs eventArgs{ colorArgs };
+            page->_HandleSetTabColor(page->_tabs.GetAt(1), eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // Classic Tab observable: tab 1 carries the color, tab 0
+            // does NOT.
+            auto tab0 = page->_GetTabImpl(page->_tabs.GetAt(0));
+            auto tab1 = page->_GetTabImpl(page->_tabs.GetAt(1));
+            const auto tab0Color = tab0->GetTabColor();
+            const auto tab1Color = tab1->GetTabColor();
+            VERIFY_IS_FALSE(tab0Color.has_value(),
+                            L"focused tab 0 must NOT have been mutated when sender=tab 1");
+            VERIFY_IS_TRUE(tab1Color.has_value(),
+                           L"sender tab 1 must have been mutated");
+            VERIFY_ARE_EQUAL(senderColor.R, tab1Color.value().R);
+            VERIFY_ARE_EQUAL(senderColor.G, tab1Color.value().G);
+            VERIFY_ARE_EQUAL(senderColor.B, tab1Color.value().B);
+
+            // Model state observable: workspace 1's tab carries the
+            // color, workspace 0's tab does not. Phase 1: classic tab
+            // index == workspace display index.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(2u, workspaces.size());
+
+            const auto leaves0 = page->_workspaceModelState->leaves(workspaces[0].id);
+            const auto leaves1 = page->_workspaceModelState->leaves(workspaces[1].id);
+            VERIFY_ARE_EQUAL(1u, leaves0.size());
+            VERIFY_ARE_EQUAL(1u, leaves1.size());
+            VERIFY_ARE_EQUAL(1u, leaves0[0]->tabs.size());
+            VERIFY_ARE_EQUAL(1u, leaves1[0]->tabs.size());
+
+            VERIFY_IS_FALSE(leaves0[0]->tabs[0].runtimeColor.has_value(),
+                            L"model: workspace 0 must NOT carry the color");
+            VERIFY_IS_TRUE(leaves1[0]->tabs[0].runtimeColor.has_value(),
+                           L"model: workspace 1 must carry the color");
+            VERIFY_ARE_EQUAL(senderColor.R, leaves1[0]->tabs[0].runtimeColor.value().r);
+            VERIFY_ARE_EQUAL(senderColor.G, leaves1[0]->tabs[0].runtimeColor.value().g);
+            VERIFY_ARE_EQUAL(senderColor.B, leaves1[0]->tabs[0].runtimeColor.value().b);
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: "Duplicate-tab observable parity (including profile
+    // inheritance)." Firing a DuplicateTab action with the workspaces
+    // flag on must:
+    //  - Append a second classic tab (matches flag-off observable).
+    //  - Append a second model workspace whose only tab's TerminalSpec
+    //    carries the SAME profile bytes as the source tab.
+    void WorkspaceTests::DuplicateTab_FlagOn_AppendsWorkspaceWithSameProfile()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Capture the source tab's profile bytes from the model BEFORE
+        // we duplicate, then compare the new tab's profile bytes
+        // against the captured value AFTER. This proves inheritance
+        // works regardless of whether the source tab carries the zero-
+        // GUID sentinel (default profile) or a resolved profile GUID.
+        std::array<std::uint8_t, 16> sourceProfileBytes{};
+
+        auto result = RunOnUIThread([&page, &sourceProfileBytes]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            // Capture the source workspace's tab profile so we can
+            // assert the duplicate inherits it.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
+            VERIFY_ARE_EQUAL(1u, leaves.size());
+            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(leaves[0]->tabs[0].description));
+            sourceProfileBytes = std::get<::WorkspaceModel::TerminalSpec>(leaves[0]->tabs[0].description).profile;
+
+            ActionEventArgs eventArgs{};
+            page->_HandleDuplicateTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, &sourceProfileBytes]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-on duplicate-tab should append a classic tab");
+
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on duplicate-tab should create a second workspace");
+
+            // The most-recently-added workspace is the active one.
+            const auto activeId = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeId.has_value());
+            const auto leaves = page->_workspaceModelState->leaves(activeId.value());
+            VERIFY_ARE_EQUAL(1u, leaves.size());
+            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
+
+            const auto& description = leaves[0]->tabs[0].description;
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(description),
+                           L"duplicate-tab must produce a TerminalSpec");
+            const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(description);
+
+            // Profile inheritance: bytes must match the source.
+            VERIFY_IS_TRUE(spec.profile == sourceProfileBytes,
+                           L"duplicate-tab must inherit the source tab's profile GUID");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror for DuplicateTab.
+    void WorkspaceTests::DuplicateTab_FlagOff_AppendsTabWithoutModel()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOff, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr);
+
+            ActionEventArgs eventArgs{};
+            page->_HandleDuplicateTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"flag-off duplicate-tab should append a classic tab");
+
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off duplicate-tab must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off duplicate-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
 }

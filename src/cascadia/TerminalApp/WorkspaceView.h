@@ -12,8 +12,10 @@
 //
 // Each apply() overload corresponds to one WorkspaceChange arm. The
 // arms used by the Phase 1 Slice 2 migrated actions (startup-replay,
-// new-tab) carry real logic; the remaining arms are stubs that will be
-// filled in by subsequent slices.
+// default-profile new-tab) and the Phase 1 Slice 6 migrated actions
+// (rename / color decoration, explicit-profile new-tab) carry real
+// logic; the remaining arms are stubs that will be filled in by
+// subsequent slices.
 //
 // The view also holds the latest ModelState. Some change arms
 // (notably TabAdded) describe a state transition without carrying every

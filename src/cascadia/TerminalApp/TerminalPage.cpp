@@ -5,6 +5,8 @@
 #include "pch.h"
 #include "TerminalPage.h"
 
+#include <cstring>
+
 #include <TerminalCore/ControlKeyStates.hpp>
 #include <TerminalThemeHelpers.h>
 #include <til/hash.h>
@@ -5995,5 +5997,130 @@ namespace winrt::TerminalApp::implementation
         // _OpenNewTab(nullptr) lets the page consult its settings for
         // the default profile.
         LOG_IF_FAILED(_OpenNewTab(nullptr));
+    }
+
+    void TerminalPage::_openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes)
+    {
+        // The 16-byte profile bytes are the canonical winrt::guid
+        // in-memory layout on Windows; reinterpret to recover the
+        // winrt::guid, then format as the bracketed-GUID-string that
+        // NewTerminalArgs::Profile accepts.
+        winrt::guid g{};
+        static_assert(sizeof(winrt::guid) == 16, "winrt::guid must be 16 bytes");
+        std::memcpy(&g, profileBytes.data(), 16);
+
+        NewTerminalArgs newTerminalArgs{};
+        newTerminalArgs.Profile(::Microsoft::Console::Utils::GuidToString(g));
+        LOG_IF_FAILED(_OpenNewTab(newTerminalArgs));
+    }
+
+    void TerminalPage::_applyTabDecoration(std::uint32_t classicTabIdx,
+                                           const std::string& customTitle,
+                                           const std::optional<::WorkspaceModel::Color>& runtimeColor)
+    {
+        if (classicTabIdx >= _tabs.Size())
+        {
+            return;
+        }
+        auto tab = _GetTabImpl(_tabs.GetAt(classicTabIdx));
+        if (!tab)
+        {
+            return;
+        }
+
+        // Title: empty model string == "reset to the dynamic title".
+        if (customTitle.empty())
+        {
+            tab->ResetTabText();
+        }
+        else
+        {
+            tab->SetTabText(winrt::hstring{ til::u8u16(customTitle) });
+        }
+
+        // Color: nullopt == reset.
+        if (runtimeColor.has_value())
+        {
+            const auto& c = runtimeColor.value();
+            winrt::Windows::UI::Color uiColor{};
+            uiColor.A = c.a;
+            uiColor.R = c.r;
+            uiColor.G = c.g;
+            uiColor.B = c.b;
+            tab->SetRuntimeTabColor(uiColor);
+        }
+        else
+        {
+            tab->ResetRuntimeTabColor();
+        }
+    }
+
+    std::optional<::WorkspaceModel::TabId> TerminalPage::_focusedTabModelId() const
+    {
+        if (!_workspaceModelState)
+        {
+            return std::nullopt;
+        }
+        const auto focusedIdx = _GetFocusedTabIndex();
+        if (!focusedIdx)
+        {
+            return std::nullopt;
+        }
+        const auto& workspaces = _workspaceModelState->workspaces_view();
+        const auto idx = static_cast<std::size_t>(focusedIdx.value());
+        if (idx >= workspaces.size())
+        {
+            return std::nullopt;
+        }
+        // Phase 1: each workspace has exactly one leaf with exactly one
+        // tab; the workspace's display position equals the classic tab
+        // index.
+        const auto leaves = _workspaceModelState->leaves(workspaces[idx].id);
+        if (leaves.empty() || leaves[0]->tabs.empty())
+        {
+            return std::nullopt;
+        }
+        return leaves[0]->tabs[0].id;
+    }
+
+    // Slice 6 review fix: resolves an arbitrary classic Tab to its
+    // model TabId. The tab-strip context menu fires rename / color
+    // actions with sender == the right-clicked tab, which need not be
+    // the focused tab. Reuses the Phase 1 invariant (classic tab idx
+    // == workspace display idx, one leaf and one tab per workspace),
+    // but resolves the index from the supplied tab instead of the
+    // focused index.
+    //
+    // Slice 7 (#20) is expected to introduce a TerminalApp::Tab ->
+    // model TabId registry. If that registry is present at flag-on
+    // launch, it would be the more direct mapping; today (#20 not yet
+    // landed on main) we walk the classic _tabs collection.
+    std::optional<::WorkspaceModel::TabId> TerminalPage::_modelIdForTab(const winrt::TerminalApp::Tab& tab) const
+    {
+        if (!_workspaceModelState)
+        {
+            return std::nullopt;
+        }
+        if (!tab)
+        {
+            return std::nullopt;
+        }
+        uint32_t tabIdx{};
+        if (!_tabs.IndexOf(tab, tabIdx))
+        {
+            return std::nullopt;
+        }
+        const auto& workspaces = _workspaceModelState->workspaces_view();
+        const auto idx = static_cast<std::size_t>(tabIdx);
+        if (idx >= workspaces.size())
+        {
+            return std::nullopt;
+        }
+        const auto leaves = _workspaceModelState->leaves(workspaces[idx].id);
+        if (leaves.empty() || leaves[0]->tabs.empty())
+        {
+            return std::nullopt;
+        }
+        return leaves[0]->tabs[0].id;
     }
 }
