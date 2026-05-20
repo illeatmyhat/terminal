@@ -6462,19 +6462,26 @@ namespace winrt::TerminalApp::implementation
         // chrome only carries the workspace-specific buttons (inert this slice).
         //
         // The host sets the chrome as its titlebar ContentPresenter content,
-        // which reparents it — so it must be detached from Root first, exactly
-        // like the classic tabs-in-titlebar path detaches the TabRow. (Skip the
-        // raise if no host is listening, e.g. headless LocalTests; the chrome
-        // then simply stays in Root row 0, still satisfying "chrome present".)
+        // which reparents it — and a ContentPresenter REJECTS a UIElement that
+        // still has a logical parent ("element is already the child of another
+        // element"). So the chrome must be detached from Root FIRST, exactly
+        // like the classic tabs-in-titlebar path detaches the TabRow.
+        //
+        // We remove it directly from Root().Children() (its authored parent),
+        // mirroring the proven classic path above — NOT via FrameworkElement
+        // .Parent(). For an x:Load element freshly realized by FindName, the
+        // logical Parent() can still report null on this pass, which silently
+        // skipped the detach and left the chrome stuck in Root row 0 in the
+        // client area (the host couldn't re-host an already-parented element),
+        // which is the bug this fixes. (When no host is listening — e.g.
+        // headless LocalTests — the chrome is still detached from Root here,
+        // and the no-op raise just means it isn't re-hosted anywhere.)
         if (const auto chrome = FindName(L"WorkspaceChrome").try_as<UIElement>())
         {
-            if (const auto chromeParent = chrome.try_as<FrameworkElement>().Parent().try_as<Controls::Panel>())
+            uint32_t index = 0;
+            if (Root().Children().IndexOf(chrome, index))
             {
-                uint32_t index = 0;
-                if (chromeParent.Children().IndexOf(chrome, index))
-                {
-                    chromeParent.Children().RemoveAt(index);
-                }
+                Root().Children().RemoveAt(index);
             }
             SetTitleBarContent.raise(*this, chrome);
         }
