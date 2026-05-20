@@ -37,10 +37,12 @@ namespace WorkspaceModel
         WorkspaceId id{};
         std::string name{};
         std::optional<Color> color{};
-        // Display position in the sidebar (index into workspaces vector at
-        // the moment of emission). The view typically inserts at this
-        // index.
-        std::size_t position{ 0 };
+        // The arm carries the workspace's stable id only; the view resolves
+        // the display/insertion position from that id through its own
+        // id->XAML resolver at apply time. (Phase 1 had a `position`
+        // display-index here, but "workspace display index == classic tab
+        // index" is a Phase-1-only invariant that breaks once multi-
+        // workspace / per-pane tabs land — see #44/#45.)
 
         [[nodiscard]] friend bool operator==(const WorkspaceAdded&, const WorkspaceAdded&) noexcept = default;
     };
@@ -54,12 +56,12 @@ namespace WorkspaceModel
 
     struct ActiveWorkspaceChanged
     {
+        // The newly-active workspace's stable id, or std::nullopt for the
+        // empty-model case (no workspace active → no classic tab to select).
+        // The view resolves `id` to the classic tab to select through its
+        // own id->XAML resolver; it no longer carries a display index (that
+        // index-as-identity coupling is removed — see #44/#45).
         std::optional<WorkspaceId> id{};
-        // Display position of `id` in the workspaces vector at emission
-        // time. Phase 1 maps that index 1:1 to the classic tab index the
-        // view should select. std::nullopt exactly when `id` is nullopt
-        // (the empty-model case, no tab to select).
-        std::optional<std::size_t> index{};
 
         [[nodiscard]] friend bool operator==(const ActiveWorkspaceChanged&, const ActiveWorkspaceChanged&) noexcept = default;
     };
@@ -228,10 +230,11 @@ namespace WorkspaceModel
         std::string customTitle{};
         std::optional<Color> runtimeColor{};
         bool pinned{ false };
-        // Display position of the owning workspace at emission time. Phase 1
-        // maps that index 1:1 to the classic tab index the decoration
-        // applies to.
-        std::size_t workspaceIndex{ 0 };
+        // The stable id of the workspace that owns the decorated tab. The
+        // view resolves this to the classic tab the decoration applies to
+        // through its own id->XAML resolver; it no longer carries a display
+        // index (that index-as-identity coupling is removed — see #44/#45).
+        WorkspaceId workspaceId{};
 
         [[nodiscard]] friend bool operator==(const TabDecorationUpdated&, const TabDecorationUpdated&) noexcept = default;
     };

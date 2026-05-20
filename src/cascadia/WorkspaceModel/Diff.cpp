@@ -159,8 +159,6 @@ namespace WorkspaceModel
 
         struct StateIndex
         {
-            // workspaceId → position in the workspaces vector
-            std::unordered_map<WorkspaceId, std::size_t> workspacePosition{};
             // workspaceId → WorkspaceState*
             std::unordered_map<WorkspaceId, const WorkspaceState*> workspaceById{};
             // PaneId → info (workspace, parent, kind)
@@ -176,12 +174,10 @@ namespace WorkspaceModel
             {
                 return idx;
             }
-            idx.workspacePosition.reserve(m->workspaces.size());
             idx.workspaceById.reserve(m->workspaces.size());
             for (std::size_t i = 0; i < m->workspaces.size(); ++i)
             {
                 const auto& ws = m->workspaces[i];
-                idx.workspacePosition[ws.id] = i;
                 idx.workspaceById[ws.id] = &ws;
                 indexSubtree(ws.root, ws.id, std::nullopt, idx.panes, idx.tabs);
             }
@@ -497,24 +493,21 @@ namespace WorkspaceModel
                     a->runtimeColor != b->runtimeColor ||
                     a->pinned != b->pinned)
                 {
-                    // Resolve the owning workspace's display index so the
-                    // view can route the decoration without scanning state.
-                    std::size_t workspaceIndex = 0;
+                    // Carry the owning workspace's stable id so the view can
+                    // route the decoration through its own id->XAML resolver;
+                    // no positional display-index projection happens here.
+                    WorkspaceId workspaceId{};
                     if (const auto leafIt = nextIndex.panes.find(nextInfo.leafId);
                         leafIt != nextIndex.panes.end())
                     {
-                        if (const auto posIt = nextIndex.workspacePosition.find(leafIt->second.workspaceId);
-                            posIt != nextIndex.workspacePosition.end())
-                        {
-                            workspaceIndex = posIt->second;
-                        }
+                        workspaceId = leafIt->second.workspaceId;
                     }
                     out.push_back(TabDecorationUpdated{
                         tid,
                         b->customTitle,
                         b->runtimeColor,
                         b->pinned,
-                        workspaceIndex });
+                        workspaceId });
                 }
             }
         }
@@ -643,7 +636,9 @@ namespace WorkspaceModel
                 const auto& ws = next->workspaces[i];
                 if (prevIndex.workspaceById.find(ws.id) == prevIndex.workspaceById.end())
                 {
-                    additive.push_back(WorkspaceAdded{ ws.id, ws.name, ws.color, i });
+                    // Carry the stable id only; the view resolves the
+                    // display/insertion position from the id.
+                    additive.push_back(WorkspaceAdded{ ws.id, ws.name, ws.color });
                 }
             }
         }
@@ -685,16 +680,9 @@ namespace WorkspaceModel
             std::optional<WorkspaceId> nextActive = next ? next->activeWorkspaceId : std::nullopt;
             if (prevActive != nextActive)
             {
-                std::optional<std::size_t> activeIndex{};
-                if (nextActive.has_value())
-                {
-                    if (const auto it = nextIndex.workspacePosition.find(*nextActive);
-                        it != nextIndex.workspacePosition.end())
-                    {
-                        activeIndex = it->second;
-                    }
-                }
-                mutation.push_back(ActiveWorkspaceChanged{ nextActive, activeIndex });
+                // Carry the stable id only; the view resolves it to the
+                // classic tab to select through its own id->XAML resolver.
+                mutation.push_back(ActiveWorkspaceChanged{ nextActive });
             }
         }
 

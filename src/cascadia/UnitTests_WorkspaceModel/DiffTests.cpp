@@ -166,6 +166,11 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(TabDecorationUpdated_SecondWorkspace_CarriesIndex);
         TEST_METHOD(TabAdded_SecondWorkspace_CarriesOwningWorkspace);
 
+        // ---- Stable-id arms (#45/#44): the three arms that used to carry a
+        //      raw display index now carry a WorkspaceId, independent of
+        //      display order. ----
+        TEST_METHOD(IdentityArms_CarryWorkspaceId_IndependentOfDisplayOrder);
+
         // ---- Identity-keyed move detection (the load-bearing case) ----
         TEST_METHOD(TabMoved_CrossLeaf_SingleChange);
         TEST_METHOD(TabMoved_CrossWorkspace_SingleChange);
@@ -199,8 +204,9 @@ namespace WorkspaceModelUnitTests
         const auto ops = diff(prev, next);
         const auto adds = changesOfKind<WorkspaceAdded>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds.size());
+        // The arm carries the stable id only; no positional display index.
+        // The view resolves the insertion position from this id.
         VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, adds[0].id.v);
-        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), adds[0].position);
     }
 
     void DiffTests::WorkspaceRemoved_ToEmpty()
@@ -230,12 +236,10 @@ namespace WorkspaceModelUnitTests
         const auto ops = diff(prev, next);
         const auto setActive = changesOfKind<ActiveWorkspaceChanged>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), setActive.size());
+        // The arm carries the newly-active workspace's stable id only; the
+        // view resolves it to the classic tab to select. No display index.
         VERIFY_IS_TRUE(setActive[0].id.has_value());
         VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, setActive[0].id->v);
-        // Enriched payload: workspace 2 is at display index 1, which the
-        // view maps 1:1 to the classic tab to select.
-        VERIFY_IS_TRUE(setActive[0].index.has_value());
-        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), *setActive[0].index);
     }
 
     void DiffTests::LeafPaneCreated_NewWorkspace()
@@ -452,8 +456,9 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos.size());
         VERIFY_ARE_EQUAL(TabId{ 100 }.v, decos[0].id.v);
         VERIFY_IS_TRUE(decos[0].customTitle == "new title");
-        // Enriched payload: the only workspace is at display index 0.
-        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), decos[0].workspaceIndex);
+        // Enriched payload: the owning workspace's stable id (workspace 1).
+        // The view resolves this to the classic tab; no display index.
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, decos[0].workspaceId.v);
     }
 
     // =====================================================================
@@ -524,8 +529,8 @@ namespace WorkspaceModelUnitTests
     void DiffTests::TabDecorationUpdated_SecondWorkspace_CarriesIndex()
     {
         // Two workspaces; the decoration changes on a tab in the SECOND
-        // workspace (display index 1), so the carried index isn't the
-        // trivial 0.
+        // workspace, so the carried id isn't the first workspace's. Proves
+        // diff() routes by stable id, not by the trivial first slot.
         auto t200Prev = makeTab(200);
         t200Prev.customTitle = "old";
         auto t200Next = makeTab(200);
@@ -544,7 +549,58 @@ namespace WorkspaceModelUnitTests
         const auto decos = changesOfKind<TabDecorationUpdated>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos.size());
         VERIFY_ARE_EQUAL(TabId{ 200 }.v, decos[0].id.v);
-        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos[0].workspaceIndex);
+        // Owning workspace is id 2, carried as a stable id (not a position).
+        VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, decos[0].workspaceId.v);
+    }
+
+    // #45/#44: the three arms that historically carried a raw display index
+    // (WorkspaceAdded.position, ActiveWorkspaceChanged.index,
+    // TabDecorationUpdated.workspaceIndex) now carry a stable WorkspaceId.
+    // This fixture deliberately makes display order disagree with id order
+    // (higher id at display index 0, lower id at display index 1) so a test
+    // that accidentally still asserted a position would catch the wrong
+    // value. Every assertion is on the id, independent of slot.
+    void DiffTests::IdentityArms_CarryWorkspaceId_IndependentOfDisplayOrder()
+    {
+        // prev: a single workspace (id 99) at display index 0, active.
+        auto prev = makeState(
+            { makeWs(99, makeLeaf(990, { makeTab(9900) }), PaneId{ 990 }) },
+            WorkspaceId{ 99 });
+
+        // next: a NEW workspace (id 7) is inserted at display index 0, so it
+        // sits BEFORE the pre-existing id-99 workspace (now at display index
+        // 1). id 7 becomes the active workspace, and the id-99 tab is
+        // re-decorated. Display order (7 then 99) deliberately does not match
+        // creation/id order (99 then 7).
+        auto t9900Next = makeTab(9900);
+        t9900Next.customTitle = "renamed";
+        auto next = makeState(
+            { makeWs(7, makeLeaf(70, { makeTab(700) }), PaneId{ 70 }),
+              makeWs(99, makeLeaf(990, { t9900Next }), PaneId{ 990 }) },
+            WorkspaceId{ 7 });
+
+        const auto ops = diff(prev, next);
+
+        // WorkspaceAdded carries the new workspace's stable id (7), even
+        // though it lives at display index 0.
+        const auto adds = changesOfKind<WorkspaceAdded>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds.size());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 7 }.v, adds[0].id.v);
+
+        // ActiveWorkspaceChanged carries the newly-active id (7), not a
+        // display index.
+        const auto setActive = changesOfKind<ActiveWorkspaceChanged>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), setActive.size());
+        VERIFY_IS_TRUE(setActive[0].id.has_value());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 7 }.v, setActive[0].id->v);
+
+        // TabDecorationUpdated for the id-99 tab carries the OWNING
+        // workspace id (99), even though that workspace is now at display
+        // index 1. A positional projection would have emitted 1 here.
+        const auto decos = changesOfKind<TabDecorationUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), decos.size());
+        VERIFY_ARE_EQUAL(TabId{ 9900 }.v, decos[0].id.v);
+        VERIFY_ARE_EQUAL(WorkspaceId{ 99 }.v, decos[0].workspaceId.v);
     }
 
     // =====================================================================
@@ -742,7 +798,7 @@ namespace WorkspaceModelUnitTests
         // applyChanges; the mock should record the exact sequence we
         // provided.
         std::vector<WorkspaceChange> changes;
-        changes.emplace_back(WorkspaceAdded{ WorkspaceId{ 7 }, "alpha", std::nullopt, 0 });
+        changes.emplace_back(WorkspaceAdded{ WorkspaceId{ 7 }, "alpha", std::nullopt });
         changes.emplace_back(LeafPaneCreated{ PaneId{ 1 }, std::nullopt });
         changes.emplace_back(TabAdded{ PaneId{ 1 }, 0, TabId{ 11 }, "", std::nullopt, false });
         changes.emplace_back(ActiveWorkspaceChanged{ WorkspaceId{ 7 } });

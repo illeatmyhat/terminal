@@ -6108,6 +6108,38 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Phase 2 id-resolver foundation (#45/#44). Resolves a stable
+    // WorkspaceId to the current display index of its classic Tab. The
+    // WorkspaceChange arms (ActiveWorkspaceChanged / TabDecorationUpdated)
+    // used to carry a display index that the view consumed via a positional
+    // cast, baking in the Phase-1 "workspace display index == classic tab
+    // index" invariant. They now carry the stable id and resolve it here.
+    //
+    // Every failure mode collapses to std::nullopt rather than a guessed
+    // index, so an unknown / stale id can never select or decorate the wrong
+    // tab:
+    //   - no registry entry for `ws`           -> nullopt
+    //   - the weak_ref<Tab> has expired         -> nullopt
+    //   - the Tab is no longer present in _tabs  -> nullopt (via _GetTabIndex)
+    std::optional<std::uint32_t> TerminalPage::_classicTabIndexForWorkspace(::WorkspaceModel::WorkspaceId ws) const
+    {
+        if (!ws.valid())
+        {
+            return std::nullopt;
+        }
+        const auto it = _workspaceClassicTabs.find(ws);
+        if (it == _workspaceClassicTabs.end())
+        {
+            return std::nullopt;
+        }
+        const auto tab = it->second.get();
+        if (!tab)
+        {
+            return std::nullopt;
+        }
+        return _GetTabIndex(tab);
+    }
+
     // Routed from the Tab::Closed handler (registered in
     // _InitializeTab) when the workspaces flag is on. The classic Tab
     // raised Closed via tab.Close(); instead of doing the classic

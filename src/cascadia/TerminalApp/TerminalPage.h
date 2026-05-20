@@ -644,6 +644,18 @@ namespace winrt::TerminalApp::implementation
                                              const winrt::TerminalApp::Tab& tab);
         void _removeClassicTabForRemovedWorkspace(::WorkspaceModel::WorkspaceId ws);
 
+        // Phase 2 id-resolver foundation (#45/#44). Resolves a stable
+        // WorkspaceId to the CURRENT display index of its classic Tab in
+        // _tabs, by looking the workspace up in _workspaceClassicTabs and
+        // asking the live _tabs vector for that Tab's index. Returns
+        // std::nullopt when the id is unknown (no registry entry), the
+        // weak_ref has expired, or the Tab is no longer in _tabs — so a
+        // missing/stale id can never route a selection or decoration to the
+        // wrong tab via a positional cast. This replaces the Phase-1
+        // "workspace display index == classic tab index" assumption the
+        // WorkspaceChange arms used to bake in.
+        std::optional<std::uint32_t> _classicTabIndexForWorkspace(::WorkspaceModel::WorkspaceId ws) const;
+
         // Drag tear-out / move-tab-to-window destroy a classic Tab
         // without firing Tab::Closed. When the workspaces flag is on,
         // those paths would otherwise leave a stale weak_ref<Tab> in

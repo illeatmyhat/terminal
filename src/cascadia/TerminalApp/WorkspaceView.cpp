@@ -18,6 +18,23 @@ namespace winrt::TerminalApp::implementation
         return _owner.get();
     }
 
+    // Phase 2 id-resolver foundation (#45/#44). The view owns the id->XAML
+    // mapping: it resolves a stable WorkspaceId to the CURRENT display index
+    // of its classic Tab via the page's WorkspaceId->Tab registry, never via
+    // a positional cast of a display index the model handed it. Any failure
+    // (page gone, unknown id, expired Tab, Tab no longer in _tabs) returns
+    // std::nullopt so the caller can skip the apply explicitly rather than
+    // route to the wrong tab.
+    std::optional<std::uint32_t> WorkspaceView::_resolveClassicTabIndex(::WorkspaceModel::WorkspaceId ws) const
+    {
+        auto page = _page();
+        if (!page)
+        {
+            return std::nullopt;
+        }
+        return page->_classicTabIndexForWorkspace(ws);
+    }
+
     // -------------------------------------------------------------------
     // Each apply() overload corresponds to one WorkspaceChange arm. Arms
     // that a migrated Phase 1 action can actually emit carry real logic;
@@ -52,38 +69,40 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::ActiveWorkspaceChanged& c)
     {
-        // Phase 1 maps one model workspace == one classic window-level tab.
-        // Switching the active workspace therefore corresponds to selecting
-        // the classic tab whose index matches the new active workspace's
-        // display index, which diff() carries in `index`. When the model is
-        // empty (activeWorkspaceId std::nullopt) `index` is also nullopt and
-        // there is no classic tab to select.
+        // Switching the active workspace corresponds to selecting the classic
+        // tab that backs the newly-active workspace. diff() carries the
+        // workspace's stable id (std::nullopt for the empty-model case, where
+        // there is no tab to select); we resolve it to the CURRENT classic
+        // tab index through the view-owned resolver instead of trusting a
+        // positional display index. An unknown / stale id resolves to
+        // std::nullopt and we skip — no out-of-range or wrong-tab routing.
         auto page = _page();
-        if (!page || !c.index.has_value())
+        if (!page || !c.id.has_value())
         {
             return;
         }
 
-        const auto i = *c.index;
+        const auto resolved = _resolveClassicTabIndex(*c.id);
+        if (!resolved.has_value())
+        {
+            return;
+        }
+        const auto idx = *resolved;
+
         // _SelectTab is responsible for both _tabView.SelectedItem mutation
         // and the focus-tracking downstream (see the _UpdatedSelectedTab /
         // _SetFocusedTab branches in its implementation). This is the same
         // entry point clicks on a TabViewItem already use on the flag-off
         // path.
         //
-        // Skip when the target tab is already selected. The Slice-2 new-
-        // workspace case fires TabAdded immediately before this
-        // ActiveWorkspaceChanged; the classic _OpenNewTab inside TabAdded
-        // already selected the new tab via _tabView.SelectedItem(newItem).
-        // Re-entering _SelectTab here would post a redundant _SetFocusedTab
-        // dispatcher hop.
-        if (i < page->_tabs.Size())
+        // Skip when the target tab is already selected. The new-workspace
+        // case fires TabAdded immediately before this ActiveWorkspaceChanged;
+        // the classic _OpenNewTab inside TabAdded already selected the new
+        // tab via _tabView.SelectedItem(newItem). Re-entering _SelectTab here
+        // would post a redundant _SetFocusedTab dispatcher hop.
+        if (page->_GetFocusedTabIndex() != idx)
         {
-            const auto idx = static_cast<uint32_t>(i);
-            if (page->_GetFocusedTabIndex() != idx)
-            {
-                page->_SelectTab(idx);
-            }
+            page->_SelectTab(idx);
         }
     }
 
@@ -268,11 +287,11 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabDecorationUpdated& c)
     {
-        // Phase 1 maps each model workspace 1:1 to a classic window-
-        // level tab and pins exactly one model tab per workspace, so
-        // the workspace's display index doubles as the classic tab
-        // index. diff() carries that index in `workspaceIndex`; route the
-        // rename/color straight back to the classic Tab.
+        // diff() carries the stable id of the workspace that owns the
+        // decorated tab; we resolve it to the CURRENT classic tab index
+        // through the view-owned resolver and route the rename/color there.
+        // An unknown / stale id resolves to std::nullopt and we skip — no
+        // positional cast, so a decoration can never land on the wrong tab.
         //
         // Pinning is carried by the model but has no classic XAML
         // surface yet — the dedicated pin glyph lands in Phase 2.
@@ -281,6 +300,11 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        page->_applyTabDecoration(static_cast<uint32_t>(c.workspaceIndex), c.customTitle, c.runtimeColor);
+        const auto resolved = _resolveClassicTabIndex(c.workspaceId);
+        if (!resolved.has_value())
+        {
+            return;
+        }
+        page->_applyTabDecoration(*resolved, c.customTitle, c.runtimeColor);
     }
 }

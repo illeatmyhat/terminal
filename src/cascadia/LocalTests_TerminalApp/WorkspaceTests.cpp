@@ -6,6 +6,7 @@
 #include "../TerminalApp/TerminalPage.h"
 #include "../TerminalApp/TerminalWindow.h"
 #include "../TerminalApp/ContentManager.h"
+#include "../TerminalApp/WorkspaceView.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
 #include "../WorkspaceModel/Diff.h"
 #include "../WorkspaceModel/Validator.h"
@@ -54,6 +55,14 @@ namespace TerminalAppLocalTests
 
         TEST_METHOD(SwitchToTab_FlagOn_ChangesActiveWorkspace);
         TEST_METHOD(SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel);
+
+        // #45/#44: id-based routing. The ActiveWorkspaceChanged /
+        // TabDecorationUpdated arms carry a stable WorkspaceId and the view
+        // resolves it to the CURRENT classic tab via its own resolver, so
+        // routing is correct even when display order != workspace order, and
+        // an unknown id is an explicit no-op.
+        TEST_METHOD(IdResolver_RoutesToCorrectTab_AfterReorder);
+        TEST_METHOD(IdResolver_UnknownId_IsNoOp);
 
         // Slice 6: decoration + explicit-profile dispatch.
         TEST_METHOD(RenameTab_FlagOn_UpdatesClassicTabAndModel);
@@ -791,6 +800,195 @@ namespace TerminalAppLocalTests
                            L"flag-off switch-to-tab must NOT populate the model state");
             VERIFY_IS_TRUE(page->_workspaceView == nullptr,
                            L"flag-off switch-to-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #45/#44: the WorkspaceChange arms carry a stable WorkspaceId and the
+    // WorkspaceView resolves it to the CURRENT classic tab through its own
+    // resolver (_classicTabIndexForWorkspace), NOT a positional cast. This
+    // test makes display order disagree with workspace order by reordering
+    // the classic tab strip, then drives the two id-bearing arms directly
+    // against the view and asserts they hit the right tab object regardless
+    // of its current slot. With the old display-index contract these would
+    // have routed to the wrong tab.
+    void WorkspaceTests::IdResolver_RoutesToCorrectTab_AfterReorder()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Startup gives us workspace[0] (tab at index 0). Add a second.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        ::WorkspaceModel::WorkspaceId ws0{};
+        ::WorkspaceModel::WorkspaceId ws1{};
+        ::WorkspaceModel::TabId ws0TabId{};
+        winrt::TerminalApp::Tab ws0Tab{ nullptr };
+
+        result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size());
+            ws0 = workspaces[0].id;
+            ws1 = workspaces[1].id;
+
+            // Capture workspace[0]'s classic Tab object + its model TabId via
+            // the registry; we'll track it by identity across the reorder.
+            const auto it0 = page->_workspaceClassicTabs.find(ws0);
+            VERIFY_IS_TRUE(it0 != page->_workspaceClassicTabs.end());
+            ws0Tab = it0->second.get();
+            VERIFY_IS_TRUE(ws0Tab != nullptr);
+
+            const auto leaves = page->_workspaceModelState->leaves(ws0);
+            VERIFY_IS_FALSE(leaves.empty());
+            VERIFY_IS_FALSE(leaves[0]->tabs.empty());
+            ws0TabId = leaves[0]->tabs[0].id;
+
+            // Pre-reorder sanity: workspace[0]'s tab is at display index 0.
+            VERIFY_ARE_EQUAL(0u, page->_GetTabIndex(ws0Tab).value_or(0xFFFFFFFFu));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Reorder the classic strip so workspace[0]'s tab moves to index 1.
+        // Now "workspace display index" (0) != "classic tab index" (1) — the
+        // exact mismatch the old positional contract assumed away. Then put
+        // selection back on index 0 (workspace[1]'s tab) so the subsequent
+        // ActiveWorkspaceChanged assertion proves a real selection move.
+        result = RunOnUIThread([&]() {
+            page->_TryMoveTab(0, 1);
+            VERIFY_ARE_EQUAL(1u, page->_GetTabIndex(ws0Tab).value_or(0xFFFFFFFFu),
+                             L"reorder should have moved workspace[0]'s tab to index 1");
+            page->_SelectTab(0);
+            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Drive ActiveWorkspaceChanged{ws0} straight at the view. The
+        // resolver must select the tab that is now at index 1 (ws0's tab),
+        // NOT index 0. The old contract carried index 0 and would mis-select
+        // (it would have re-selected the tab already at index 0).
+        result = RunOnUIThread([&]() {
+            page->_workspaceView->apply(::WorkspaceModel::ActiveWorkspaceChanged{ ws0 });
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"id resolver must select workspace[0]'s tab at its CURRENT index (1)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Drive TabDecorationUpdated for ws0's tab. The rename must land on
+        // ws0's tab object (now at index 1), not whatever tab sits at index 0.
+        result = RunOnUIThread([&]() {
+            ::WorkspaceModel::TabDecorationUpdated deco{};
+            deco.id = ws0TabId;
+            deco.customTitle = "ws0-renamed";
+            deco.workspaceId = ws0;
+            page->_workspaceView->apply(deco);
+
+            auto movedTabImpl = page->_GetTabImpl(ws0Tab);
+            VERIFY_IS_NOT_NULL(movedTabImpl);
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"ws0-renamed" }, movedTabImpl->GetTabText(),
+                             L"decoration must land on ws0's tab object regardless of slot");
+
+            // The tab now at index 0 (workspace[1]'s tab) must be untouched.
+            auto idx0Tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(idx0Tab);
+            VERIFY_IS_FALSE(idx0Tab->GetTabText() == winrt::hstring{ L"ws0-renamed" },
+                            L"decoration must NOT leak onto the tab at the stale positional index");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // ws1 sanity: still resolvable to its own (now index-0) tab.
+        result = RunOnUIThread([&]() {
+            const auto resolved = page->_classicTabIndexForWorkspace(ws1);
+            VERIFY_IS_TRUE(resolved.has_value());
+            VERIFY_ARE_EQUAL(0u, resolved.value());
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #45/#44: an unknown / stale WorkspaceId must resolve to std::nullopt so
+    // the apply arms become explicit no-ops — never an out-of-range or
+    // wrong-tab route. Illegal states unrepresentable: there is no positional
+    // index that could accidentally point somewhere valid.
+    void WorkspaceTests::IdResolver_UnknownId_IsNoOp()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Two tabs; tab 1 is selected after the NewTab.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
+
+            // An id that no workspace owns: the resolver returns nullopt and
+            // both arms must leave selection + titles untouched.
+            const ::WorkspaceModel::WorkspaceId bogus{ 999999 };
+            VERIFY_IS_FALSE(page->_classicTabIndexForWorkspace(bogus).has_value());
+
+            const auto titleAt0Before = page->_GetTabImpl(page->_tabs.GetAt(0))->GetTabText();
+            const auto titleAt1Before = page->_GetTabImpl(page->_tabs.GetAt(1))->GetTabText();
+
+            page->_workspaceView->apply(::WorkspaceModel::ActiveWorkspaceChanged{ bogus });
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"unknown-id ActiveWorkspaceChanged must not change selection");
+
+            ::WorkspaceModel::TabDecorationUpdated deco{};
+            deco.id = ::WorkspaceModel::TabId{ 888888 };
+            deco.customTitle = "should-not-apply";
+            deco.workspaceId = bogus;
+            page->_workspaceView->apply(deco);
+
+            VERIFY_IS_TRUE(page->_GetTabImpl(page->_tabs.GetAt(0))->GetTabText() == titleAt0Before,
+                           L"unknown-id decoration must not mutate any tab");
+            VERIFY_IS_TRUE(page->_GetTabImpl(page->_tabs.GetAt(1))->GetTabText() == titleAt1Before,
+                           L"unknown-id decoration must not mutate any tab");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -53,6 +53,15 @@ namespace winrt::TerminalApp::implementation
         // an empty com_ptr if the page is gone.
         winrt::com_ptr<TerminalPage> _page() const;
 
+        // Phase 2 id-resolver foundation (#45/#44). Maps a stable
+        // WorkspaceId to the current display index of its classic Tab in the
+        // page's _tabs vector. Returns std::nullopt when `page` is gone or
+        // the id is unknown / stale (no registry entry, expired Tab, or the
+        // Tab is no longer in _tabs). The apply() arms route through this
+        // instead of casting a positional display index, so a missing id is
+        // handled explicitly and can never select/decorate the wrong tab.
+        std::optional<std::uint32_t> _resolveClassicTabIndex(::WorkspaceModel::WorkspaceId ws) const;
+
         winrt::weak_ref<TerminalPage> _owner;
     };
 }
