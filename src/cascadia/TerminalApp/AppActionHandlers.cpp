@@ -527,6 +527,34 @@ namespace winrt::TerminalApp::implementation
     {
         if (const auto& realArgs = args.ActionArgs().try_as<SwitchToTabArgs>())
         {
+            // Flag-on: route through WorkspaceActions::selectTab so the
+            // diff emits ActiveWorkspaceChanged and the WorkspaceView drives
+            // _SelectTab. Phase 1 maps each classic tab onto one workspace
+            // whose leaf carries exactly one tab, so the model TabId we
+            // need is workspaces[index].root.tabs[0].id.
+            //
+            // If for any reason that mapping doesn't hold (model out of
+            // sync, index out of range), we fall through to the classic
+            // path so user input is never dropped.
+            if (_workspacesFlagEnabled() && _workspaceModelState)
+            {
+                const auto idx = realArgs.TabIndex();
+                const auto& workspaces = _workspaceModelState->workspaces_view();
+                if (idx < workspaces.size())
+                {
+                    if (const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[idx].root))
+                    {
+                        if (!leaf->tabs.empty())
+                        {
+                            auto newState = ::WorkspaceModel::selectTab(_workspaceModelState, leaf->tabs.front().id);
+                            _applyWorkspaceAction(std::move(newState));
+                            args.Handled(true);
+                            return;
+                        }
+                    }
+                }
+            }
+
             _SelectTab({ realArgs.TabIndex() });
             args.Handled(true);
         }

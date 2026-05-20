@@ -45,6 +45,9 @@ namespace TerminalAppLocalTests
         TEST_METHOD(NewTab_FlagOn_AppendsTab);
         TEST_METHOD(NewTab_FlagOff_AppendsTabWithoutModel);
 
+        TEST_METHOD(SwitchToTab_FlagOn_ChangesActiveWorkspace);
+        TEST_METHOD(SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -378,4 +381,165 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
     }
+
+    // -------------------------------------------------------------------
+    // Slice 4: switch active tab + focus pane through the model.
+    // -------------------------------------------------------------------
+
+    // AC: "Flag-on tab switching observably matches flag-off."
+    //
+    // Phase 1 maps each classic tab onto one model workspace. After
+    // startup + one new-tab the page has two tabs (workspace[0] and
+    // workspace[1]); the new tab is the active one (workspace[1] is the
+    // active workspace). Issuing _HandleSwitchToTab(index=0) routes
+    // through WorkspaceActions::selectTab, the diff emits
+    // ActiveWorkspaceChanged{ workspace[0].id }, and the WorkspaceView calls
+    // _SelectTab(0). The end state on classic XAML and the end state in
+    // the model are both consistent with "tab 0 is active".
+    void WorkspaceTests::SwitchToTab_FlagOn_ChangesActiveWorkspace()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Push the model up to two workspaces, then verify pre-conditions.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
+
+            // The most recently created workspace is the active one
+            // (newWorkspace's contract). Capture its id so we can verify
+            // the switch actually moved the active workspace.
+            const auto activeBefore = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeBefore.has_value());
+            VERIFY_ARE_EQUAL(activeBefore.value(),
+                             page->_workspaceModelState->workspaces_view()[1].id,
+                             L"workspaces[1] should be active after a NewTab on a single-workspace model");
+
+            // Classic tab strip: the newly created tab is selected.
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Switch to tab 0 via SwitchToTab action");
+        result = RunOnUIThread([&page]() {
+            SwitchToTabArgs args{ 0 };
+            ActionEventArgs eventArgs{ args };
+            page->_HandleSwitchToTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // Model now reports workspaces[0] as active...
+            const auto activeAfter = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeAfter.has_value());
+            VERIFY_ARE_EQUAL(activeAfter.value(),
+                             page->_workspaceModelState->workspaces_view()[0].id,
+                             L"selectTab routed through the model should move active to workspaces[0]");
+
+            // MRU was touched: workspaces[0] is now at the front.
+            VERIFY_IS_FALSE(page->_workspaceModelState->mru_view().empty());
+            VERIFY_ARE_EQUAL(page->_workspaceModelState->mru_view().front(),
+                             page->_workspaceModelState->workspaces_view()[0].id);
+
+            // ...and the classic XAML view agrees.
+            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"WorkspaceView should have driven _SelectTab(0) via ActiveWorkspaceChanged");
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"switch is non-structural — tab count must not change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig contract pin: any future slice that breaks flag-OFF
+    // parity for tab switching will fail this test.
+    //
+    // After two NewTabs on the classic path (tabs 0 and 1, with tab 1
+    // selected), issuing _HandleSwitchToTab(0) selects tab 0. The
+    // workspace model and WorkspaceView must remain dormant throughout.
+    void WorkspaceTests::SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"the new tab should be selected on the classic path too");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr);
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Switch to tab 0 via SwitchToTab action");
+        result = RunOnUIThread([&page]() {
+            SwitchToTabArgs args{ 0 };
+            ActionEventArgs eventArgs{ args };
+            page->_HandleSwitchToTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"flag-off SwitchToTab should select tab 0");
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+
+            // Strangler-fig: workspace machinery still dormant.
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off switch-to-tab must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off switch-to-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
 }

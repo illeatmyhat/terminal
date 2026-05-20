@@ -24,8 +24,10 @@ namespace winrt::TerminalApp::implementation
     }
 
     // -------------------------------------------------------------------
-    // Phase 1 Slice 2: only TabAdded carries real logic. The other arms
-    // are intentional stubs — subsequent slices fill them in.
+    // Phase 1 progress:
+    //   Slice 2: TabAdded routes default-profile new-tab.
+    //   Slice 4: ActiveWorkspaceChanged routes classic-tab selection.
+    // Remaining arms are intentional stubs — subsequent slices fill them in.
     // -------------------------------------------------------------------
 
     void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceAdded& /*c*/)
@@ -41,10 +43,52 @@ namespace winrt::TerminalApp::implementation
         // TODO(workspace-slice-3): close-cascade end-to-end. Issue #20.
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::ActiveWorkspaceChanged& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::ActiveWorkspaceChanged& c)
     {
-        // TODO(workspace-slice-4): workspace-switch + active-pane focus.
-        // Issue #21.
+        // Phase 1 maps one model workspace == one classic window-level tab.
+        // Switching the active workspace therefore corresponds to selecting
+        // the classic tab whose index in _tabs matches the new active
+        // workspace's index in workspaces_view(). When activeWorkspaceId is
+        // std::nullopt (the empty-model case), there is no classic tab to
+        // select.
+        auto page = _page();
+        if (!page || !_state)
+        {
+            return;
+        }
+        if (!c.id.has_value())
+        {
+            return;
+        }
+
+        const auto& workspaces = _state->workspaces_view();
+        for (std::size_t i = 0; i < workspaces.size(); ++i)
+        {
+            if (workspaces[i].id == *c.id)
+            {
+                // _SelectTab is responsible for both _tabView.SelectedItem
+                // mutation and the focus-tracking downstream (see the
+                // _UpdatedSelectedTab / _SetFocusedTab branches in its
+                // implementation). This is the same entry point clicks on
+                // a TabViewItem already use on the flag-off path.
+                //
+                // Skip when the target tab is already selected. The Slice-2
+                // new-workspace case fires TabAdded immediately before this
+                // ActiveWorkspaceChanged; the classic _OpenNewTab inside
+                // TabAdded already selected the new tab via
+                // _tabView.SelectedItem(newItem). Re-entering _SelectTab
+                // here would post a redundant _SetFocusedTab dispatcher hop.
+                if (i < page->_tabs.Size())
+                {
+                    const auto idx = static_cast<uint32_t>(i);
+                    if (page->_GetFocusedTabIndex() != idx)
+                    {
+                        page->_SelectTab(idx);
+                    }
+                }
+                return;
+            }
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& /*c*/)
@@ -113,8 +157,15 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::ActiveTabChanged& /*c*/)
     {
-        // TODO(workspace-slice-4): workspace-switch + active-tab focus.
-        // Issue #21.
+        // ActiveTabChanged fires when a LEAF's activeTabIdx changes (i.e.
+        // the user switched between tabs that share a single pane). Phase 1
+        // holds exactly one tab per leaf, so this arm is unreachable from
+        // the migrated actions in this slice. Per-leaf tab strips (the
+        // case that exercises this arm) land in Phase 2 slices 9-10.
+        //
+        // Cross-classic-tab selection on the flag-on path is driven by
+        // ActiveWorkspaceChanged above; ActiveTabChanged here intentionally
+        // stays a no-op until per-leaf tab strips exist.
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& /*c*/)
