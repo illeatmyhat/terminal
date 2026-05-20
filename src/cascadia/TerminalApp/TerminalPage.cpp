@@ -2674,6 +2674,15 @@ namespace winrt::TerminalApp::implementation
                 auto startupActions = tab->BuildStartupActions(BuildStartupKind::Content);
                 _DetachTabFromWindow(tab);
                 _MoveContent(std::move(startupActions), windowId, 0);
+                // Phase 2: route move-tab through closeWorkspace +
+                // newWorkspace dispatch via the model so the receiving
+                // window's workspace lifecycle stays under model
+                // control. For now, this bypass path destroys the Tab
+                // directly via _RemoveTab without firing Tab::Closed,
+                // so the flag-on close-routing never runs. Erase any
+                // registry entry for this Tab to avoid a zombie
+                // workspace binding.
+                _eraseClassicTabFromRegistry(*tab);
                 _RemoveTab(*tab);
                 if (auto autoPeer = Automation::Peers::FrameworkElementAutomationPeer::FromElement(*this))
                 {
@@ -5909,6 +5918,14 @@ namespace winrt::TerminalApp::implementation
         _DetachTabFromWindow(_stashed.draggedTab);
 
         _MoveContent(std::move(startupActions), windowId, tabIndex, dragPoint);
+        // Phase 2: route drag tear-out through closeWorkspace +
+        // newWorkspace dispatch via the model so the receiving
+        // window's workspace lifecycle stays under model control. For
+        // now, this bypass path destroys the Tab directly via
+        // _RemoveTab without firing Tab::Closed, so the flag-on
+        // close-routing never runs. Erase any registry entry for this
+        // Tab to avoid a zombie workspace binding.
+        _eraseClassicTabFromRegistry(*_stashed.draggedTab);
         // _RemoveTab will make sure to null out the _stashed.draggedTab
         _RemoveTab(*_stashed.draggedTab);
     }
@@ -5991,15 +6008,141 @@ namespace winrt::TerminalApp::implementation
         ::WorkspaceModel::applyChanges(*_workspaceView, std::span<const ::WorkspaceModel::WorkspaceChange>{ changes });
     }
 
-    void TerminalPage::_openDefaultTabForWorkspace()
+    // Mirrors the classic _HandleNewTab(args==nullptr) branch:
+    // _OpenNewTab(nullptr) lets the page consult its settings for the
+    // default profile. Returns the newly-appended Tab, or nullptr if
+    // _OpenNewTab did not append a tab (spawn failure, elevation
+    // handoff, etc.). Callers use the return value to decide whether
+    // to bind a workspace -> Tab registry entry; binding the wrong
+    // Tab (e.g. a pre-existing one when _tabs.back() didn't change)
+    // would later tear down the wrong tab in
+    // _removeClassicTabForRemovedWorkspace.
+    winrt::TerminalApp::Tab TerminalPage::_openDefaultTabForWorkspace()
     {
-        // Mirrors the classic _HandleNewTab(args==nullptr) branch:
-        // _OpenNewTab(nullptr) lets the page consult its settings for
-        // the default profile.
+        const auto sizeBefore = _tabs.Size();
         LOG_IF_FAILED(_OpenNewTab(nullptr));
+        const auto sizeAfter = _tabs.Size();
+        if (sizeAfter <= sizeBefore)
+        {
+            // No new tab was appended (HRESULT==S_FALSE from a missing
+            // profile, _MakePane returning nullptr, elevation handoff,
+            // or any thrown exception caught by _OpenNewTab's
+            // CATCH_RETURN). Tell the caller to skip registry binding
+            // so the new workspace stays unbound rather than mis-bound
+            // to a pre-existing Tab.
+            return nullptr;
+        }
+        return _tabs.GetAt(sizeAfter - 1);
     }
 
-    void TerminalPage::_openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes)
+    // Called by WorkspaceView::apply(TabAdded) right after the classic
+    // _OpenNewTab path appends the new tab to _tabs. Phase 1 binds the
+    // tab to its owning workspace id so the WorkspaceRemoved arm can
+    // find the matching classic tab when closing.
+    //
+    // The Tab is passed in explicitly (rather than inferred from
+    // _tabs.back()) so spawn failures don't mis-bind the new workspace
+    // to a pre-existing tab. If the classic side appended nothing
+    // (spawn failure), the caller must pass nullptr and the registry
+    // stays unchanged for this workspace; closing the workspace later
+    // just becomes a model-only operation, which is what the validator
+    // requires.
+    void TerminalPage::_registerClassicTabForWorkspace(::WorkspaceModel::WorkspaceId ws,
+                                                       const winrt::TerminalApp::Tab& tab)
+    {
+        if (!ws.valid() || !tab)
+        {
+            return;
+        }
+        _workspaceClassicTabs[ws] = winrt::make_weak(tab);
+    }
+
+    // Erases any registry entries whose weak_ref<Tab> currently
+    // resolves to the given Tab. Called from the move-tab-to-window
+    // and drag tear-out callsites — those paths destroy a Tab without
+    // firing Tab::Closed, so the flag-on Tab::Closed routing
+    // (_closeTabViaWorkspaceModel) never gets a chance to delete the
+    // mapping. Without this cleanup, _workspaceClassicTabs would hold
+    // a stale weak_ref for the duration of the page, and the model's
+    // owning workspace would be a zombie. The classic teardown
+    // (_RemoveTab) still runs at the bypass callsite — this helper
+    // only fixes the registry side.
+    //
+    // Phase 2 will route these tear-out paths through closeWorkspace
+    // dispatch via the model (TODO: tracked in issue #21 follow-up).
+    void TerminalPage::_eraseClassicTabFromRegistry(const winrt::TerminalApp::Tab& tab)
+    {
+        if (!tab)
+        {
+            return;
+        }
+        for (auto it = _workspaceClassicTabs.begin(); it != _workspaceClassicTabs.end();)
+        {
+            const auto resolved = it->second.get();
+            if (resolved && resolved == tab)
+            {
+                it = _workspaceClassicTabs.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+    }
+
+    // Called by WorkspaceView::apply(WorkspaceRemoved). Phase 1 maps one
+    // model workspace to one classic tab; tearing down the workspace
+    // means tearing down that tab. _RemoveTab fires CloseWindowRequested
+    // when it drops the last tab, so the cascade's window-close
+    // behaviour reuses the existing path.
+    void TerminalPage::_removeClassicTabForRemovedWorkspace(::WorkspaceModel::WorkspaceId ws)
+    {
+        auto it = _workspaceClassicTabs.find(ws);
+        if (it == _workspaceClassicTabs.end())
+        {
+            return;
+        }
+        auto tab = it->second.get();
+        _workspaceClassicTabs.erase(it);
+        if (tab)
+        {
+            _RemoveTab(tab);
+        }
+    }
+
+    // Routed from the Tab::Closed handler (registered in
+    // _InitializeTab) when the workspaces flag is on. The classic Tab
+    // raised Closed via tab.Close(); instead of doing the classic
+    // _RemoveTab directly we route through the model so the cascade /
+    // active-workspace fallback runs. The model emits WorkspaceRemoved,
+    // whose arm calls _RemoveTab against the same Tab.
+    //
+    // If we can't locate a workspace id for this Tab in the registry
+    // (defensive: the Tab pre-dates the workspace machinery, or the
+    // registry was lost across a settings reload), fall back to the
+    // classic _RemoveTab so the user still sees their tab close.
+    void TerminalPage::_closeTabViaWorkspaceModel(const winrt::TerminalApp::Tab& tab)
+    {
+        ::WorkspaceModel::WorkspaceId owningWs{};
+        for (const auto& [wsId, weakTab] : _workspaceClassicTabs)
+        {
+            if (auto bound = weakTab.get(); bound && bound == tab)
+            {
+                owningWs = wsId;
+                break;
+            }
+        }
+        if (!owningWs.valid())
+        {
+            _RemoveTab(tab);
+            return;
+        }
+
+        auto newState = ::WorkspaceModel::closeWorkspace(_workspaceModelState, owningWs);
+        _applyWorkspaceAction(std::move(newState));
+    }
+
+    winrt::TerminalApp::Tab TerminalPage::_openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes)
     {
         // The 16-byte profile bytes are the canonical winrt::guid
         // in-memory layout on Windows; reinterpret to recover the
@@ -6011,7 +6154,19 @@ namespace winrt::TerminalApp::implementation
 
         NewTerminalArgs newTerminalArgs{};
         newTerminalArgs.Profile(::Microsoft::Console::Utils::GuidToString(g));
+
+        // Same spawn-failure contract as _openDefaultTabForWorkspace:
+        // return the newly-appended Tab, or nullptr if _OpenNewTab didn't
+        // add one, so the caller skips registry binding rather than
+        // mis-binding the new workspace to a pre-existing Tab.
+        const auto sizeBefore = _tabs.Size();
         LOG_IF_FAILED(_OpenNewTab(newTerminalArgs));
+        const auto sizeAfter = _tabs.Size();
+        if (sizeAfter <= sizeBefore)
+        {
+            return nullptr;
+        }
+        return _tabs.GetAt(sizeAfter - 1);
     }
 
     void TerminalPage::_applyTabDecoration(std::uint32_t classicTabIdx,

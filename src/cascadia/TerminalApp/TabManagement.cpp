@@ -183,13 +183,25 @@ namespace winrt::TerminalApp::implementation
         });
 
         // When the tab is closed, remove it from our list of tabs.
+        // Flag-on: route through the workspace model so the cascade
+        // logic (last-tab-in-workspace, last-workspace-in-window) lives
+        // in the model. The WorkspaceRemoved arm calls back into
+        // _RemoveTab to drive the same classic teardown the flag-off
+        // path uses.
         newTabImpl->Closed([weakTab, weakThis{ get_weak() }](auto&& /*s*/, auto&& /*e*/) {
             const auto page = weakThis.get();
             const auto tab = weakTab.get();
 
             if (page && tab)
             {
-                page->_RemoveTab(*tab);
+                if (page->_workspacesFlagEnabled())
+                {
+                    page->_closeTabViaWorkspaceModel(*tab);
+                }
+                else
+                {
+                    page->_RemoveTab(*tab);
+                }
             }
         });
 

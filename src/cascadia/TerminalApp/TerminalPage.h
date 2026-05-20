@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <unordered_map>
+
 #include <ThrottledFunc.h>
 
 #include "TerminalPage.g.h"
@@ -611,6 +613,14 @@ namespace winrt::TerminalApp::implementation
         ::WorkspaceModel::ModelState _workspaceModelState{ nullptr };
         std::unique_ptr<WorkspaceView> _workspaceView{ nullptr };
 
+        // Phase 1: one model workspace == one classic window-level tab.
+        // The view's TabAdded arm registers the classic Tab against the
+        // workspace's id after creation; the WorkspaceRemoved arm looks
+        // the Tab up to drive the classic teardown. Phase 2 Slice 4
+        // replaces this with the ContentRegistry / per-leaf TabView
+        // mapping.
+        std::unordered_map<::WorkspaceModel::WorkspaceId, winrt::weak_ref<winrt::TerminalApp::Tab>> _workspaceClassicTabs;
+
         bool _workspacesFlagEnabled() const noexcept;
         void _ensureWorkspaceView();
         void _applyWorkspaceAction(::WorkspaceModel::ModelState newState);
@@ -618,14 +628,47 @@ namespace winrt::TerminalApp::implementation
         // Called by WorkspaceView::apply(TabAdded) for a default-profile
         // TerminalSpec. Invokes the classic _OpenNewTab(nullptr) path so
         // the observable result is identical to the flag-off path.
-        void _openDefaultTabForWorkspace();
+        // Returns the newly-created classic Tab, or nullptr if
+        // _OpenNewTab failed to append a tab (e.g. spawn failure). The
+        // caller MUST treat nullptr as "do not bind a registry entry"
+        // — see _registerClassicTabForWorkspace.
+        winrt::TerminalApp::Tab _openDefaultTabForWorkspace();
+
+        // Slice 3 wiring. Called by the WorkspaceView arms to bind /
+        // dispatch classic XAML lifecycle around the model. The Tab is
+        // passed in explicitly (rather than inferred from _tabs.back())
+        // so spawn failures don't mis-bind the new workspace to a
+        // pre-existing tab. Callers must pass nullptr if no Tab was
+        // actually created.
+        void _registerClassicTabForWorkspace(::WorkspaceModel::WorkspaceId ws,
+                                             const winrt::TerminalApp::Tab& tab);
+        void _removeClassicTabForRemovedWorkspace(::WorkspaceModel::WorkspaceId ws);
+
+        // Drag tear-out / move-tab-to-window destroy a classic Tab
+        // without firing Tab::Closed. When the workspaces flag is on,
+        // those paths would otherwise leave a stale weak_ref<Tab> in
+        // _workspaceClassicTabs (the workspace becomes a zombie in the
+        // model). This helper erases any registry entry whose weak_ref
+        // resolves to the given Tab. Phase 2 will route move-tab/tear-
+        // out through closeWorkspace + newWorkspace dispatch via the
+        // model; until then this keeps the registry tidy.
+        void _eraseClassicTabFromRegistry(const winrt::TerminalApp::Tab& tab);
+
+        // Flag-on routing: triggered by the registered Tab::Closed
+        // handler when a classic Tab raises Closed via tab.Close() (the
+        // tab strip's close button and the CloseTab / ClosePane action
+        // handlers both end up here). Finds the model TabId/WorkspaceId
+        // for this Tab and dispatches the model-side closeTab. The
+        // diff's WorkspaceRemoved arm calls _RemoveTab to actually tear
+        // down the XAML.
+        void _closeTabViaWorkspaceModel(const winrt::TerminalApp::Tab& tab);
 
         // Called by WorkspaceView::apply(TabAdded) for a non-default
         // TerminalSpec. `profileBytes` is the 16-byte canonical GUID
         // layout that the model carries (matches winrt::guid in-memory
         // order on Windows). Routes through _OpenNewTab so the
         // observable result mirrors flag-off explicit-profile new-tab.
-        void _openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes);
+        winrt::TerminalApp::Tab _openProfileTabForWorkspace(const std::array<std::uint8_t, 16>& profileBytes);
 
         // Called by WorkspaceView::apply(TabDecorationUpdated). Applies
         // the rename + color combination to the classic Tab at index

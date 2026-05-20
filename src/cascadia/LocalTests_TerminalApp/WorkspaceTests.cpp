@@ -66,6 +66,14 @@ namespace TerminalAppLocalTests
         TEST_METHOD(DuplicateTab_FlagOn_AppendsWorkspaceWithSameProfile);
         TEST_METHOD(DuplicateTab_FlagOff_AppendsTabWithoutModel);
 
+        // Slice 3: close cascade + spawn-failure.
+        TEST_METHOD(CloseTab_FlagOn_RemovesWorkspaceAndTab);
+        TEST_METHOD(CloseTab_FlagOff_RemovesTabWithoutModel);
+        TEST_METHOD(CloseLastTab_FlagOn_RequestsWindowClose);
+        TEST_METHOD(CloseLastTab_FlagOff_RequestsWindowClose);
+        TEST_METHOD(NewTab_FlagOn_LeavesModelValidatorClean);
+        TEST_METHOD(NewTab_FlagOn_SpawnFailure_LeavesNoZombieWorkspace);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -1032,6 +1040,441 @@ namespace TerminalAppLocalTests
                            L"flag-off duplicate-tab must NOT populate the model state");
             VERIFY_IS_TRUE(page->_workspaceView == nullptr,
                            L"flag-off duplicate-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 3 AC: "Closing one tab in a multi-tab classic state behaves
+    // identically to upstream." (Phase 1 maps multi-tab to multi-
+    // workspace; closing the first tab leaves the second alive.)
+    //
+    // Start with two workspaces (one initial + one via NewTab), fire
+    // CloseTab on index 0, then assert: _tabs has 1 entry AND the model
+    // has 1 workspace AND the model state still validates.
+    void WorkspaceTests::CloseTab_FlagOn_RemovesWorkspaceAndTab()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Stand up a second classic tab (== second workspace) so we can
+        // close the first one without triggering the last-tab window-
+        // close path.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire CloseTab(index=0) through the action handler");
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // The classic tab strip lost one entry…
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"close-tab should remove the classic tab");
+            // …and so did the model.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"close-tab on flag-on should remove the matching workspace");
+
+            // No validator violations — the cascade and MRU fallback all
+            // produced a well-formed model state.
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"model state after close-cascade must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror of the slice-3 close-tab case. Flag-off
+    // close-tab must continue to mutate _tabs directly without ever
+    // instantiating the workspace machinery.
+    void WorkspaceTests::CloseTab_FlagOff_RemovesTabWithoutModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        // Append a second classic tab via the action handler so close-
+        // tab doesn't immediately tear down the window.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire CloseTab(index=0) on the flag-off path");
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"flag-off close-tab should remove the classic tab");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off close-tab must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off close-tab must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 3 AC: "Closing the last tab in a single-tab workspace
+    // closes the workspace and (if last workspace) the window."
+    //
+    // Drive: start with the single startup-replay tab, fire CloseTab on
+    // index 0, capture CloseWindowRequested via subscribing before the
+    // action dispatch. The model should be empty AND _tabs should be
+    // empty AND the close-window request should have fired exactly
+    // once.
+    void WorkspaceTests::CloseLastTab_FlagOn_RequestsWindowClose()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
+        auto result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+
+            page->CloseWindowRequested(
+                [closeWindowRequestCount](auto&&, auto&&) {
+                    closeWindowRequestCount->fetch_add(1);
+                });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire CloseTab(index=0) — the only remaining tab");
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"closing the last tab leaves the classic tab strip empty");
+            VERIFY_ARE_EQUAL(0u, page->_workspaceModelState->workspaces_view().size(),
+                             L"closing the last workspace leaves the model empty");
+            VERIFY_IS_FALSE(page->_workspaceModelState->activeWorkspaceId_view().has_value(),
+                            L"empty model has no active workspace");
+            VERIFY_ARE_EQUAL(1, closeWindowRequestCount->load(),
+                             L"the last-tab teardown must raise CloseWindowRequested exactly once");
+
+            // Validator on empty model state.
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"empty model state must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Strangler-fig mirror: the flag-off close-cascade-to-window-close
+    // path must continue to behave identically, even with the model
+    // machinery available. Same observable outcome (CloseWindowRequested
+    // fires once, _tabs.Size() == 0) without ever instantiating the
+    // workspace machinery.
+    void WorkspaceTests::CloseLastTab_FlagOff_RequestsWindowClose()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
+        auto result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            page->CloseWindowRequested(
+                [closeWindowRequestCount](auto&&, auto&&) {
+                    closeWindowRequestCount->fetch_add(1);
+                });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-off last-tab close empties the classic tab strip");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off last-tab close must NOT populate the model state");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off last-tab close must NOT instantiate WorkspaceView");
+            VERIFY_ARE_EQUAL(1, closeWindowRequestCount->load(),
+                             L"flag-off last-tab teardown still raises CloseWindowRequested");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 3 AC (spawn-failure): "Spawn failure leaves the workspace
+    // consistent — model Validator reports no violations."
+    //
+    // The Phase 1 model never inspects whether IPaneContent
+    // materialisation succeeds, so a spawn error in the XAML layer
+    // cannot drive the model into an invalid state on its own. This
+    // test pins that contract by exercising the same code paths a
+    // normal new-tab would (model dispatch, view apply, classic _tabs
+    // update) and verifying validator cleanliness across every
+    // mutation. If a future change starts toggling model fields based
+    // on spawn outcome, this guard will catch it.
+    void WorkspaceTests::NewTab_FlagOn_LeavesModelValidatorClean()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // After startup-replay.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_NOT_NULL(page->_workspaceModelState);
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"model state after startup-replay must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // After a second new-tab.
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"model state after a second new-tab must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // After a close-tab cascade.
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"model state after close-cascade must satisfy the validator");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 3 AC (spawn-failure, real-fail variant): exercise an
+    // actual failing dispatch and assert the model + registry stay
+    // consistent. The reviewer's must-fix specifically called out the
+    // mis-binding bug in _registerClassicTabForWorkspace, which would
+    // bind a NEW failed workspace to a PRE-EXISTING tab whenever
+    // _OpenNewTab bailed but _tabs already held at least one tab.
+    //
+    // Failure path: NewTabArgs with ProfileIndex=999 (out of range).
+    // AppActionHandlers::_HandleNewTab routes invalid-profile-index
+    // NewTab through _shouldBailForInvalidProfileIndex BEFORE the
+    // workspace-model dispatch, so the model is never asked to grow.
+    // Contract under test in this scenario:
+    //   - _tabs.Size() stays at the pre-call count (no zombie tab).
+    //   - _workspaceClassicTabs has no binding to a non-existent
+    //     workspace id (the model never minted one).
+    //   - Validator on the existing model state still clean.
+    //   - Model size unchanged (the failed dispatch never reached the
+    //     model — case (i) of the must-fix's "rolled back" contract).
+    //
+    // If a future refactor moves the invalid-profile-index check
+    // *past* the model dispatch (so the model grows and then the
+    // XAML side fails), this test still gives the right answer:
+    // _registerClassicTabForWorkspace is now passed the explicit Tab
+    // (or nullptr) by _openDefaultTabForWorkspace, so the new
+    // workspace would stay unbound (case (ii) of the contract) and
+    // the pre-existing tab would not be mis-bound to the failed
+    // workspace.
+    void WorkspaceTests::NewTab_FlagOn_SpawnFailure_LeavesNoZombieWorkspace()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Pre-condition: startup-replay landed one tab and the model
+        // has one workspace bound to it.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"startup-replay should produce exactly one classic tab");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"startup-replay should produce exactly one workspace");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceClassicTabs.size(),
+                             L"startup-replay must register the initial classic Tab");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Snapshot the pre-existing Tab and workspace id so we can
+        // assert later that nothing rebound the workspace to the wrong
+        // tab.
+        winrt::TerminalApp::Tab preexistingTab{ nullptr };
+        ::WorkspaceModel::WorkspaceId preexistingWs{};
+        result = RunOnUIThread([&page, &preexistingTab, &preexistingWs]() {
+            preexistingTab = page->_tabs.GetAt(0);
+            VERIFY_IS_NOT_NULL(preexistingTab);
+            for (const auto& [ws, weakTab] : page->_workspaceClassicTabs)
+            {
+                preexistingWs = ws;
+                break;
+            }
+            VERIFY_IS_TRUE(preexistingWs.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire NewTab with an out-of-range ProfileIndex; this should bail without growing _tabs or the model");
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            // Settings has exactly one active profile, so ProfileIndex
+            // 999 is guaranteed out of range and
+            // _shouldBailForInvalidProfileIndex returns true.
+            newTerminalArgs.ProfileIndex(winrt::Windows::Foundation::IReference<int32_t>{ 999 });
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, &preexistingTab, &preexistingWs]() {
+            // 1. No zombie tab.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"failed-spawn NewTab must NOT append a classic tab");
+
+            // 2. Model unchanged — the bail happened before model
+            //    dispatch, so workspace count stays at 1.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"failed-spawn NewTab must not grow the workspace model");
+
+            // 3. The registry still holds exactly the original
+            //    binding. Most importantly, the pre-existing workspace
+            //    is still bound to the pre-existing tab — NOT to some
+            //    new failed-spawn workspace.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceClassicTabs.size(),
+                             L"registry must hold exactly the original workspace -> tab binding");
+            const auto it = page->_workspaceClassicTabs.find(preexistingWs);
+            VERIFY_IS_TRUE(it != page->_workspaceClassicTabs.end(),
+                           L"pre-existing workspace must still be in the registry");
+            const auto boundTab = it->second.get();
+            VERIFY_IS_TRUE(boundTab == preexistingTab,
+                           L"pre-existing workspace must still be bound to the pre-existing tab (no mis-bind)");
+
+            // 4. Validator clean.
+            const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
+            VERIFY_IS_FALSE(violation.has_value(),
+                            L"model state after failed spawn must satisfy the validator");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -37,9 +37,22 @@ namespace winrt::TerminalApp::implementation
         // Phase 2's sidebar slice).
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceRemoved& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceRemoved& c)
     {
-        // TODO(workspace-slice-3): close-cascade end-to-end. Issue #20.
+        // Phase 1: one classic window-level tab per model workspace.
+        // The page keeps a WorkspaceId -> classic Tab registry that the
+        // TabAdded arm populates after _openDefaultTabForWorkspace.
+        // Removing a workspace from the model means we should tear down
+        // the matching classic tab (which in turn fires
+        // CloseWindowRequested when it's the last tab — the cascade's
+        // window-close behaviour falls out of the existing _RemoveTab
+        // path with no additional handling).
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_removeClassicTabForRemovedWorkspace(c.id);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ActiveWorkspaceChanged& c)
@@ -140,23 +153,62 @@ namespace winrt::TerminalApp::implementation
         }
 
         const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(record->description);
-        // The zero GUID is the model's "no explicit profile" sentinel —
-        // ask the classic path to use whatever CascadiaSettings picks
-        // as the default profile.
-        const ::WorkspaceModel::TerminalSpec defaultSentinel{};
-        if (spec == defaultSentinel)
+
+        // Locate the workspace that owns this tab BEFORE creating the
+        // classic Tab, so the registry binding step has the id ready.
+        // Phase 1 holds one tab per leaf per workspace, so the scan is
+        // bounded by workspaces.size().
+        ::WorkspaceModel::WorkspaceId owningWs{};
+        for (const auto& ws : _state->workspaces_view())
         {
-            page->_openDefaultTabForWorkspace();
+            for (const auto* leaf : _state->leaves(ws.id))
+            {
+                for (const auto& t : leaf->tabs)
+                {
+                    if (t.id == c.id)
+                    {
+                        owningWs = ws.id;
+                        break;
+                    }
+                }
+                if (owningWs.valid())
+                {
+                    break;
+                }
+            }
+            if (owningWs.valid())
+            {
+                break;
+            }
         }
-        else
+
+        // The zero GUID is the model's "no explicit profile" sentinel:
+        // ask the classic path for the default profile (Slice 2);
+        // otherwise dispatch the explicit profile (Slice 6). Both helpers
+        // return the newly-appended Tab, or nullptr if _OpenNewTab didn't
+        // actually add one (spawn failure). Passing that exact Tab into
+        // the registry — rather than inferring it from _tabs.back() —
+        // prevents mis-binding the new workspace to a pre-existing Tab
+        // when _OpenNewTab bails after at least one tab is already on
+        // screen.
+        const ::WorkspaceModel::TerminalSpec defaultSentinel{};
+        const auto newTab = (spec == defaultSentinel)
+                                ? page->_openDefaultTabForWorkspace()
+                                : page->_openProfileTabForWorkspace(spec.profile);
+
+        if (owningWs.valid() && newTab)
         {
-            page->_openProfileTabForWorkspace(spec.profile);
+            page->_registerClassicTabForWorkspace(owningWs, newTab);
         }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabRemoved& /*c*/)
     {
-        // TODO(workspace-slice-3): close-cascade end-to-end. Issue #20.
+        // Phase 1 maps one tab per leaf per workspace, so a tab close
+        // always cascades to WorkspaceRemoved (which carries the classic
+        // teardown). TabRemoved on its own only fires when a leaf has
+        // multiple tabs — Phase 2 Slice 9 lifts that constraint and
+        // wires the per-leaf TabView teardown.
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& /*c*/)
@@ -187,7 +239,11 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::ContentUnmounted& /*c*/)
     {
-        // TODO(workspace-phase-2-slice-4): ContentRegistry. Issue #20+.
+        // Phase 1: the classic Tab teardown (driven by the
+        // WorkspaceRemoved arm via _RemoveTab -> tab.Shutdown -> Pane
+        // -> _setPaneContent(nullptr)) already disposes IPaneContent.
+        // The dedicated ContentRegistry mount/unmount lifecycle lands in
+        // Phase 2 Slice 4.
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabDecorationUpdated& c)
