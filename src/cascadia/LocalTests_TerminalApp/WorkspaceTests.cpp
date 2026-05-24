@@ -270,6 +270,11 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipF5_FlagOn_TabRowHeightZero);
         TEST_METHOD(BigFlipF5_FlagOff_TabRowHeightAuto);
 
+        // F-5 fix (#46): flag-on, OpenSettingsUI must NOT build a classic tab
+        // (which would clear _tabContent and drop the workspace host). It is
+        // guarded to a no-op; the sole-child host invariant must survive the call.
+        TEST_METHOD(BigFlipF5_FlagOn_OpenSettings_DoesNotCorruptHost);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -5823,6 +5828,69 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(page->_workspaceContentHost, hostIndex),
                            L"the host must be _tabContent's SOLE child (the projected tree is the display)");
             VERIFY_ARE_EQUAL(0u, hostIndex);
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // F-5 fix (#46): the PRIMARY blocker regression test. Flag-on, opening the
+    // Settings UI (default keybinding ctrl+, / system menu / command palette)
+    // routed through the classic-tab path, which selected the new tab and
+    // cleared _tabContent — dropping the workspace host and leaving a blank
+    // window. With OpenSettingsUI guarded to a no-op flag-on, the call must be
+    // inert: no settings tab injected into _tabs, and the host must remain the
+    // sole child of _tabContent (display NOT corrupted).
+    void WorkspaceTests::BigFlipF5_FlagOn_OpenSettings_DoesNotCorruptHost()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // Capture the pre-call invariant: host is the sole child of _tabContent.
+            VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
+            VERIFY_IS_TRUE(page->_tabContent != nullptr);
+            VERIFY_ARE_EQUAL(1u, page->_tabContent.Children().Size(),
+                             L"precondition: _tabContent holds exactly one child (the host)");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"precondition: no classic tab exists flag-on");
+
+            // Invoke the settings-open path. Flag-on this must be a no-op so it
+            // cannot build a classic settings tab and clear _tabContent.
+            page->OpenSettingsUI();
+
+            // No classic settings tab was injected.
+            VERIFY_IS_TRUE(page->_settingsTab == nullptr,
+                           L"flag-on OpenSettingsUI must not create a settings tab");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on OpenSettingsUI must not grow _tabs (no classic tab injected)");
+
+            // The sole-child host invariant survived the call: the workspace
+            // host is still the one and only child of _tabContent (display intact).
+            VERIFY_ARE_EQUAL(1u, page->_tabContent.Children().Size(),
+                             L"_tabContent must still hold exactly one child after OpenSettingsUI");
+            uint32_t hostIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(page->_workspaceContentHost, hostIndex),
+                           L"the workspace host must still be _tabContent's sole child (not dropped)");
+            VERIFY_ARE_EQUAL(0u, hostIndex);
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must still be Visible after OpenSettingsUI");
         });
         VERIFY_SUCCEEDED(result);
     }

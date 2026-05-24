@@ -792,6 +792,28 @@ namespace winrt::TerminalApp::implementation
     {
         const auto strong = get_strong();
 
+        // Big-flip F-5 fix (#46): this is the incoming-defterm path (called from
+        // TerminalWindow when an external process hands us a ConPTY). Flag-on it
+        // builds a CLASSIC Tab from the connection, inserts it into _tabs, and
+        // selects it — which routes through _OnTabSelectionChanged ->
+        // _UpdatedSelectedTab -> _tabContent.Children().Clear(), dropping the
+        // workspace host (the sole child of _tabContent) and leaving a blank
+        // window. It would also leave a live second ConPTY orphaned in a tab the
+        // workspace display can never show. Defterm connections are not yet
+        // representable in the WorkspaceModel (no model action seeds an existing
+        // connection into a workspace), so we cannot route this through the model.
+        //
+        // Interim: decline the connection flag-on (drop it; do not build a tab).
+        // This preserves the sole-child host invariant — no classic tab is built,
+        // _tabContent is never cleared. Deferred follow-up: accept an incoming
+        // defterm connection as a new workspace/pane via the model
+        // (defterm-in-workspace), tracked separately.
+        if (_workspacesFlagEnabled())
+        {
+            connection.Close();
+            co_return;
+        }
+
         // This is the exact same logic as in ProcessStartupActions.
         if (_tabs.Size() > 0)
         {
@@ -4697,6 +4719,27 @@ namespace winrt::TerminalApp::implementation
     // - <none>
     void TerminalPage::OpenSettingsUI()
     {
+        // Big-flip F-5 fix (#46): flag-on the workspace pane tree (hosted in
+        // _workspaceContentHost) is the SOLE child of _tabContent and IS the
+        // visible display. The classic settings-UI path builds a Tab, inserts
+        // it into _tabs, and selects it via _tabView.SelectedItem(...), which
+        // routes through _OnTabSelectionChanged -> _UpdatedSelectedTab ->
+        // _tabContent.Children().Clear() — DROPPING the workspace host and
+        // leaving a blank window. The Settings UI is a Terminal-variant XAML
+        // page, not a WorkspaceModel content type (the content factory only
+        // materialises Terminal panes), so it cannot yet live inside the model.
+        //
+        // Interim: no-op flag-on. Settings UI is temporarily unavailable in
+        // workspaces mode (reachable flag-off as before). This preserves the
+        // sole-child host invariant: no classic tab is built, _tabContent is
+        // never cleared. Deferred follow-up: render the Settings UI as a
+        // first-class WorkspaceModel content kind (settings-as-model-content),
+        // tracked separately; until then this guard is the least-bad behavior.
+        if (_workspacesFlagEnabled())
+        {
+            return;
+        }
+
         // If we're holding the settings tab's switch command, don't create a new one, switch to the existing one.
         if (!_settingsTab)
         {
