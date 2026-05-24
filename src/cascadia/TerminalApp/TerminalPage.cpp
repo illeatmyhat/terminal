@@ -7415,6 +7415,20 @@ namespace winrt::TerminalApp::implementation
         return std::nullopt;
     }
 
+    // Returns the Title of the first VM in `leaf`'s strip — cheap string read, no
+    // rendering. Used by tests to pin that _appendPaneTabVm stores the title
+    // correctly (and therefore that the per-leaf strip ListView's
+    // Text="{x:Bind Title}" DataTemplate binding will show the right label).
+    std::optional<winrt::hstring> TerminalPage::_paneTabStripFirstTitleForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end() || it->second.Size() == 0)
+        {
+            return std::nullopt;
+        }
+        return it->second.GetAt(0).Title();
+    }
+
     // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane
     // tree inside the (Collapsed) WorkspacePaneTreeRoot. See the header comment
     // for the rebuild-vs-incremental rationale; in short we re-derive the whole
@@ -7849,7 +7863,18 @@ namespace winrt::TerminalApp::implementation
         // collection. _paneTabStripForLeaf creates the collection on first use,
         // so a freshly-split sibling leaf (whose strip the TabAdded arm now
         // appends) projects its row here. Invisible (the host is Collapsed).
+        //
+        // IMPORTANT: clone the ItemTemplate from the XAML-defined PaneTabStrip
+        // so each row renders Title (the TextBlock Text="{x:Bind Title}" binding)
+        // rather than falling back to IInspectable.ToString() which produces the
+        // raw type name "TerminalApp.PaneTabViewModel". The named strip is
+        // realized before any pane tree is built (_initializeWorkspaceShell runs
+        // first), so _paneTabStrip is always non-null here.
         Controls::ListView strip{};
+        if (_paneTabStrip)
+        {
+            strip.ItemTemplate(_paneTabStrip.ItemTemplate());
+        }
         strip.ItemsSource(_paneTabStripForLeaf(leaf));
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);

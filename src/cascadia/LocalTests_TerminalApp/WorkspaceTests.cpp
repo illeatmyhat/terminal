@@ -468,11 +468,13 @@ namespace TerminalAppLocalTests
                 // internals) just never had it. Installing it by DEFAULT keeps
                 // those tests building MockPaneContent (a bare Grid, no render
                 // engine) so nothing real is realised or torn down. This is a
-                // PURE TEST-HARNESS fix: production is untouched (each window owns
-                // its own UI thread and pages are not reconstructed back-to-back
-                // on a shared thread, so the real teardown is well-sequenced
-                // there) and flag-off is byte-for-byte unchanged. A test that
-                // genuinely needs a real control can still pass its own
+                // PURE TEST-HARNESS fix: production is untouched (window close is a
+                // serialized posted-message teardown — WM_CLOSE delivered on the
+                // single message-pump thread — so teardown completes before any
+                // new page is ever constructed; there is no back-to-back page
+                // reconstruction racing the render thread as there is on the shared
+                // TAEF UI thread) and flag-off is byte-for-byte unchanged. A test
+                // that genuinely needs a real control can still pass its own
                 // beforeCreate.
                 page->_makePaneContentForSpecOverrideForTest =
                     [](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
@@ -797,6 +799,17 @@ namespace TerminalAppLocalTests
             activeLeaf = *leafOpt;
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
                              L"the active leaf starts with exactly one tab in its strip");
+
+            // Pin that _appendPaneTabVm stores the title on the VM (not left
+            // empty / not the raw type name "TerminalApp.PaneTabViewModel").
+            // The startup tab has an empty customTitle so _appendPaneTabVm
+            // substitutes the sentinel "Tab"; a non-empty result here confirms
+            // the Title property is populated, so the strip ListView's
+            // Text="{x:Bind Title}" DataTemplate binding will resolve a real
+            // string rather than falling back to IInspectable.ToString().
+            const auto firstTitle = page->_paneTabStripFirstTitleForTest(activeLeaf);
+            VERIFY_IS_TRUE(firstTitle.has_value(), L"strip[0] must have a Title");
+            VERIFY_ARE_NOT_EQUAL(winrt::hstring{}, *firstTitle, L"strip[0] Title must be non-empty");
         });
         VERIFY_SUCCEEDED(result);
 

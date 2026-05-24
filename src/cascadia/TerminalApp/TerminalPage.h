@@ -892,6 +892,7 @@ namespace winrt::TerminalApp::implementation
         // any real geometry.
         [[nodiscard]] uint32_t _paneTabStripSizeForTest(::WorkspaceModel::PaneId leaf) const;
         [[nodiscard]] std::optional<uint64_t> _activePaneTabIdForTest(::WorkspaceModel::PaneId leaf) const;
+        [[nodiscard]] std::optional<winrt::hstring> _paneTabStripFirstTitleForTest(::WorkspaceModel::PaneId leaf) const;
 
         // The per-leaf observable tab-strip view-models, keyed by the leaf's
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf
