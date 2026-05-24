@@ -7874,6 +7874,14 @@ namespace winrt::TerminalApp::implementation
         if (_paneTabStrip)
         {
             strip.ItemTemplate(_paneTabStrip.ItemTemplate());
+            // Mirror the chrome background of the XAML-defined PaneTabStrip
+            // (the {ThemeResource TabViewBackground} brush — the same opaque,
+            // theme-aware brush the classic tab strip uses, see _updateThemeColors's
+            // "TabViewBackground" lookup). Without this the per-leaf strip's default
+            // ListView template paints no Background and the strip renders
+            // see-through onto the terminal/window. Sharing the named strip's
+            // resolved brush keeps both strips consistent in dark AND light themes.
+            strip.Background(_paneTabStrip.Background());
         }
         strip.ItemsSource(_paneTabStripForLeaf(leaf));
         Controls::Grid::SetRow(strip, 0);

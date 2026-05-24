@@ -319,6 +319,7 @@
                 <ListView x:Name="PaneTabStrip"
                           Grid.Row="0"
                           x:Load="False"
+                          Background="{ThemeResource TabViewBackground}"
                           ScrollViewer.HorizontalScrollBarVisibility="Auto"
                           ScrollViewer.HorizontalScrollMode="Auto"
                           ScrollViewer.VerticalScrollBarVisibility="Disabled"
