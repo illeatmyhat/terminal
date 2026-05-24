@@ -148,7 +148,7 @@ namespace winrt::TerminalApp::implementation
         // Big-flip Slice F-0 (#54): for EVERY projected leaf, parent that leaf's
         // ACTIVE tab's live content GetRoot() into the leaf's per-leaf content
         // host — so a SPLIT workspace renders each leaf's terminal in its own
-        // cell. The page enumerates (leaf, active-tab) via _leavesWithActiveTab()
+        // cell. The page enumerates (leaf, active-tab) via _leafContentTabs()
         // (it owns leaf->active-tab); this resolves each active TabId to its live
         // IPaneContent via _contentByTab + the registry (the view owns
         // tab->content) and drives the page's _attachContentToLeafHost per leaf.

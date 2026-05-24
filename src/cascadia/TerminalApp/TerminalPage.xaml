@@ -375,9 +375,11 @@
 
                     INVISIBLE this slice: it lives inside the Collapsed host, so
                     it neither renders nor hit-tests — the classic Pane tree
-                    stays the visible split. Slice F flips the host visible,
-                    retires the classic split, and swaps the placeholder
-                    separators for draggable GridSplitters.
+                    stays the visible split. Each split Grid now carries a CUSTOM
+                    draggable separator Border between its two cells (Slice F-1,
+                    #54 — NOT a toolkit GridSplitter); it is invisible until
+                    Slice F-5 flips the host visible and retires the classic
+                    split.
                 -->
                 <Grid x:Name="WorkspacePaneTreeRoot"
                       Grid.Row="1"

@@ -222,6 +222,13 @@ namespace clipboard
 
 namespace winrt::TerminalApp::implementation
 {
+    // Big-flip Slice F-1 (#54): thickness (px) of the custom split divider Border
+    // built in _projectPaneNode. Matches the classic Pane's combined border size
+    // (2 * PaneBorderSize) so the boundary reads the same once visible at F-5.
+    // Minimal by design — the separator is invisible until F-5, so we do NOT
+    // gold-plate it here.
+    static constexpr double kSplitSeparatorThickness = 2.0;
+
     TerminalPage::~TerminalPage() = default;
 
     TerminalPage::TerminalPage(TerminalApp::WindowProperties properties, const TerminalApp::ContentManager& manager) :
@@ -7322,15 +7329,20 @@ namespace winrt::TerminalApp::implementation
         }
 
         // A split projects to a Grid with exactly two star-sized cells along the
-        // axis, each holding the projected child. We deliberately do NOT add a
-        // draggable GridSplitter this slice: that splitter is a community-toolkit
-        // control not referenced by this project (adding it would touch the
-        // vcxproj, out of scope), it only matters once the host is VISIBLE, and a
-        // third boundary column/row would muddy the clean two-cell ratio
-        // structure D asserts. Slice F — which flips the host visible and retires
-        // the classic split — introduces the real GridSplitter and wires its drag
-        // to the resizePane model action. Until then the classic Pane tree's own
-        // separator is the visible, draggable one.
+        // axis, each holding the projected child. Big-flip Slice F-1 (#54) adds a
+        // CUSTOM draggable separator (a thin Border) between the cells — NOT a
+        // community-toolkit GridSplitter (adding that would touch the vcxproj + a
+        // PackageReference + a new xmlns; explicitly rejected, no new deps). The
+        // separator does NOT add a third column/row: it lives INSIDE the first
+        // cell, edge-aligned to the boundary, so the clean two-cell ratio
+        // structure D asserts is preserved (ColumnDefinitions/RowDefinitions stay
+        // == 2 and carry ratio / 1-ratio). Its drag dispatches the resizePane
+        // model action, which re-projects the two GridLengths from the new ratio.
+        // INVISIBLE this slice: the host is still Collapsed, so there is no layout
+        // and the separator's pointer interaction does not fire until F-5 flips
+        // the host visible — that is expected. The drag→ratio math is factored
+        // into _computeSplitRatioFromDrag so a headless test can simulate a drag
+        // with a synthetic delta + a known extent (no laid-out pixels).
         const auto& split = std::get<::WorkspaceModel::SplitPane>(*node);
 
         Controls::Grid grid{};
@@ -7414,7 +7426,193 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Big-flip Slice F-1 (#54): the custom draggable separator. It lives in
+        // the FIRST cell (column/row 0), edge-aligned to the boundary between the
+        // two cells (the trailing edge of cell 0 == the leading edge of cell 1),
+        // so no third column/row is introduced and the two-cell ratio structure
+        // is untouched. A thin transparent-ish Border (the classic Pane uses a
+        // 1px-ish border between panes; we keep it minimal — it is invisible
+        // until F-5 makes the host visible, so we do NOT gold-plate cursors/hit
+        // areas here). We capture the split's stable id by VALUE in the drag
+        // handler (and the Grid carries the same id in Tag() as the
+        // authoritative fallback / for tests). The handler reads the real laid-
+        // out extent at drag time and delegates the ratio math to the shared
+        // _resizeSplitFromDrag → _computeSplitRatioFromDrag helper.
+        Controls::Border separator{};
+        const auto splitId = split.id;
+        if (split.axis == ::WorkspaceModel::Axis::Vertical)
+        {
+            // Vertical split = two side-by-side columns; the separator is a
+            // vertical bar at the right edge of column 0.
+            Controls::Grid::SetColumn(separator, 0);
+            separator.Width(kSplitSeparatorThickness);
+            separator.HorizontalAlignment(HorizontalAlignment::Right);
+            separator.VerticalAlignment(VerticalAlignment::Stretch);
+        }
+        else
+        {
+            // Horizontal split = two stacked rows; the separator is a horizontal
+            // bar at the bottom edge of row 0.
+            Controls::Grid::SetRow(separator, 0);
+            separator.Height(kSplitSeparatorThickness);
+            separator.HorizontalAlignment(HorizontalAlignment::Stretch);
+            separator.VerticalAlignment(VerticalAlignment::Bottom);
+        }
+        // Tag the separator with the split id too, so a test can find it by
+        // identity AND read which split it controls without depending on the
+        // capture. (The handler uses the captured value; the Tag is for the
+        // test accessor and as an audit anchor.)
+        separator.Tag(winrt::box_value(static_cast<uint64_t>(splitId.v)));
+
+        // Track a drag in element-local coordinates. PointerPressed captures the
+        // pointer + records the origin; PointerMoved computes the cumulative
+        // delta along the split axis and dispatches a resize using the cell's
+        // CURRENT laid-out extent (read live — valid only once visible at F-5);
+        // PointerReleased ends the capture. These shared_ptrs live as long as the
+        // captured lambdas (i.e. as long as the separator element).
+        auto dragging = std::make_shared<bool>(false);
+        auto origin = std::make_shared<double>(0.0);
+        const auto axis = split.axis;
+        // Capture the impl `this` plus a weak projected ref: the weak ref guards
+        // the page's lifetime (resolve + null-check before use), and the raw impl
+        // pointer lets the handler call the private dispatch helper directly. The
+        // separator lives inside the page's own visual tree, so it cannot outlive
+        // the page — but we guard anyway.
+        auto weakThis = get_weak();
+        auto* implThis = this;
+
+        separator.PointerPressed([dragging, origin, axis](const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+            const auto element = sender.try_as<Controls::Border>();
+            if (!element)
+            {
+                return;
+            }
+            const auto point = e.GetCurrentPoint(element);
+            *origin = (axis == ::WorkspaceModel::Axis::Vertical) ? point.Position().X : point.Position().Y;
+            *dragging = true;
+            element.CapturePointer(e.Pointer());
+            e.Handled(true);
+        });
+
+        separator.PointerMoved([weakThis, implThis, dragging, origin, axis, splitId](const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+            if (!*dragging)
+            {
+                return;
+            }
+            const auto element = sender.try_as<Controls::Border>();
+            // Resolve the weak ref purely to confirm the page is still alive
+            // before using the raw impl pointer.
+            const auto strongThis = weakThis.get();
+            if (!element || !strongThis)
+            {
+                return;
+            }
+            // The split Grid that owns this separator (its parent). Its laid-out
+            // extent along the axis is the total the ratio divides. Read live —
+            // only meaningful once the host is visible (F-5).
+            const auto grid = element.Parent().try_as<Controls::Grid>();
+            if (!grid)
+            {
+                return;
+            }
+            const auto point = e.GetCurrentPoint(element);
+            const auto current = (axis == ::WorkspaceModel::Axis::Vertical) ? point.Position().X : point.Position().Y;
+            const auto delta = current - *origin;
+            const auto extent = (axis == ::WorkspaceModel::Axis::Vertical) ? grid.ActualWidth() : grid.ActualHeight();
+            // Call the private dispatch helper (the same one the TAEF test calls).
+            implThis->_resizeSplitFromDrag(splitId, delta, extent);
+            e.Handled(true);
+        });
+
+        separator.PointerReleased([dragging](const Windows::Foundation::IInspectable& sender, const Windows::UI::Xaml::Input::PointerRoutedEventArgs& e) {
+            const auto element = sender.try_as<Controls::Border>();
+            *dragging = false;
+            if (element)
+            {
+                element.ReleasePointerCapture(e.Pointer());
+            }
+            e.Handled(true);
+        });
+
+        grid.Children().Append(separator);
+
         return grid;
+    }
+
+    // Big-flip Slice F-1 (#54): the HEADLESS-TESTABLE core of the split-divider
+    // drag. Given the split's stable `splitId`, a drag `dragDelta` in pixels
+    // along the split axis, and the split cell's `totalExtent` (the laid-out
+    // length the ratio divides), compute the NEW ratio: the boundary moves by
+    // `dragDelta` pixels, so the first cell's fraction changes by
+    // `dragDelta / totalExtent`. The result is clamped to [0,1] (the model also
+    // clamps, but clamping here keeps the helper honest in isolation). Returns
+    // the CURRENT model ratio unchanged when `splitId` is not a SplitPane, or
+    // when `totalExtent` is non-positive (the invisible/headless case — there is
+    // no layout, so a drag cannot meaningfully move the boundary; F-5 supplies a
+    // real extent once visible). Factored out of the live pointer handler so a
+    // TAEF test can drive it with a synthetic delta + a known extent WITHOUT any
+    // laid-out geometry (the headless-resize-clamp trap), and the live handler
+    // and the test share the exact same math.
+    double TerminalPage::_computeSplitRatioFromDrag(::WorkspaceModel::PaneId splitId, double dragDelta, double totalExtent) const
+    {
+        double currentRatio = 0.5;
+        if (_workspaceModelState)
+        {
+            if (const auto* node = _workspaceModelState->pane(splitId))
+            {
+                if (const auto* split = std::get_if<::WorkspaceModel::SplitPane>(node))
+                {
+                    currentRatio = split->ratio;
+                }
+                else
+                {
+                    // Not a SplitPane — nothing to resize.
+                    return currentRatio;
+                }
+            }
+            else
+            {
+                return currentRatio;
+            }
+        }
+        if (totalExtent <= 0.0)
+        {
+            // No layout (invisible/headless) — a drag cannot move the boundary.
+            return currentRatio;
+        }
+        const double next = currentRatio + (dragDelta / totalExtent);
+        return std::clamp(next, 0.0, 1.0);
+    }
+
+    // Big-flip Slice F-1 (#54): dispatch a split-divider drag through the model.
+    // Computes the new ratio via the shared headless-testable helper, then — only
+    // if it actually changed — dispatches the model's resizePane action through
+    // _applyWorkspaceAction (the same diff→re-project path every other action
+    // takes), which re-projects the split Grid's two GridLengths from the new
+    // ratio. A no-op when the ratio is unchanged (e.g. a zero-delta move, a
+    // non-split id, or a non-positive extent) so an idle PointerMoved does not
+    // churn the model. Both the live pointer handler and the TAEF drag-simulation
+    // test call THIS, so the dispatch path is identical in both.
+    void TerminalPage::_resizeSplitFromDrag(::WorkspaceModel::PaneId splitId, double dragDelta, double totalExtent)
+    {
+        if (!_workspaceModelState)
+        {
+            return;
+        }
+        const auto newRatio = _computeSplitRatioFromDrag(splitId, dragDelta, totalExtent);
+        // Skip the dispatch when nothing changed — read the current ratio back to
+        // compare (the helper returns the current ratio in the no-op cases).
+        const auto* node = _workspaceModelState->pane(splitId);
+        const auto* split = node ? std::get_if<::WorkspaceModel::SplitPane>(node) : nullptr;
+        if (!split || split->ratio == newRatio)
+        {
+            return;
+        }
+        auto next = ::WorkspaceModel::resizePane(_workspaceModelState, splitId, newRatio);
+        if (next != nullptr)
+        {
+            _applyWorkspaceAction(std::move(next));
+        }
     }
 
     // Build a leaf container for `leaf`: a Grid tagged with the leaf's id holding
@@ -7578,6 +7776,34 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         }
         return _workspacePaneTreeRoot.Children().GetAt(0).try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
+    }
+
+    // Big-flip Slice F-1 (#54): the custom split-divider Border inside the
+    // projected split Grid `splitGrid`, identified by being the direct Border
+    // child whose Tag() == the split id. Returns nullptr when `splitGrid` is null
+    // or carries no such separator (e.g. a flag-off mirror that builds no
+    // separator). Lets a page test assert the separator was built — by element
+    // type AND by the split id it controls — without driving any laid-out
+    // geometry.
+    winrt::Windows::UI::Xaml::Controls::Border TerminalPage::_splitSeparatorForTest(const winrt::Windows::UI::Xaml::Controls::Grid& splitGrid) const
+    {
+        if (!splitGrid)
+        {
+            return nullptr;
+        }
+        const auto tag = splitGrid.Tag().try_as<uint64_t>();
+        for (uint32_t i = 0; i < splitGrid.Children().Size(); ++i)
+        {
+            if (const auto border = splitGrid.Children().GetAt(i).try_as<winrt::Windows::UI::Xaml::Controls::Border>())
+            {
+                const auto borderTag = border.Tag().try_as<uint64_t>();
+                if (tag && borderTag && *borderTag == *tag)
+                {
+                    return border;
+                }
+            }
+        }
+        return nullptr;
     }
 
 }

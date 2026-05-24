@@ -922,9 +922,10 @@ namespace winrt::TerminalApp::implementation
         // unrepresentable), and it REUSES each leaf's existing Slice-C strip
         // collection by PaneId, so no PaneTabViewModel or content is dropped or
         // duplicated across a rebuild. Each SplitPane node projects to a Grid
-        // with two star-sized cells (ratio / 1-ratio) along the axis (a
-        // draggable GridSplitter is deferred to Slice F — see _projectPaneNode);
-        // each LeafPane projects to a leaf container holding a per-leaf strip
+        // with two star-sized cells (ratio / 1-ratio) along the axis plus a
+        // CUSTOM draggable separator Border between them (Slice F-1, #54 — NOT a
+        // toolkit GridSplitter; see _projectPaneNode); each LeafPane projects to
+        // a leaf container holding a per-leaf strip
         // ListView (bound to that leaf's strip collection). The leaf's live
         // content-host attach is also a Slice F concern (only one content host
         // exists today). A no-op when the flag-on container hasn't been realized
@@ -989,6 +990,30 @@ namespace winrt::TerminalApp::implementation
         // + per-split star ratios by walking the element tree, never measuring
         // laid-out pixels (the headless-resize-clamp trap).
         [[nodiscard]] winrt::Windows::UI::Xaml::FrameworkElement _workspacePaneTreeRootChildForTest() const;
+
+        // Big-flip Slice F-1 (#54): the custom draggable split divider.
+        // _computeSplitRatioFromDrag is the HEADLESS-TESTABLE core: given the
+        // split's stable id, a drag delta (px along the axis), and the cell's
+        // laid-out total extent, it returns the clamped new ratio
+        // (currentRatio + dragDelta/totalExtent), or the current ratio unchanged
+        // when the id is not a split or the extent is non-positive (the
+        // invisible/headless case — no layout). _resizeSplitFromDrag computes via
+        // that helper and, only if the ratio changed, dispatches the model's
+        // resizePane action through _applyWorkspaceAction (the same diff→
+        // re-project path every action takes), which re-projects the split Grid's
+        // two GridLengths. BOTH the live pointer handler (which reads the real
+        // extent at drag time, fires only once visible at F-5) and the TAEF drag-
+        // simulation test call _resizeSplitFromDrag, so the path is identical.
+        [[nodiscard]] double _computeSplitRatioFromDrag(::WorkspaceModel::PaneId splitId, double dragDelta, double totalExtent) const;
+        void _resizeSplitFromDrag(::WorkspaceModel::PaneId splitId, double dragDelta, double totalExtent);
+
+        // Test-only observer (Big-flip Slice F-1, #54): the custom split-divider
+        // Border inside a projected split Grid (the direct Border child whose
+        // Tag() == the split id), or nullptr when none exists (e.g. a flag-off
+        // mirror builds no separator). Lets a page test assert the separator was
+        // built — by element type AND the split id it controls — without driving
+        // any laid-out geometry.
+        [[nodiscard]] winrt::Windows::UI::Xaml::Controls::Border _splitSeparatorForTest(const winrt::Windows::UI::Xaml::Controls::Grid& splitGrid) const;
 
         // Big-flip Slice D (#54): the realized flag-on projected-pane-tree
         // container (the x:Load="False" WorkspacePaneTreeRoot inside the

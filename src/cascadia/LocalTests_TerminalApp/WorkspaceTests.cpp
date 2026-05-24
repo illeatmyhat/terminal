@@ -224,6 +224,22 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipF0_Split_EachLeafHostHoldsOwnContent);
         TEST_METHOD(BigFlipF0_FlagOff_NoLeafHosts);
 
+        // Big-flip Slice F-1 (#54): the custom draggable split divider. A split
+        // projection carries a CUSTOM separator Border (NOT a toolkit
+        // GridSplitter) between its two cells, tagged with the split id it
+        // controls. A SIMULATED drag — calling the headless-testable
+        // _resizeSplitFromDrag helper with a synthetic delta + a KNOWN extent
+        // (never a laid-out pixel) — dispatches the model resizePane action and
+        // re-projects the two cells' GridLengths to the new ratio (asserted by
+        // GridLength.Value within 1e-5). The orientation test covers BOTH a
+        // vertical (columns) and a horizontal (rows) split so the drag-delta sign
+        // is right for each axis. A flag-off mirror builds no separator; the host
+        // stays Collapsed throughout (ZERO visible change this slice).
+        TEST_METHOD(BigFlipF1_Split_BuildsCustomSeparator);
+        TEST_METHOD(BigFlipF1_SimulatedDrag_DispatchesResizeAndReprojects);
+        TEST_METHOD(BigFlipF1_HorizontalSplit_DragReprojectsRows);
+        TEST_METHOD(BigFlipF1_FlagOff_NoSeparator);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -4866,6 +4882,373 @@ namespace TerminalAppLocalTests
                            L"flag-off must project NO leaves");
 
             // Classic single-tab UI is upstream-identical.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"flag-off startup renders the classic single-tab UI");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-1 (#54): a split projection carries a CUSTOM separator
+    // Border between its two cells — NOT a community-toolkit GridSplitter. The
+    // separator is a direct child of the split Grid (no third column/row, so the
+    // two-cell ratio structure D asserts is intact), and it is tagged with the
+    // split id it controls. Asserted by element TYPE (Border) and by the split id
+    // (Tag) — never by laid-out geometry. Host stays Collapsed.
+    //
+    // RED before F-1 builds the separator: the split Grid has only its two cell
+    // children, so _splitSeparatorForTest returns null. GREEN after: a Border
+    // separator tagged with the split id exists.
+    void WorkspaceTests::BigFlipF1_Split_BuildsCustomSeparator()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId splitId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            // Baseline: a single-leaf projection has NO split Grid, hence no
+            // separator.
+            const auto rootBefore = page->_workspacePaneTreeRootChildForTest();
+            const auto gridBefore = rootBefore.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NULL(page->_splitSeparatorForTest(gridBefore),
+                           L"baseline single-leaf projection carries no split separator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf (vertical) so a split Grid is projected");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            splitId = sp->id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the projected split Grid carries a CUSTOM Border separator
+            // tagged with the split id.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+
+            const auto separator = page->_splitSeparatorForTest(splitGrid);
+            VERIFY_IS_NOT_NULL(separator,
+                               L"the split Grid must carry a custom Border separator");
+            // It is a Border (the custom separator), NOT a toolkit GridSplitter.
+            VERIFY_IS_NOT_NULL(separator.try_as<winrt::Windows::UI::Xaml::Controls::Border>(),
+                               L"the separator must be a custom Border, not a GridSplitter");
+            const auto sepTag = separator.Tag().try_as<uint64_t>();
+            VERIFY_IS_TRUE(sepTag.has_value() && *sepTag == splitId.v,
+                           L"the separator must know which split it controls (Tag == splitId)");
+
+            // The two-cell ratio structure is untouched (no third column added).
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), splitGrid.ColumnDefinitions().Size(),
+                             L"the separator must NOT add a third column/cell");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed — the separator is invisible this slice");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-1 (#54): THE CRUX. A SIMULATED drag — calling the
+    // headless-testable _resizeSplitFromDrag helper with a synthetic pixel delta
+    // and a KNOWN total extent (never a laid-out pixel; the host is Collapsed so
+    // ActualWidth would be 0) — dispatches the model resizePane action and the
+    // projected split Grid's two cells re-project to the new ratio. We start at
+    // ratio 0.5, drag +100px on a 1000px extent → expected new ratio 0.6, and
+    // assert the model ratio AND the two cells' GridLength.Value (within 1e-5).
+    // This proves drag→ratio→dispatch→re-project end-to-end with ZERO geometry.
+    //
+    // RED before _resizeSplitFromDrag dispatches resizePane: the model ratio (and
+    // the projected cells) stay 0.5/0.5. GREEN after: 0.6/0.4.
+    void WorkspaceTests::BigFlipF1_SimulatedDrag_DispatchesResizeAndReprojects()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF200 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId splitId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf (vertical, ratio 0.5)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            splitId = sp->id;
+            VERIFY_ARE_EQUAL(0.5, sp->ratio, L"precondition: split starts at ratio 0.5");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // The headless ratio math, in isolation: +100px on a 1000px extent
+            // moves a 0.5 ratio to 0.6.
+            const double computed = page->_computeSplitRatioFromDrag(splitId, 100.0, 1000.0);
+            VERIFY_IS_TRUE(std::abs(0.6 - computed) < 1e-5,
+                           L"_computeSplitRatioFromDrag: +100/1000 from 0.5 -> 0.6");
+
+            // A non-positive extent (the invisible/headless case) is a no-op: the
+            // ratio is returned unchanged, so an invisible drag cannot move it.
+            const double headless = page->_computeSplitRatioFromDrag(splitId, 100.0, 0.0);
+            VERIFY_IS_TRUE(std::abs(0.5 - headless) < 1e-5,
+                           L"_computeSplitRatioFromDrag: extent==0 returns the current ratio unchanged");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Simulate the drag through the dispatch helper (synthetic delta + known extent)");
+        result = RunOnUIThread([&]() {
+            // This is the SAME entry point the live PointerMoved handler calls;
+            // here we feed it a synthetic delta + a known extent rather than a
+            // laid-out one. It computes 0.6 and dispatches resizePane.
+            page->_resizeSplitFromDrag(splitId, 100.0, 1000.0);
+
+            // Model recorded the new ratio.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            VERIFY_IS_TRUE(std::abs(0.6 - sp->ratio) < 1e-5,
+                           L"the simulated drag dispatched resizePane to ratio 0.6");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the projected split Grid's two cells re-projected to the new
+            // ratio. Compare GridLength.Value (float-backed) within 1e-5 — never
+            // a measured pixel width (the headless-resize-clamp trap).
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+            VERIFY_IS_TRUE(std::abs(0.6 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 0)) < 1e-5,
+                           L"after the simulated drag: first cell star == ratio (0.6)");
+            VERIFY_IS_TRUE(std::abs(0.4 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 1)) < 1e-5,
+                           L"after the simulated drag: second cell star == 1-ratio (0.4)");
+
+            // The separator survives the re-projection (a fresh tree carries a
+            // fresh separator).
+            VERIFY_IS_NOT_NULL(page->_splitSeparatorForTest(splitGrid),
+                               L"the re-projected split keeps its custom separator");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the simulated drag");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-1 (#54): the orientation guard. A HORIZONTAL split projects
+    // two ROWS; a simulated vertical drag (delta along the Y/height axis) must
+    // move the boundary the same way it moves columns for a vertical split — the
+    // helper takes the extent as a parameter, so the SAME math applies to both
+    // axes. We drag +200px on a 1000px row extent from 0.5 → 0.7 and assert the
+    // two ROW GridLengths re-project. This catches a horizontal/vertical sign or
+    // orientation mismatch in the drag→ratio path.
+    void WorkspaceTests::BigFlipF1_HorizontalSplit_DragReprojectsRows()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF300 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId splitId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf HORIZONTALLY (two rows, ratio 0.5)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Horizontal,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            splitId = sp->id;
+
+            // The split Grid carries two ROWS and a separator tagged with the
+            // split id.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), splitGrid.RowDefinitions().Size(),
+                             L"a horizontal split projects two rows");
+            VERIFY_IS_NOT_NULL(page->_splitSeparatorForTest(splitGrid),
+                               L"the horizontal split also carries a custom separator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Simulate a +200px drag on a 1000px row extent -> ratio 0.7");
+        result = RunOnUIThread([&]() {
+            page->_resizeSplitFromDrag(splitId, 200.0, 1000.0);
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            VERIFY_IS_TRUE(std::abs(0.7 - sp->ratio) < 1e-5,
+                           L"the simulated drag dispatched resizePane to ratio 0.7");
+
+            // GREEN: the two ROW GridLengths re-projected to 0.7 / 0.3.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+            VERIFY_IS_TRUE(std::abs(0.7 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Horizontal, 0)) < 1e-5,
+                           L"after the drag: first ROW star == ratio (0.7)");
+            VERIFY_IS_TRUE(std::abs(0.3 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Horizontal, 1)) < 1e-5,
+                           L"after the drag: second ROW star == 1-ratio (0.3)");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the horizontal drag");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-1 (#54): flag-off mirror. The workspace shell is never
+    // initialized when the flag is off, so no pane tree is projected and no split
+    // separator is ever built. Upstream rendering is byte-for-byte unchanged.
+    void WorkspaceTests::BigFlipF1_FlagOff_NoSeparator()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // Flag-off: model + view dormant, no projected pane tree, hence no
+            // separator anywhere.
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off must leave the workspace model dormant");
+            VERIFY_IS_NULL(page->_workspacePaneTreeRootChildForTest(),
+                           L"flag-off projects no pane tree, so there is no split Grid");
+            // _splitSeparatorForTest is null-safe for a null Grid.
+            VERIFY_IS_NULL(page->_splitSeparatorForTest(nullptr),
+                           L"flag-off builds no custom separator");
+
             VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
                              L"flag-off startup renders the classic single-tab UI");
         });
