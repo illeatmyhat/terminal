@@ -27,6 +27,8 @@ namespace WorkspaceModel
         virtual void apply(const WorkspaceAdded&) = 0;
         virtual void apply(const WorkspaceRemoved&) = 0;
         virtual void apply(const ActiveWorkspaceChanged&) = 0;
+        virtual void apply(const WorkspaceMetadataUpdated&) = 0;
+        virtual void apply(const WorkspaceReordered&) = 0;
         virtual void apply(const LeafPaneCreated&) = 0;
         virtual void apply(const SplitPaneCreated&) = 0;
         virtual void apply(const SplitPaneCollapsed&) = 0;

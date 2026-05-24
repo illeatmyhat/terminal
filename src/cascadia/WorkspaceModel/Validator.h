@@ -48,6 +48,25 @@ namespace WorkspaceModel
         // Invariant 8: no two TabRecord.mount ContentIds collide across the
         // whole model.
         DuplicateContentIdMount,
+
+        // Invariant 9: the active workspace's content is materialised. For
+        // every leaf in the workspace named by activeWorkspaceId, that leaf's
+        // active tab (tabs[activeTabIdx]) must carry a mount. This is the
+        // model-side projection of the mount policy (option I): the currently
+        // visible workspace's panes are always live. Inactive workspaces are
+        // unconstrained — a tab there may be materialised (kept alive across a
+        // switch-away) or not (never visited), and either is legal, which is
+        // why this invariant is scoped to the active workspace only.
+        ActiveContentNotMounted,
+
+        // Invariant 10: in display order, every pinned workspace precedes every
+        // unpinned workspace (the pinned block is a contiguous prefix). Pinned
+        // workspaces float to the top of the sidebar; an unpinned workspace
+        // sitting before a pinned one is unrepresentable. The setWorkspacePinned
+        // action establishes this and detail::finalize() re-normalizes it after
+        // every action (so e.g. a free-form reorderWorkspace can never leave a
+        // pinned/unpinned interleave).
+        PinnedNotContiguous,
     };
 
     [[nodiscard]] std::optional<Violation> validate(const WorkspaceModelData& m) noexcept;

@@ -1,0 +1,76 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace TerminalApp
+{
+    [default_interface] runtimeclass WorkspaceViewModel : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        WorkspaceViewModel();
+
+        UInt64 Id { get; set; };
+        String Title { get; set; };
+        Windows.UI.Color Color { get; set; };
+        Boolean HasColor { get; set; };
+        Boolean IsPinned { get; set; };
+        Boolean IsActive { get; set; };
+        Boolean IsEditing { get; set; };
+
+        // The inline editor's two-way bound text. Seeded from Title when a
+        // rename begins; the committed value travels out via RenameCommitted.
+        String EditText { get; set; };
+
+        // Intent signals (Stage 3a). The VM never touches the model; it raises
+        // these so the owning TerminalPage can dispatch the model action and
+        // let the resulting diff re-project the row.
+        void BeginRename();
+        void CommitRename();
+        void CancelRename();
+        void TogglePin();
+
+        // Open the per-row color picker (#52, Stage 3b). Reuses the same
+        // ColorPickupFlyout the tabs use, anchored to the row. Choosing a
+        // color raises ColorCommitted; clearing raises it with a null value.
+        void ShowColorPicker();
+
+        // Single-tap activation (#52, Stage 3c). Raises ActivateRequested so
+        // the owning page dispatches switchToWorkspace; the VM never touches
+        // the model. (Double-tap stays the rename trigger via BeginRename.)
+        void RequestActivate();
+
+        // Editor view-layer handlers (focus / select-all on load, commit on
+        // Enter, cancel on Escape). They mutate only the editor TextBox.
+        void OnEditorLoaded(Object sender, Windows.UI.Xaml.RoutedEventArgs e);
+        void OnEditorKeyDown(Object sender, Windows.UI.Xaml.Input.KeyRoutedEventArgs e);
+
+        // Captures the row's anchor element (set from a Loaded handler in the
+        // DataTemplate) so ShowColorPicker can position the flyout. View-layer
+        // wiring only; mirrors how Tab anchors its picker to its TabViewItem.
+        void OnRowLoaded(Object sender, Windows.UI.Xaml.RoutedEventArgs e);
+
+        // Converter-free x:Bind function-binding helpers. They re-evaluate
+        // whenever their observable input property raises PropertyChanged.
+        static Windows.UI.Xaml.Visibility BoolToVisibility(Boolean value);
+        static Windows.UI.Xaml.Visibility InvertedBoolToVisibility(Boolean value);
+        static Windows.UI.Text.FontWeight ActiveToFontWeight(Boolean isActive);
+        static Windows.UI.Xaml.Media.Brush ActiveToRowBrush(Boolean isActive);
+
+        // Dynamic context-menu label for the pin toggle: "Unpin" when pinned,
+        // "Pin" otherwise. Re-evaluated as IsPinned raises PropertyChanged.
+        static String PinLabel(Boolean isPinned);
+
+        // sender = the VM (carries Id so the page resolves the workspace);
+        // args = the committed name / the desired pinned value.
+        event Windows.Foundation.TypedEventHandler<WorkspaceViewModel, String> RenameCommitted;
+        event Windows.Foundation.TypedEventHandler<WorkspaceViewModel, Boolean> PinToggleRequested;
+
+        // sender = the VM (carries Id); args = the chosen color, or null to
+        // clear it. A null IReference is the single "clear color" signal so
+        // the page has one subscription and one dispatch path
+        // (setWorkspaceColor with the value or std::nullopt).
+        event Windows.Foundation.TypedEventHandler<WorkspaceViewModel, Windows.Foundation.IReference<Windows.UI.Color> > ColorCommitted;
+
+        // sender = the VM (carries Id so the page resolves the workspace to
+        // activate); args = null (the intent carries no payload beyond Id).
+        event Windows.Foundation.TypedEventHandler<WorkspaceViewModel, IInspectable> ActivateRequested;
+    }
+}

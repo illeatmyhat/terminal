@@ -243,6 +243,16 @@ namespace winrt::TerminalApp::implementation
         Microsoft::UI::Xaml::Controls::TabView _tabView{ nullptr };
         TerminalApp::TabRowControl _tabRow{ nullptr };
         Windows::UI::Xaml::Controls::Grid _tabContent{ nullptr };
+
+        // Big-flip Slice B (#54): the realized flag-on content host (the
+        // x:Load="False" WorkspaceContentHost Grid inside TabContent),
+        // resolved via FindName in _initializeWorkspaceShell. nullptr when the
+        // flag is off / the shell hasn't initialized. Kept Collapsed this
+        // slice; the active workspace's factory-built content GetRoot() is
+        // parented in here by _attachContentToWorkspaceHost. The classic
+        // _tabContent swap still owns the VISIBLE display.
+        Windows::UI::Xaml::Controls::Grid _workspaceContentHost{ nullptr };
+
         Microsoft::UI::Xaml::Controls::SplitButton _newTabButton{ nullptr };
         winrt::TerminalApp::ColorPickupFlyout _tabColorPicker{ nullptr };
 
@@ -326,9 +336,10 @@ namespace winrt::TerminalApp::implementation
         winrt::Windows::Foundation::IAsyncOperation<winrt::Windows::UI::Xaml::Controls::ContentDialogResult> _ShowLargePasteWarningDialog();
 
         void _CreateNewTabFlyout();
-        std::vector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase> _CreateNewTabFlyoutItems(winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry> entries);
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _buildNewItemFlyout(std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs)> onChosen);
+        std::vector<winrt::Windows::UI::Xaml::Controls::MenuFlyoutItemBase> _CreateNewTabFlyoutItems(winrt::Windows::Foundation::Collections::IVector<Microsoft::Terminal::Settings::Model::NewTabMenuEntry> entries, std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs)> onChosen);
         winrt::Windows::UI::Xaml::Controls::IconElement _CreateNewTabFlyoutIcon(const winrt::hstring& icon);
-        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutProfile(const Microsoft::Terminal::Settings::Model::Profile profile, int profileIndex, const winrt::hstring& iconPathOverride);
+        winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutProfile(const Microsoft::Terminal::Settings::Model::Profile profile, int profileIndex, const winrt::hstring& iconPathOverride, std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs)> onChosen);
         winrt::Windows::UI::Xaml::Controls::MenuFlyoutItem _CreateNewTabFlyoutAction(const winrt::hstring& actionId, const winrt::hstring& iconPathOverride);
 
         void _OpenNewTabDropdown();
@@ -502,6 +513,18 @@ namespace winrt::TerminalApp::implementation
                                         const winrt::TerminalApp::Tab& sourceTab = nullptr,
                                         winrt::Microsoft::Terminal::TerminalConnection::ITerminalConnection existingConnection = nullptr);
 
+        // Big-flip Slice A (#54): the ContentMounted factory. Materialises a
+        // live IPaneContent from a model TabContent spec, for the
+        // ContentRegistry to own. Called by WorkspaceView::apply(ContentMounted)
+        // well after construction (so get_weak() is valid). Returns nullptr —
+        // "do not attach" — for any non-Terminal variant
+        // (Settings/Snippets/Markdown/Scratchpad) or on spawn failure /
+        // elevation handoff. This replicates the minimal TerminalSpec
+        // content-build core of _MakeTerminalPane (leaving _MakeTerminalPane
+        // untouched); it does NOT split, duplicate, debug-tap, or restore a
+        // session — those are not part of a from-spec materialisation.
+        winrt::TerminalApp::IPaneContent _makePaneContentForSpec(const ::WorkspaceModel::TabContent& spec);
+
         void _RefreshUIForSettingsReload();
 
         void _SetNewTabButtonColor(til::color color, til::color accentColor);
@@ -613,6 +636,16 @@ namespace winrt::TerminalApp::implementation
         ::WorkspaceModel::ModelState _workspaceModelState{ nullptr };
         std::unique_ptr<WorkspaceView> _workspaceView{ nullptr };
 
+        // Big-flip Slice B (#54): TEST-ONLY factory override for the
+        // ContentMounted content factory. When set, _makePaneContentForSpec
+        // returns this instead of building a real TermControl-backed
+        // TerminalPaneContent. Lets a headless attach test mount a
+        // MockPaneContent whose GetRoot() is a known, stable FrameworkElement,
+        // so the host-attach plumbing can be asserted by identity without
+        // depending on a real control's root. Empty in production — the live
+        // factory path is unchanged.
+        std::function<winrt::TerminalApp::IPaneContent(const ::WorkspaceModel::TabContent&)> _makePaneContentForSpecOverrideForTest{ nullptr };
+
         // Phase 1: one model workspace == one classic window-level tab.
         // The view's TabAdded arm registers the classic Tab against the
         // workspace's id after creation; the WorkspaceRemoved arm looks
@@ -655,6 +688,21 @@ namespace winrt::TerminalApp::implementation
         // "workspace display index == classic tab index" assumption the
         // WorkspaceChange arms used to bake in.
         std::optional<std::uint32_t> _classicTabIndexForWorkspace(::WorkspaceModel::WorkspaceId ws) const;
+
+        // Big-flip Slice C (#54): true when this workspace ALREADY has a classic
+        // Tab registered (its first tab was materialised by an earlier TabAdded
+        // arm + _registerClassicTabForWorkspace). The TabAdded arm uses this to
+        // distinguish a NEW workspace's first tab (no entry yet -> create the
+        // classic Tab, as today) from an ADDITIONAL tab in an existing leaf
+        // (entry exists -> the strip VM is the SOLE representation; create NO
+        // second classic Tab). This is the view-side distinguisher the model
+        // arm lacks: a newTab on an existing leaf emits TabAdded with
+        // leafInsideSplit==false, indistinguishable from a new-workspace first
+        // tab by the arm's own fields, but the owning workspace's classic Tab
+        // is already registered at that point only in the additional-tab case
+        // (newWorkspace fires WorkspaceAdded — which does NOT register a tab —
+        // before its first TabAdded does).
+        [[nodiscard]] bool _workspaceHasClassicTab(::WorkspaceModel::WorkspaceId ws) const;
 
         // Drag tear-out / move-tab-to-window destroy a classic Tab
         // without firing Tab::Closed. When the workspaces flag is on,
@@ -747,19 +795,160 @@ namespace winrt::TerminalApp::implementation
         // the flag is off, so flag-off rendering is byte-for-byte upstream.
         void _initializeWorkspaceShell();
 
-        // Sidebar projection helpers, called by the WorkspaceView arms.
-        // Each sidebar row stores its WorkspaceId on the TextBlock's Tag, so
-        // the active-row highlight resolves by id identity (matching the S1
-        // resolver philosophy) rather than by a positional index into the
-        // workspace list.
-        void _addWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws, const std::string& name);
-        void _removeWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws);
-        void _highlightActiveWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId active);
+        // Big-flip Slice B (#54): parent the given factory-built content's
+        // GetRoot() into the (collapsed) WorkspaceContentHost as its SOLE
+        // child. Called by WorkspaceView's attach helper for the ACTIVE
+        // workspace's content on ContentMounted and on ActiveWorkspaceChanged
+        // (AFTER the classic _SelectTab swap, which clears _tabContent's
+        // children — including this host — so we re-append the host first).
+        // A no-op when the flag-on host hasn't been realized (flag-off /
+        // pre-shell) or the content has no root. The host stays Collapsed, so
+        // this changes NOTHING the user sees — the classic _tabContent swap
+        // still owns the visible display this slice. Guards the "element
+        // already has a parent" reparent by clearing the host first.
+        void _attachContentToWorkspaceHost(const winrt::TerminalApp::IPaneContent& content);
 
-        // The realized sidebar StackPanel, or nullptr when the flag is off /
-        // the shell hasn't been initialized. Children are one TextBlock per
-        // workspace, in declared (top→bottom) order.
-        winrt::Windows::UI::Xaml::Controls::StackPanel _workspaceSidebar{ nullptr };
+        // Test-only observer (Big-flip Slice B, #54): the FrameworkElement
+        // currently parented as the WorkspaceContentHost's sole child, or
+        // nullptr. Lets a page test assert the attach plumbing parented the
+        // active workspace's content GetRoot() by identity, without driving
+        // any real geometry.
+        [[nodiscard]] winrt::Windows::UI::Xaml::FrameworkElement _workspaceHostChildForTest() const;
+
+        // New-workspace chrome button helpers. _createNewWorkspace dispatches
+        // the Phase-1 create path (newWorkspace -> _applyWorkspaceAction). The
+        // chevron's per-profile menu is built by the shared _buildNewItemFlyout;
+        // _createWorkspaceFromArgs bridges that menu's chosen NewTerminalArgs to
+        // the workspace create path.
+        void _createNewWorkspace(std::optional<winrt::guid> profile);
+        void _createWorkspaceFromArgs(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs args);
+
+        // Sidebar projection helpers, called by the WorkspaceView arms (#52,
+        // Stage 2). They are the ONLY mutators of the observable view-model
+        // collection below; each resolves a workspace by its stable
+        // WorkspaceId.v identity (matching the S1 resolver philosophy) rather
+        // than by a positional index into the workspace list. The UI is a pure
+        // downstream projection — these never read XAML state back.
+        void _addWorkspaceVm(::WorkspaceModel::WorkspaceId ws, const std::string& name, const std::optional<::WorkspaceModel::Color>& color, bool pinned);
+        void _removeWorkspaceVm(::WorkspaceModel::WorkspaceId ws);
+        void _setActiveWorkspaceVm(::WorkspaceModel::WorkspaceId active);
+        void _updateWorkspaceVm(::WorkspaceModel::WorkspaceId ws, const std::string& name, const std::optional<::WorkspaceModel::Color>& color, bool pinned);
+        void _reorderWorkspaceVms(const std::vector<::WorkspaceModel::WorkspaceId>& order);
+
+        // The observable per-workspace view-models, in declared (top→bottom)
+        // order. Set once as the sidebar ItemsControl's ItemsSource; mutated
+        // ONLY by the helpers above.
+        winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::WorkspaceViewModel> _workspaceViewModels{ winrt::single_threaded_observable_vector<winrt::TerminalApp::WorkspaceViewModel>() };
+
+        // The realized sidebar ItemsControl, or nullptr when the flag is off /
+        // the shell hasn't been initialized. Its ItemsSource is the observable
+        // collection above; its DataTemplate renders one row per view-model.
+        winrt::Windows::UI::Xaml::Controls::ItemsControl _workspaceSidebar{ nullptr };
+
+        // Big-flip Slice C (#54): per-leaf tab-strip projection helpers, called
+        // by the WorkspaceView arms (TabAdded / TabRemoved / ActiveTabChanged).
+        // They are the ONLY mutators of the per-leaf observable collections
+        // below; each resolves a tab by its stable TabId.v identity, never by a
+        // positional index. The strip is a pure downstream projection — these
+        // never read XAML state back, and they create NO classic Tab (the strip
+        // is the sole representation of an additional leaf tab; the classic Tab
+        // creation for a new workspace's FIRST tab stays in the TabAdded arm).
+        // INVISIBLE this slice: the strip ListView lives in the still-Collapsed
+        // WorkspaceContentHost, so nothing here is on screen.
+        void _appendPaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab, const std::string& title);
+        void _removePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
+        void _setActivePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
+
+        // Big-flip Slice C (#54): flip the strip's active row to the tab at
+        // model index `idx` in `leaf` (ActiveTabChanged carries the leaf + the
+        // new activeTabIdx). The strip collection holds one VM per model tab in
+        // declared order — the same order the leaf's tabs are emitted/appended —
+        // so `idx` indexes the strip directly. Returns the TabId now made active
+        // (so the arm can swap the host's content to it), or an invalid TabId
+        // when the leaf has no strip or `idx` is out of range.
+        [[nodiscard]] ::WorkspaceModel::TabId _activatePaneTabByIndex(::WorkspaceModel::PaneId leaf, std::size_t idx);
+
+        // Resolve the observable strip collection for `leaf`, creating it on
+        // first use. The strip ListView's ItemsSource is bound to the ACTIVE
+        // leaf's collection (Slice F selects which); this slice only maintains
+        // the per-leaf projection behind the collapsed host.
+        winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>& _paneTabStripForLeaf(::WorkspaceModel::PaneId leaf);
+
+        // Test-only observer (Big-flip Slice C, #54): the count of strip
+        // view-models for a given leaf (0 when the leaf has no strip yet), and
+        // whether a given leaf's tab is the active one. Lets a page test assert
+        // the strip projection grows / flips / shrinks per arm without driving
+        // any real geometry.
+        [[nodiscard]] uint32_t _paneTabStripSizeForTest(::WorkspaceModel::PaneId leaf) const;
+        [[nodiscard]] std::optional<uint64_t> _activePaneTabIdForTest(::WorkspaceModel::PaneId leaf) const;
+
+        // The per-leaf observable tab-strip view-models, keyed by the leaf's
+        // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf
+        // gets an entry the first time a tab is projected into it; entries are
+        // dropped when their leaf disappears (a later slice; single-leaf scope
+        // here). The strip ListView in TerminalPage.xaml binds to the ACTIVE
+        // leaf's collection — invisible this slice (host Collapsed).
+        std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>> _paneTabStrips;
+
+        // Big-flip Slice C (#54): the realized flag-on strip ListView (the
+        // x:Load="False" PaneTabStrip inside the WorkspaceContentHost), resolved
+        // via FindName in _initializeWorkspaceShell. nullptr when the flag is off
+        // / the shell hasn't initialized. Its ItemsSource is the active leaf's
+        // strip collection; it lives inside the Collapsed host, so it is
+        // invisible this slice. Production triggers (row tap / close / +) are
+        // deferred to Slice F.
+        winrt::Windows::UI::Xaml::Controls::ListView _paneTabStrip{ nullptr };
+
+        // Big-flip Slice D (#54): rebuild the projected SPLIT pane tree of the
+        // ACTIVE workspace inside the (Collapsed) WorkspacePaneTreeRoot. Called
+        // by the WorkspaceView split arms (SplitPaneCreated / SplitPaneCollapsed
+        // / SplitRatioChanged) and on the per-leaf strip arms so the projection
+        // tracks the model. We REBUILD the whole active-workspace subtree from
+        // the model's `root` (the single source of truth) rather than do
+        // incremental tree surgery: a rebuild keeps the XAML structurally
+        // identical to `root` by construction (illegal divergent states are
+        // unrepresentable), and it REUSES each leaf's existing Slice-C strip
+        // collection by PaneId, so no PaneTabViewModel or content is dropped or
+        // duplicated across a rebuild. Each SplitPane node projects to a Grid
+        // with two star-sized cells (ratio / 1-ratio) along the axis (a
+        // draggable GridSplitter is deferred to Slice F — see _projectPaneNode);
+        // each LeafPane projects to a leaf container holding a per-leaf strip
+        // ListView (bound to that leaf's strip collection). The leaf's live
+        // content-host attach is also a Slice F concern (only one content host
+        // exists today). A no-op when the flag-on container hasn't been realized
+        // (flag-off / pre-shell) or there is no active workspace. INVISIBLE: the
+        // tree lives inside the still-Collapsed host.
+        void _rebuildActiveWorkspacePaneTree();
+
+        // Big-flip Slice D (#54): project one model PaneNode (resolved by id from
+        // the active workspace's tree) into a FrameworkElement. A SplitPane ->
+        // a split Grid (two star-sized cells + a placeholder separator); a
+        // LeafPane -> a leaf container holding the leaf's reused Slice-C strip.
+        // Each projected node carries its PaneId.v in Tag() so a test (and a
+        // later incremental optimisation) can resolve nodes by id. Returns
+        // nullptr for an unknown/empty node.
+        winrt::Windows::UI::Xaml::FrameworkElement _projectPaneNode(::WorkspaceModel::PaneId nodeId);
+
+        // Build a leaf container for `leaf`: a Grid (tagged with the leaf's id)
+        // holding a per-leaf strip ListView bound to that leaf's reused Slice-C
+        // strip collection. Slice F adds the leaf's content host beneath it.
+        winrt::Windows::UI::Xaml::FrameworkElement _projectLeafContainer(::WorkspaceModel::PaneId leaf);
+
+        // Test-only observer (Big-flip Slice D, #54): the single projected child
+        // of WorkspacePaneTreeRoot — the active workspace's projected pane-tree
+        // root (a split Grid or a leaf container), or nullptr when the container
+        // is unrealized / empty. Lets a page test assert the projected structure
+        // + per-split star ratios by walking the element tree, never measuring
+        // laid-out pixels (the headless-resize-clamp trap).
+        [[nodiscard]] winrt::Windows::UI::Xaml::FrameworkElement _workspacePaneTreeRootChildForTest() const;
+
+        // Big-flip Slice D (#54): the realized flag-on projected-pane-tree
+        // container (the x:Load="False" WorkspacePaneTreeRoot inside the
+        // WorkspaceContentHost), resolved via FindName in
+        // _initializeWorkspaceShell. nullptr when the flag is off / the shell
+        // hasn't initialized. Holds the active workspace's projected pane tree;
+        // lives inside the Collapsed host, so it is invisible this slice.
+        winrt::Windows::UI::Xaml::Controls::Grid _workspacePaneTreeRoot{ nullptr };
 
         friend class WorkspaceView;
         friend class TerminalAppLocalTests::TabTests;

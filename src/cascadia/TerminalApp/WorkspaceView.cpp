@@ -3,6 +3,8 @@
 
 #include "pch.h"
 
+#include <algorithm>
+
 #include "WorkspaceView.h"
 #include "TerminalPage.h"
 
@@ -53,6 +55,82 @@ namespace winrt::TerminalApp::implementation
         _contentRegistry.Remove(contentId);
     }
 
+    // Big-flip Slice B (#54): parent the ACTIVE workspace's mounted content
+    // into the page's (collapsed) WorkspaceContentHost. This stands up the
+    // attach/swap-on-switch plumbing BEHIND the still-visible classic tab — it
+    // changes NOTHING the user sees this slice (the host is Collapsed and the
+    // classic _tabContent swap still owns the display).
+    //
+    // Resolves the single (this slice) ContentId the active workspace owns from
+    // the _contentsByWorkspace reverse index the ContentMounted arm populated,
+    // Find()s its live IPaneContent in the registry (the sole strong owner),
+    // and asks the page to parent its GetRoot() as the host's sole child. We
+    // take the LAST recorded content for the workspace: a re-mount appends, and
+    // the active leaf's current content is what we want to show.
+    //
+    // A no-op — leaving _hostContentId untouched — when the page is gone, the
+    // workspace owns no content yet, or the id no longer resolves (e.g. a
+    // content torn down by a close). Single-leaf scope: the active workspace's
+    // one content; multi-leaf attach lands in a later slice.
+    void WorkspaceView::_showActiveWorkspaceContentInHost(::WorkspaceModel::WorkspaceId active)
+    {
+        auto page = _page();
+        if (!page || !active.valid())
+        {
+            return;
+        }
+
+        const auto wsIt = _contentsByWorkspace.find(active);
+        if (wsIt == _contentsByWorkspace.end() || wsIt->second.empty())
+        {
+            return;
+        }
+
+        const auto contentId = wsIt->second.back();
+        const auto content = _contentRegistry.Find(contentId);
+        if (!content)
+        {
+            return;
+        }
+
+        page->_attachContentToWorkspaceHost(content);
+        _hostContentId = contentId;
+    }
+
+    // Big-flip Slice C (#54): swap the host's child to a SPECIFIC tab's content.
+    // The per-tab analogue of _showActiveWorkspaceContentInHost — driven by
+    // apply(ActiveTabChanged) so switching between a leaf's tabs shows the
+    // newly-active tab's content. Resolves the tab's bound ContentId from
+    // _contentByTab (the ContentMounted arm populated it), Find()s its live
+    // IPaneContent in the registry (the sole strong owner), and asks the page to
+    // parent its GetRoot() as the host's sole child. A no-op — leaving
+    // _hostContentId untouched — when the page is gone, the tab has no bound
+    // content (e.g. a not-yet-mounted inactive tab), or the id no longer
+    // resolves. INVISIBLE this slice: the host is Collapsed.
+    void WorkspaceView::_showTabContentInHost(::WorkspaceModel::TabId tabId)
+    {
+        auto page = _page();
+        if (!page || !tabId.valid())
+        {
+            return;
+        }
+
+        const auto it = _contentByTab.find(tabId);
+        if (it == _contentByTab.end())
+        {
+            return;
+        }
+        const auto contentId = it->second;
+        const auto content = _contentRegistry.Find(contentId);
+        if (!content)
+        {
+            return;
+        }
+
+        page->_attachContentToWorkspaceHost(content);
+        _hostContentId = contentId;
+    }
+
     // -------------------------------------------------------------------
     // Each apply() overload corresponds to one WorkspaceChange arm. Arms
     // that a migrated Phase 1 action can actually emit carry real logic;
@@ -61,11 +139,13 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceAdded& c)
     {
-        // Phase 2 Slice 2 (#46): each model workspace gets one read-only
-        // sidebar row, appended in declared order. WorkspaceAdded is emitted
-        // in diff Phase 1 (before any ActiveWorkspaceChanged) and in workspace
-        // display order, so appending here keeps the sidebar in the workspaces'
-        // declared top→bottom order with no positional bookkeeping.
+        // Phase 2 Slice 2 (#46) / Stage 2 (#52): each model workspace gets one
+        // observable WorkspaceViewModel, appended in declared order.
+        // WorkspaceAdded is emitted in diff Phase 1 (before any
+        // ActiveWorkspaceChanged) and in workspace display order, so appending
+        // here keeps the sidebar in the workspaces' declared top→bottom order
+        // with no positional bookkeeping. name/color/pinned are the workspace's
+        // initial render metadata carried on the arm.
         //
         // The classic window-level tab that also backs this workspace in
         // Phase 1 is still materialised by the TabAdded arm; this arm only
@@ -75,7 +155,7 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        page->_addWorkspaceSidebarRow(c.id, c.name);
+        page->_addWorkspaceVm(c.id, c.name, c.color, c.pinned);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceRemoved& c)
@@ -93,12 +173,51 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
-        // Phase 2 Slice 2 (#46): drop the read-only sidebar row that mirrored
-        // this workspace (located by id, not slot), then tear down the classic
-        // tab. Order is not load-bearing — the sidebar row carries no model
-        // state — but removing it first keeps the projection consistent before
-        // the tab teardown can re-enter the page.
-        page->_removeWorkspaceSidebarRow(c.id);
+
+        // Big-flip Slice E (#54): tear down the registry content this
+        // workspace owns BEFORE the classic-tab teardown. A whole-workspace
+        // close emits WorkspaceRemoved (NOT per-tab TabRemoved/ContentUnmounted
+        // — diff() suppresses those for a removed workspace), so this arm is
+        // the ONLY place a whole-workspace close can drop the factory-built
+        // content; without it every workspace close leaks its ConPTY until the
+        // window exits. _contentsByWorkspace is the reverse index the
+        // ContentMounted arm populated. Remove() only drops the registry's
+        // strong ref (the single place a content's ConPTY tears down) — it does
+        // not itself fire a window-close or re-enter the model, so doing it
+        // before _removeClassicTabForRemovedWorkspace (which CAN re-enter the
+        // page via _RemoveTab) keeps the ordering safe. We also erase the
+        // matching _contentByTab entries so a later TabRemoved for the same
+        // content (which can't happen for this close, but is cheap to keep
+        // consistent) finds nothing stale.
+        if (const auto wsIt = _contentsByWorkspace.find(c.id); wsIt != _contentsByWorkspace.end())
+        {
+            for (const auto contentId : wsIt->second)
+            {
+                _contentRegistry.Remove(contentId);
+                // Erase any tab -> content bindings that pointed at this
+                // content. There is exactly one per content in Phase 1, but
+                // scan defensively rather than assume a 1:1 inverse.
+                for (auto it = _contentByTab.begin(); it != _contentByTab.end();)
+                {
+                    if (it->second == contentId)
+                    {
+                        it = _contentByTab.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
+            _contentsByWorkspace.erase(wsIt);
+        }
+
+        // Phase 2 Slice 2 (#46) / Stage 2 (#52): drop the view-model that
+        // mirrored this workspace (located by id, not slot), then tear down the
+        // classic tab. Order is not load-bearing — the view-model carries no
+        // model state — but removing it first keeps the projection consistent
+        // before the tab teardown can re-enter the page.
+        page->_removeWorkspaceVm(c.id);
         page->_removeClassicTabForRemovedWorkspace(c.id);
     }
 
@@ -117,13 +236,14 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Phase 2 Slice 2 (#46): move the read-only sidebar's active-row
-        // highlight to the newly-active workspace. Resolved by id identity
-        // (the row stores its WorkspaceId), never by a positional index into
-        // the workspace list. Done before the tab-selection resolve below so a
-        // workspace that has a sidebar row but no resolvable classic tab still
-        // gets its highlight updated.
-        page->_highlightActiveWorkspaceSidebarRow(*c.id);
+        // Phase 2 Slice 2 (#46) / Stage 2 (#52): move the sidebar's active-row
+        // highlight to the newly-active workspace by flipping IsActive on the
+        // matching view-model. Resolved by id identity (the view-model carries
+        // its WorkspaceId), never by a positional index into the workspace
+        // list. Done before the tab-selection resolve below so a workspace that
+        // has a view-model but no resolvable classic tab still gets its
+        // highlight updated.
+        page->_setActiveWorkspaceVm(*c.id);
 
         const auto resolved = _resolveClassicTabIndex(*c.id);
         if (!resolved.has_value())
@@ -147,6 +267,21 @@ namespace winrt::TerminalApp::implementation
         {
             page->_SelectTab(idx);
         }
+
+        // Big-flip Slice B (#54): AFTER the classic _SelectTab swap above (which
+        // we intentionally leave intact — it still owns the visible display),
+        // swap the (collapsed) WorkspaceContentHost's child to the newly-active
+        // workspace's content. _SelectTab -> _UpdatedSelectedTab cleared
+        // _tabContent's children (including the host); the attach helper
+        // re-appends the host before parenting, so the plumbing is restored.
+        // The user sees no change: the host is Collapsed and the classic
+        // content is what _tabContent now displays.
+        _showActiveWorkspaceContentInHost(*c.id);
+
+        // Big-flip Slice D (#54): the projected pane tree is per-active-workspace,
+        // so re-derive it for the newly-active workspace's `root`. INVISIBLE
+        // (host Collapsed); the classic tab/pane tree stays the visible display.
+        page->_rebuildActiveWorkspacePaneTree();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& c)
@@ -176,35 +311,77 @@ namespace winrt::TerminalApp::implementation
         // The containing split's axis/ratio ride along on the change; a
         // leaf with a parent is always nested under a SplitPane, so no
         // node-kind re-resolution is needed.
+        //
+        // This drives the CLASSIC _SplitPane — the VISIBLE split this slice. We
+        // LEAVE it intact: the classic Pane tree is what the user sees until
+        // Slice F flips the host visible.
         page->_splitFocusedPaneForWorkspace(c.parent->axis, c.parent->ratio);
+
+        // Big-flip Slice D (#54): now that the new sibling leaf exists in the
+        // model, rebuild the (Collapsed) projected pane tree so the sibling's
+        // leaf container appears nested under the projected split Grid. The
+        // sibling's strip row is appended by the subsequent TabAdded arm into the
+        // leaf's observable collection, which this rebuilt container's ListView
+        // is already bound to — so the row flows in via the binding without a
+        // further rebuild. INVISIBLE (host Collapsed); purely additive to the
+        // classic split above.
+        page->_rebuildActiveWorkspacePaneTree();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCreated& /*c*/)
     {
-        // Phase 1 keeps the visible split topology rendered by the classic
-        // Pane tree inside the workspace's window-level tab. The structural
-        // split is materialised by apply(LeafPaneCreated) when the new
-        // sibling leaf is created; the SplitPane node itself has no
-        // dedicated XAML representation in Phase 1, so there is nothing
-        // for this arm to mutate.
+        // The classic Pane tree inside the workspace's window-level tab is still
+        // the VISIBLE split (driven by apply(LeafPaneCreated) -> classic
+        // _SplitPane). Big-flip Slice D (#54) ADDITIONALLY projects the model's
+        // split topology into nested XAML inside the (Collapsed)
+        // WorkspacePaneTreeRoot — invisible scaffolding F will make visible. We
+        // rebuild the whole active-workspace pane tree from the model's `root`:
+        // a rebuild keeps the projection structurally identical to the model and
+        // reuses each leaf's existing strip collection by PaneId.
+        //
+        // SplitPaneCreated arrives in diff Phase 1 BEFORE the new sibling's
+        // LeafPaneCreated/TabAdded, so the sibling leaf's strip collection may
+        // not exist yet at this point — but the LeafPaneCreated arm rebuilds
+        // again after the sibling is created, and the per-leaf strip helper
+        // creates the collection on first use, so the final projection is
+        // correct regardless of which arm rebuilds. INVISIBLE (host Collapsed).
+        if (auto page = _page())
+        {
+            page->_rebuildActiveWorkspacePaneTree();
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCollapsed& /*c*/)
     {
-        // The classic Pane tree collapses single-child splits internally
-        // when a sibling is removed (see Pane::Close / Tab::DetachPane).
-        // Phase 1's view layer does not need to re-drive that collapse —
-        // the model + classic representations end up consistent because
-        // both reach the same single-leaf shape from a shared origin
-        // (TabRemoved or TabMoved).
+        // The classic Pane tree collapses single-child splits internally when a
+        // sibling is removed (see Pane::Close / Tab::DetachPane) — that stays the
+        // VISIBLE collapse. Big-flip Slice D (#54): re-derive the (Collapsed)
+        // projected pane tree from the model's now-collapsed `root`, so the
+        // projection's split Grid is replaced by the surviving child's container
+        // (the model already lifted the survivor; the rebuild mirrors it). The
+        // collapsed-away leaf's strip collection is left in place — leaf-strip
+        // GC is a later concern — but its container is no longer in the tree.
+        // INVISIBLE (host Collapsed).
+        if (auto page = _page())
+        {
+            page->_rebuildActiveWorkspacePaneTree();
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitRatioChanged& /*c*/)
     {
-        // Phase 1: the classic Pane tree continues to own the rendered
-        // split ratio (drag-separator + ResizeDirection keyboard moves
-        // update it directly). The model arm exists so Phase 3 persistence
-        // sees ratio changes; no XAML mutation is needed here yet.
+        // The classic Pane tree continues to own the VISIBLE rendered split
+        // ratio (drag-separator + ResizeDirection keyboard moves update it
+        // directly). Big-flip Slice D (#54): re-derive the (Collapsed) projected
+        // pane tree so the projected split Grid's two cells' star sizes follow
+        // the model's new ratio (ratio / 1-ratio). A full rebuild is cheap and
+        // keeps the one source of truth (the model `root`) authoritative; F can
+        // optimise to an in-place ColumnDefinition/RowDefinition star update if
+        // needed. INVISIBLE (host Collapsed).
+        if (auto page = _page())
+        {
+            page->_rebuildActiveWorkspacePaneTree();
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabAdded& c)
@@ -221,6 +398,40 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Big-flip Slice C (#54): the per-leaf tab strip is the invisible MVVM
+        // projection of a leaf's tabs. Append one strip view-model for this tab
+        // BEFORE any classic-tab branching below — the strip is a pure model
+        // projection, independent of whether the classic path also materialises
+        // a window-level Tab. It lives inside the still-Collapsed
+        // WorkspaceContentHost, so this is INVISIBLE this slice (the classic tab
+        // stays the only thing on screen).
+        //
+        // Big-flip Slice D (#54): we now ALSO project the strip for a split
+        // sibling leaf (leafInsideSplit) — Slice C skipped these and deferred
+        // them to D, which owns the nested split tree. The strip VM append is
+        // independent of the classic-tab gate below (a split sibling still
+        // creates NO second classic Tab; the classic _SplitPane path drives the
+        // visible split). The per-leaf strip is what the leaf's container in the
+        // rebuilt pane tree binds to, so every leaf — root or split sibling —
+        // gets its row here.
+        if (c.leafId.valid())
+        {
+            page->_appendPaneTabVm(c.leafId, c.id, c.customTitle);
+        }
+
+        // Big-flip Slice D (#54): rebuild the (Collapsed) projected pane tree so
+        // the active workspace's tree (including this leaf's container, with its
+        // newly-appended strip row) is reflected. This is what stands up the
+        // INITIAL single-leaf projection too — the startup tab's TabAdded builds
+        // the root leaf's container before any split — and it tracks additional
+        // tabs growing a leaf's strip. A rebuild reuses the leaf's observable
+        // strip collection by PaneId, so the row appended just above is carried
+        // through. Done before the classic-tab branching below (which is
+        // unchanged); harmless if a split arm already rebuilt this turn (the
+        // rebuild is idempotent and re-uses the same collections). INVISIBLE
+        // (host Collapsed).
+        page->_rebuildActiveWorkspacePaneTree();
+
         if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(c.description))
         {
             // TODO(workspace-phase-2-slice-4): non-TerminalSpec
@@ -234,6 +445,23 @@ namespace winrt::TerminalApp::implementation
         // Pane + TermControl) for it. Don't fire an additional new-tab,
         // and don't bind a new workspace registry entry.
         if (c.leafInsideSplit)
+        {
+            return;
+        }
+
+        // Big-flip Slice C (#54): distinguish a NEW workspace's FIRST tab from
+        // an ADDITIONAL tab in an existing leaf. The model emits TabAdded with
+        // leafInsideSplit==false for BOTH (a newTab on the root leaf has no
+        // parent), so the arm's own fields can't tell them apart — but the
+        // owning workspace already has a registered classic Tab ONLY in the
+        // additional-tab case: newWorkspace fires WorkspaceAdded (which does NOT
+        // register a tab) before its first TabAdded, whereas newTab fires no
+        // WorkspaceAdded against an already-registered workspace. For an
+        // ADDITIONAL tab the strip VM appended above is the SOLE representation
+        // — we must NOT create a second classic Tab (that would be visible AND
+        // wrong). Only the new-workspace first-tab path creates the classic Tab,
+        // exactly as before.
+        if (c.owningWorkspace.valid() && page->_workspaceHasClassicTab(c.owningWorkspace))
         {
             return;
         }
@@ -276,12 +504,27 @@ namespace winrt::TerminalApp::implementation
         // (the ConPTY teardown for that content). NOTE this only fires when a
         // leaf has MULTIPLE tabs; Phase 1 holds one tab per leaf, so the
         // DOMINANT close path is a whole-workspace close, which diff() emits as
-        // WorkspaceRemoved (NOT TabRemoved). apply(WorkspaceRemoved) does NOT
-        // yet erase registry content — that teardown, plus a workspace->contents
-        // reverse index, is an S4 (#48) prerequisite tracked on that issue.
-        // Until S4 makes the factory real nothing is ever inserted, so neither
-        // path can leak today.
+        // WorkspaceRemoved (NOT TabRemoved).
+        //
+        // Big-flip Slice E (#54): apply(WorkspaceRemoved) now tears down the
+        // whole-workspace-close content via the _contentsByWorkspace reverse
+        // index, so the dominant close path no longer leaks. The two paths are
+        // disjoint: diff() suppresses TabRemoved for a removed workspace, so a
+        // given content is torn down by exactly one of the two arms — never
+        // both — and there is no double-Remove.
         _removeContentForTab(c.id);
+
+        // Big-flip Slice C (#54): drop the strip view-model that mirrored this
+        // tab in its leaf, located by id identity. The arm carries the leafId,
+        // so the strip removal is independent of the content teardown above.
+        // INVISIBLE this slice (the strip lives in the Collapsed host). A
+        // whole-workspace close emits WorkspaceRemoved (NOT TabRemoved), so this
+        // only fires for an additional-tab close in a multi-tab leaf — exactly
+        // the strip-VM-only case the TabAdded arm created without a classic Tab.
+        if (auto page = _page())
+        {
+            page->_removePaneTabVm(c.leafId, c.id);
+        }
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& c)
@@ -311,17 +554,31 @@ namespace winrt::TerminalApp::implementation
         (void)c;
     }
 
-    void WorkspaceView::apply(const ::WorkspaceModel::ActiveTabChanged& /*c*/)
+    void WorkspaceView::apply(const ::WorkspaceModel::ActiveTabChanged& c)
     {
-        // ActiveTabChanged fires when a LEAF's activeTabIdx changes (i.e.
-        // the user switched between tabs that share a single pane). Phase 1
-        // holds exactly one tab per leaf, so this arm is unreachable from
-        // the migrated actions in this slice. Per-leaf tab strips (the
-        // case that exercises this arm) land in Phase 2 slices 9-10.
+        // ActiveTabChanged fires when a LEAF's activeTabIdx changes (i.e. the
+        // user switched between tabs that share a single pane). Big-flip Slice C
+        // (#54) makes this real for the per-leaf tab strip: flip the strip's
+        // active row to the newly-active tab, and swap the (collapsed) host's
+        // child to that tab's content GetRoot (extending Slice B's single-content
+        // attach to per-tab). All single-leaf-aware — splits land in Slice D.
         //
-        // Cross-classic-tab selection on the flag-on path is driven by
-        // ActiveWorkspaceChanged above; ActiveTabChanged here intentionally
-        // stays a no-op until per-leaf tab strips exist.
+        // Cross-classic-tab selection on the flag-on path is still driven by
+        // ActiveWorkspaceChanged; this arm only owns the WITHIN-leaf strip
+        // selection + content swap. INVISIBLE this slice: the strip + host are
+        // Collapsed, so the classic tab stays the only thing on screen.
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+
+        const auto active = page->_activatePaneTabByIndex(c.leafId, c.idx);
+        if (!active.valid())
+        {
+            return;
+        }
+        _showTabContentInHost(active);
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& c)
@@ -339,32 +596,65 @@ namespace winrt::TerminalApp::implementation
         // path that attaches a bare ContentId with no content behind it.
         //
         // Record the tab -> content binding so TabRemoved can resolve which
-        // ContentId to erase. (WorkspaceRemoved is the dominant Phase-1 close
-        // path but does NOT yet erase registry content — that, plus a
-        // workspace->contents reverse index, is an S4 (#48) prerequisite.)
-        // ContentUnmounted is NOT a removal — it only detaches for an inactive
-        // workspace.
+        // ContentId to erase, AND (Big-flip Slice E, #54) the workspace ->
+        // contents reverse index (_contentsByWorkspace, keyed by the arm's
+        // owningWorkspace) so the dominant whole-workspace close path
+        // (WorkspaceRemoved) can tear down every content it owns. ContentUnmounted
+        // is NOT a removal — it only detaches for an inactive workspace.
         //
         // What this slice does NOT do: the actual XAML reparent into the active
         // workspace's leaf (which workspace, which Pane) is driven by S4 (#48,
         // workspace switching). The registry + binding stood up here are what
         // S4 attaches; the live content's lifetime is owned here regardless of
         // whether it is currently parented into the tree.
+        // Big-flip Slice A (#54): the factory is real. It materialises the live
+        // IPaneContent from the spec via the owning page, so the registry
+        // genuinely owns one live content per active tab. The spec is captured
+        // BY VALUE — the change `c` is a reference that need not outlive a
+        // deferred factory call — and the page WEAKLY (the factory must not keep
+        // the page alive; if the page is gone there is nothing to mount). A null
+        // return (non-Terminal spec, spawn failure, or elevation handoff) leaves
+        // the registry untouched, per the EnsureMounted contract.
+        //
+        // NOTE: this changes NO display ownership. The classic Tab is still the
+        // sole displayer; this arm only stands up the registry-owned content.
+        // The XAML reparent into the active workspace's leaf is still S4 (#48).
+        auto weakPage = _owner;
         const auto live = _contentRegistry.EnsureMounted(
             c.contentId,
-            [&c]() -> winrt::TerminalApp::IPaneContent {
-                // TODO(workspace-phase-2-slice-4): materialise the live
-                // IPaneContent from c.description (TerminalSpec ->
-                // _OpenNewTab content, Settings/Snippets/Markdown/Scratchpad
-                // -> their content classes) and hand it back. Until S4 drives
-                // a user-reachable mount, no diff path that constructs content
-                // here is reachable; the contract is proved by the direct
-                // ContentRegistry lifetime test instead.
-                return nullptr;
+            [weakPage, desc = c.description]() -> winrt::TerminalApp::IPaneContent {
+                auto page = weakPage.get();
+                return page ? page->_makePaneContentForSpec(desc) : nullptr;
             });
         if (live)
         {
             _contentByTab[c.tabId] = c.contentId;
+
+            // Big-flip Slice E (#54): record the workspace -> contents reverse
+            // index so apply(WorkspaceRemoved) can tear down every content a
+            // whole-workspace close orphans. Guard against a duplicate id: a
+            // re-mount of an already-owned ContentId (the EnsureMounted
+            // keep-alive path) re-arrives with the same (workspace, content)
+            // pair, and we must not double-record it or a later Remove would
+            // leave a stale entry.
+            if (c.owningWorkspace.valid())
+            {
+                auto& contents = _contentsByWorkspace[c.owningWorkspace];
+                if (std::find(contents.begin(), contents.end(), c.contentId) == contents.end())
+                {
+                    contents.push_back(c.contentId);
+                }
+            }
+
+            // Big-flip Slice B (#54): now that the content is recorded + owned,
+            // parent it into the (collapsed) WorkspaceContentHost so the host
+            // always backs the active workspace's content. A new workspace's
+            // ContentMounted fires before its ActiveWorkspaceChanged, and the
+            // newly-mounted content belongs to the workspace that is becoming
+            // active, so attaching the owning workspace's content here is
+            // correct. ActiveWorkspaceChanged re-attaches on a later switch.
+            // This is purely additive: it does NOT touch the classic display.
+            _showActiveWorkspaceContentInHost(c.owningWorkspace);
         }
         (void)live;
     }
@@ -381,8 +671,9 @@ namespace winrt::TerminalApp::implementation
         // ContentUnmounted both on a switch-away (keep alive) and immediately
         // before TabRemoved when a tab is genuinely destroyed. Treating either
         // as a teardown here would kill a ConPTY that should have survived a
-        // switch. Teardown is TabRemoved's job (and, once S4 (#48) wires it,
-        // the WorkspaceRemoved close path); this arm only notes the keep-alive.
+        // switch. Teardown is TabRemoved's job (and the WorkspaceRemoved close
+        // path, wired in Big-flip Slice E #54); this arm only notes the
+        // keep-alive.
         //
         // The detach from the live tree (which Pane / leaf to unparent) is
         // driven by S4 (#48); pre-S4 there is no user-reachable switch to
@@ -411,5 +702,36 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         page->_applyTabDecoration(*resolved, c.customTitle, c.runtimeColor);
+    }
+
+    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceMetadataUpdated& c)
+    {
+        // Stage 2 (#52): a surviving workspace's display metadata (name / color
+        // / pin) changed. The workspace analogue of TabDecorationUpdated:
+        // re-project the new metadata onto the matching view-model, located by
+        // id identity. The bound DataTemplate re-renders from the observable
+        // property changes — no positional cast, so an update can never land on
+        // the wrong row.
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_updateWorkspaceVm(c.id, c.name, c.color, c.pinned);
+    }
+
+    void WorkspaceView::apply(const ::WorkspaceModel::WorkspaceReordered& c)
+    {
+        // Pinned-float: the model's sidebar display order changed (e.g. a pin
+        // floated a workspace within the list). Re-sequence the observable
+        // view-model collection to match the new id-order the arm carries. This
+        // is a pure projection: the page resolves each id to its existing row
+        // view-model and moves it into place; no model state is read to decide.
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_reorderWorkspaceVms(c.order);
     }
 }

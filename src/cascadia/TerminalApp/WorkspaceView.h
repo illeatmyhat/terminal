@@ -21,7 +21,9 @@
 
 #pragma once
 
+#include <optional>
 #include <unordered_map>
+#include <vector>
 
 #include "../WorkspaceModel/IWorkspaceView.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
@@ -40,6 +42,8 @@ namespace winrt::TerminalApp::implementation
         void apply(const ::WorkspaceModel::WorkspaceAdded& c) override;
         void apply(const ::WorkspaceModel::WorkspaceRemoved& c) override;
         void apply(const ::WorkspaceModel::ActiveWorkspaceChanged& c) override;
+        void apply(const ::WorkspaceModel::WorkspaceMetadataUpdated& c) override;
+        void apply(const ::WorkspaceModel::WorkspaceReordered& c) override;
         void apply(const ::WorkspaceModel::LeafPaneCreated& c) override;
         void apply(const ::WorkspaceModel::SplitPaneCreated& c) override;
         void apply(const ::WorkspaceModel::SplitPaneCollapsed& c) override;
@@ -51,6 +55,22 @@ namespace winrt::TerminalApp::implementation
         void apply(const ::WorkspaceModel::ContentMounted& c) override;
         void apply(const ::WorkspaceModel::ContentUnmounted& c) override;
         void apply(const ::WorkspaceModel::TabDecorationUpdated& c) override;
+
+        // Test-only observers of the content registry. The registry is the
+        // single strong owner of every live IPaneContent; these let a page
+        // test confirm the ContentMounted factory genuinely materialised
+        // content (Size) and that a given model mount ContentId resolves to a
+        // live entry (Contains), without driving any real geometry.
+        [[nodiscard]] std::size_t contentRegistrySizeForTest() const noexcept { return _contentRegistry.Size(); }
+        [[nodiscard]] bool contentRegistryContainsForTest(::WorkspaceModel::ContentId id) const noexcept { return _contentRegistry.Contains(id); }
+
+        // Big-flip Slice B (#54): the ContentId currently attached into the
+        // flag-on WorkspaceContentHost (the active workspace's content), or
+        // std::nullopt when nothing has been attached. Lets a page test assert
+        // the host's backing content flipped to the right workspace's content
+        // on a switch, paired with the page's _workspaceHostChildForTest()
+        // (which exposes the actual parented FrameworkElement) for identity.
+        [[nodiscard]] std::optional<::WorkspaceModel::ContentId> hostContentIdForTest() const noexcept { return _hostContentId; }
 
     private:
         // Resolves the weak reference to a strong com_ptr each time. Returns
@@ -84,9 +104,50 @@ namespace winrt::TerminalApp::implementation
         // ids to ids.
         std::unordered_map<::WorkspaceModel::TabId, ::WorkspaceModel::ContentId> _contentByTab;
 
+        // Big-flip Slice E (#54): workspace -> contents reverse index,
+        // populated by the ContentMounted arm (keyed by the arm's
+        // owningWorkspace). A whole-workspace close emits WorkspaceRemoved —
+        // NOT per-tab TabRemoved/ContentUnmounted — so apply(WorkspaceRemoved)
+        // can't reach the workspace's contents through _contentByTab alone
+        // (it only carries a WorkspaceId). This is how that arm enumerates
+        // every ContentId the closing workspace owns to Remove() it from the
+        // registry (tearing down the ConPTY) — without it the factory-built
+        // content leaks until the window exits.
+        std::unordered_map<::WorkspaceModel::WorkspaceId, std::vector<::WorkspaceModel::ContentId>> _contentsByWorkspace;
+
         // Erase the content bound to `tabId` (if any) from the registry — the
         // only place a single content's ConPTY tears down. Called by the
         // removal arms. A no-op when the tab had no mounted content.
         void _removeContentForTab(::WorkspaceModel::TabId tabId);
+
+        // Big-flip Slice B (#54): parent the ACTIVE workspace's mounted content
+        // into the page's (collapsed) WorkspaceContentHost. Resolves the single
+        // (this slice) ContentId the active workspace owns from
+        // _contentsByWorkspace, Find()s its live IPaneContent in the registry,
+        // and asks the page to parent its GetRoot() as the host's sole child.
+        // Driven from apply(ContentMounted) and apply(ActiveWorkspaceChanged)
+        // (after the existing classic _SelectTab swap, which this does NOT
+        // remove). A no-op — leaving _hostContentId untouched — when the
+        // workspace owns no content yet or the page is gone. Records
+        // _hostContentId so a test can observe which content the host backs.
+        void _showActiveWorkspaceContentInHost(::WorkspaceModel::WorkspaceId active);
+
+        // Big-flip Slice C (#54): swap the (collapsed) WorkspaceContentHost's
+        // child to the content of a SPECIFIC tab — the per-tab analogue of
+        // _showActiveWorkspaceContentInHost. Resolves the tab's bound ContentId
+        // from _contentByTab (populated by the ContentMounted arm), Find()s its
+        // live IPaneContent in the registry, and asks the page to parent its
+        // GetRoot() as the host's sole child. Driven by apply(ActiveTabChanged)
+        // so switching between a leaf's tabs shows the newly-active tab's
+        // content. A no-op — leaving _hostContentId untouched — when the page is
+        // gone, the tab has no bound content, or the id no longer resolves.
+        // Single-leaf scope: splits land in Slice D. INVISIBLE this slice (host
+        // Collapsed).
+        void _showTabContentInHost(::WorkspaceModel::TabId tabId);
+
+        // The ContentId currently attached into the WorkspaceContentHost (the
+        // backing content of the host's sole child), or std::nullopt when
+        // nothing has been attached. Exposed read-only via hostContentIdForTest.
+        std::optional<::WorkspaceModel::ContentId> _hostContentId{ std::nullopt };
     };
 }

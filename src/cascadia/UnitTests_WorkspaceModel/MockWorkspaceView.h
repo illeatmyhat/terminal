@@ -21,6 +21,8 @@ namespace WorkspaceModelUnitTests
         void apply(const WorkspaceModel::WorkspaceAdded& c) override { _changes.emplace_back(c); }
         void apply(const WorkspaceModel::WorkspaceRemoved& c) override { _changes.emplace_back(c); }
         void apply(const WorkspaceModel::ActiveWorkspaceChanged& c) override { _changes.emplace_back(c); }
+        void apply(const WorkspaceModel::WorkspaceMetadataUpdated& c) override { _changes.emplace_back(c); }
+        void apply(const WorkspaceModel::WorkspaceReordered& c) override { _changes.emplace_back(c); }
         void apply(const WorkspaceModel::LeafPaneCreated& c) override { _changes.emplace_back(c); }
         void apply(const WorkspaceModel::SplitPaneCreated& c) override { _changes.emplace_back(c); }
         void apply(const WorkspaceModel::SplitPaneCollapsed& c) override { _changes.emplace_back(c); }

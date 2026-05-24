@@ -13,7 +13,8 @@
 //     WorkspaceAdded, LeafPaneCreated, SplitPaneCreated, TabAdded,
 //     ContentMounted
 //   Phase 2 (intra-existing mutation):
-//     TabMoved, SplitRatioChanged, TabDecorationUpdated, ActiveTabChanged,
+//     TabMoved, SplitRatioChanged, TabDecorationUpdated,
+//     WorkspaceMetadataUpdated, WorkspaceReordered, ActiveTabChanged,
 //     ActiveWorkspaceChanged
 //   Phase 3 (subtractive):
 //     ContentUnmounted, TabRemoved, SplitPaneCollapsed, WorkspaceRemoved
@@ -512,6 +513,82 @@ namespace WorkspaceModel
             }
         }
 
+        // Emit WorkspaceMetadataUpdated for every WorkspaceId present in both
+        // states whose name / color / pinned changed. The workspace analogue
+        // of emitDecorationUpdates — a surviving workspace's display metadata
+        // mutated while its identity persisted (a new workspace carries its
+        // initial metadata on WorkspaceAdded instead).
+        void emitWorkspaceMetadataUpdates(const StateIndex& prevIndex,
+                                          const StateIndex& nextIndex,
+                                          std::vector<WorkspaceChange>& out)
+        {
+            for (const auto& [id, b] : nextIndex.workspaceById)
+            {
+                auto prevIt = prevIndex.workspaceById.find(id);
+                if (prevIt == prevIndex.workspaceById.end())
+                {
+                    continue; // new workspace → WorkspaceAdded carries metadata
+                }
+                const auto* a = prevIt->second;
+                if (!a || !b)
+                {
+                    continue;
+                }
+                if (a->name != b->name ||
+                    a->color != b->color ||
+                    a->pinned != b->pinned)
+                {
+                    out.push_back(WorkspaceMetadataUpdated{ id, b->name, b->color, b->pinned });
+                }
+            }
+        }
+
+        // Emit WorkspaceReordered when the display order of the workspaces
+        // COMMON to both states differs between prev and next. We compare only
+        // the shared ids in their relative order so a pure add (append) or
+        // remove never spuriously reports a reorder — only an actual
+        // re-sequencing of surviving workspaces (e.g. a pin floating one) does.
+        // The arm carries the FULL next display order (every id in next, in
+        // order); the view re-sequences its rows to match.
+        void emitWorkspaceReorder(const WorkspaceModelData* prev,
+                                  const WorkspaceModelData* next,
+                                  const StateIndex& prevIndex,
+                                  const StateIndex& nextIndex,
+                                  std::vector<WorkspaceChange>& out)
+        {
+            if (!prev || !next)
+            {
+                return;
+            }
+            // Relative order of the prev-side ids that survive into next.
+            std::vector<WorkspaceId> prevCommon;
+            prevCommon.reserve(prev->workspaces.size());
+            for (const auto& ws : prev->workspaces)
+            {
+                if (nextIndex.workspaceById.find(ws.id) != nextIndex.workspaceById.end())
+                {
+                    prevCommon.push_back(ws.id);
+                }
+            }
+            // Relative order of the next-side ids that existed in prev.
+            std::vector<WorkspaceId> nextCommon;
+            nextCommon.reserve(next->workspaces.size());
+            std::vector<WorkspaceId> nextOrder;
+            nextOrder.reserve(next->workspaces.size());
+            for (const auto& ws : next->workspaces)
+            {
+                nextOrder.push_back(ws.id);
+                if (prevIndex.workspaceById.find(ws.id) != prevIndex.workspaceById.end())
+                {
+                    nextCommon.push_back(ws.id);
+                }
+            }
+            if (prevCommon != nextCommon)
+            {
+                out.push_back(WorkspaceReordered{ std::move(nextOrder) });
+            }
+        }
+
         // Mount / unmount diffs. A change in ContentId is treated as
         // Unmount(old) + Mount(new); a nullopt → ContentId is Mount; a
         // ContentId → nullopt is Unmount.
@@ -537,7 +614,18 @@ namespace WorkspaceModel
                 }
                 if (nb.mount.has_value() && prevMount != nb.mount)
                 {
-                    outMounts.push_back(ContentMounted{ tid, *nb.mount, nb.description });
+                    // Resolve the owning workspace from the tab's leaf the
+                    // SAME way emitDecorationUpdates does (leaf id -> PaneInfo
+                    // -> workspaceId). The view records a workspace->contents
+                    // reverse index from this so apply(WorkspaceRemoved) can
+                    // tear down the content a whole-workspace close orphans.
+                    WorkspaceId owningWorkspace{};
+                    if (const auto leafIt = nextIndex.panes.find(nextInfo.leafId);
+                        leafIt != nextIndex.panes.end())
+                    {
+                        owningWorkspace = leafIt->second.workspaceId;
+                    }
+                    outMounts.push_back(ContentMounted{ tid, *nb.mount, nb.description, owningWorkspace });
                 }
                 if (prevMount.has_value() && prevMount != nb.mount)
                 {
@@ -638,7 +726,7 @@ namespace WorkspaceModel
                 {
                     // Carry the stable id only; the view resolves the
                     // display/insertion position from the id.
-                    additive.push_back(WorkspaceAdded{ ws.id, ws.name, ws.color });
+                    additive.push_back(WorkspaceAdded{ ws.id, ws.name, ws.color, ws.pinned });
                 }
             }
         }
@@ -671,6 +759,8 @@ namespace WorkspaceModel
         emitTabMoves(prevIndex, nextIndex, mutation);
         emitSplitRatioChanges(prevIndex, nextIndex, mutation);
         emitDecorationUpdates(prevIndex, nextIndex, mutation);
+        emitWorkspaceMetadataUpdates(prevIndex, nextIndex, mutation);
+        emitWorkspaceReorder(prev, next, prevIndex, nextIndex, mutation);
         emitActiveTabChanges(next, prevIndex, mutation);
 
         // ActiveWorkspaceChanged — emit when value changed (including

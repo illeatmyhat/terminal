@@ -43,7 +43,11 @@ namespace WorkspaceModelUnitTests
 
         // Builds a leaf with `tabCount` distinct tabs, with the given PaneId.
         // Tab ids are paneId * 100 + i so they don't collide across panes
-        // built with different paneIds.
+        // built with different paneIds. The active tab carries a mount (a
+        // unique, paneId-derived ContentId) so a leaf used as the active
+        // workspace's content satisfies invariant 9 (active content is
+        // materialised) out of the box; individual tests override the mount
+        // when they want to assert mount-specific invariants.
         LeafPane makeLeaf(std::uint64_t paneId, std::size_t tabCount = 1)
         {
             LeafPane leaf;
@@ -53,6 +57,7 @@ namespace WorkspaceModelUnitTests
                 leaf.tabs.push_back(makeTab(paneId * 100 + i + 1));
             }
             leaf.activeTabIdx = 0;
+            leaf.tabs[leaf.activeTabIdx].mount = ContentId{ paneId * 100 + 50 };
             return leaf;
         }
 
@@ -143,6 +148,18 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(DuplicateContentIdMount_FailsOnSameMount);
         TEST_METHOD(DuplicateContentIdMount_PassesWhenDistinct);
         TEST_METHOD(DuplicateContentIdMount_PassesWhenAllUnset);
+
+        // Invariant 4 + 9 (mount policy, Phase 2 Slice 1): the validator
+        // rejects an out-of-range activeTabIdx and rejects a misaligned mount
+        // set (the active workspace's active content left unmaterialised).
+        TEST_METHOD(Validator_RejectsActiveTabIdxOutOfRange);
+        TEST_METHOD(Validator_RejectsMisalignedMountSet);
+
+        // Invariant 10 (pinned-float): in display order, all pinned workspaces
+        // precede all unpinned. An unpinned workspace sitting before a pinned
+        // one is unrepresentable.
+        TEST_METHOD(PinnedNotContiguous_FailsWhenUnpinnedBeforePinned);
+        TEST_METHOD(PinnedNotContiguous_PassesWhenPinnedFirst);
     };
 
     // -----------------------------------------------------------------
@@ -255,9 +272,15 @@ namespace WorkspaceModelUnitTests
     {
         auto m = makeModel();
         // Add a second tab and point activeTabIdx at it explicitly. Both
-        // 0 and 1 are valid for a 2-tab leaf.
+        // 0 and 1 are valid for a 2-tab leaf. The new tab carries a mount so
+        // the (now active) tab satisfies invariant 9; the previously-active
+        // tab keeps its own (distinct) mount, which is legal — a leaf may hold
+        // multiple materialised tabs (the survival mechanism for within-leaf
+        // tab switches).
         auto& leaf = std::get<LeafPane>(m.workspaces[0].root);
-        leaf.tabs.push_back(makeTab(999));
+        auto second = makeTab(999);
+        second.mount = ContentId{ 999 };
+        leaf.tabs.push_back(second);
         leaf.activeTabIdx = 1;
 
         VERIFY_IS_FALSE(validate(m).has_value());
@@ -394,12 +417,103 @@ namespace WorkspaceModelUnitTests
 
     void ValidatorTests::DuplicateContentIdMount_PassesWhenAllUnset()
     {
-        const auto m = makeModel();
-        const auto& leaf = std::get<LeafPane>(m.workspaces[0].root);
+        // Invariant 8 (mount uniqueness) is trivially satisfied when no tab
+        // carries a mount. To exercise that in isolation we must avoid
+        // invariant 9 (the active workspace's active tab must be mounted), so
+        // we clear the model's active workspace: with activeWorkspaceId ==
+        // nullopt, no workspace's content is required to be live, and an
+        // all-unmounted model is legal.
+        auto m = makeModel();
+        auto& leaf = std::get<LeafPane>(m.workspaces[0].root);
+        for (auto& t : leaf.tabs)
+        {
+            t.mount = std::nullopt;
+        }
+        m.activeWorkspaceId = std::nullopt;
+
         for (const auto& t : leaf.tabs)
         {
             VERIFY_IS_FALSE(t.mount.has_value());
         }
+        VERIFY_IS_FALSE(validate(m).has_value());
+    }
+
+    // -----------------------------------------------------------------
+    // Invariant 4 + 9: mount policy
+    // -----------------------------------------------------------------
+    void ValidatorTests::Validator_RejectsActiveTabIdxOutOfRange()
+    {
+        auto m = makeModel();
+        // The single-leaf workspace has one tab; pointing activeTabIdx past
+        // the end is an out-of-range active selection.
+        auto& leaf = std::get<LeafPane>(m.workspaces[0].root);
+        leaf.activeTabIdx = leaf.tabs.size(); // == size() -> out of range
+
+        const auto v = validate(m);
+        VERIFY_IS_TRUE(v.has_value());
+        VERIFY_ARE_EQUAL(static_cast<int>(Violation::ActiveTabIdxOutOfRange),
+                         static_cast<int>(*v));
+    }
+
+    void ValidatorTests::Validator_RejectsMisalignedMountSet()
+    {
+        // Invariant 9: the active workspace's active content must be
+        // materialised. Clearing the mount on the active workspace's active
+        // tab is exactly the "active-but-unmounted" misalignment the policy
+        // forbids — the validator must reject it.
+        auto m = makeModel();
+        auto& leaf = std::get<LeafPane>(m.workspaces[0].root);
+        leaf.tabs[leaf.activeTabIdx].mount = std::nullopt;
+
+        const auto v = validate(m);
+        VERIFY_IS_TRUE(v.has_value());
+        VERIFY_ARE_EQUAL(static_cast<int>(Violation::ActiveContentNotMounted),
+                         static_cast<int>(*v));
+
+        // The mirror case: a mount on an INACTIVE workspace's tab is NOT a
+        // misalignment (option I keeps inactive content alive), so a second
+        // workspace whose active tab is unmounted while it is NOT the active
+        // workspace is legal.
+        auto m2 = makeModel();
+        auto ws2 = makeWorkspace(2, 5);
+        // Strip ws2's mount to prove inactive workspaces are unconstrained.
+        std::get<LeafPane>(ws2.root).tabs[0].mount = std::nullopt;
+        m2.workspaces.push_back(ws2);
+        m2.mru.push_back(WorkspaceId{ 2 });
+        // ws1 stays active and materialised; ws2 is inactive + unmounted.
+        VERIFY_IS_FALSE(validate(m2).has_value());
+    }
+
+    // -----------------------------------------------------------------
+    // Invariant 10: PinnedNotContiguous (pinned-float)
+    // -----------------------------------------------------------------
+    void ValidatorTests::PinnedNotContiguous_FailsWhenUnpinnedBeforePinned()
+    {
+        // Display order [ws1(unpinned), ws2(pinned)] interleaves an unpinned
+        // workspace before a pinned one. Both are inactive-content-clean
+        // because makeModel keeps ws1 active+mounted and ws2 is mounted too.
+        auto m = makeModel(); // ws1, unpinned, active
+        auto ws2 = makeWorkspace(2, 5);
+        ws2.pinned = true;
+        m.workspaces.push_back(ws2);
+        m.mru.push_back(WorkspaceId{ 2 });
+
+        const auto v = validate(m);
+        VERIFY_IS_TRUE(v.has_value());
+        VERIFY_ARE_EQUAL(static_cast<int>(Violation::PinnedNotContiguous),
+                         static_cast<int>(*v));
+    }
+
+    void ValidatorTests::PinnedNotContiguous_PassesWhenPinnedFirst()
+    {
+        // [ws1(pinned), ws2(unpinned)] satisfies pinned-before-unpinned.
+        auto m = makeModel();
+        m.workspaces[0].pinned = true;
+        auto ws2 = makeWorkspace(2, 5);
+        ws2.pinned = false;
+        m.workspaces.push_back(ws2);
+        m.mru.push_back(WorkspaceId{ 2 });
+
         VERIFY_IS_FALSE(validate(m).has_value());
     }
 }

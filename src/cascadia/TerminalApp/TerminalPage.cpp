@@ -26,6 +26,8 @@
 #include "TabRowControl.h"
 #include "TerminalSettingsCache.h"
 #include "WorkspaceView.h"
+#include "WorkspaceViewModel.h"
+#include "PaneTabViewModel.h"
 
 #include "../WorkspaceModel/Diff.h"
 
@@ -1020,6 +1022,23 @@ namespace winrt::TerminalApp::implementation
     //   Below the profiles are the static menu items: settings, command palette
     void TerminalPage::_CreateNewTabFlyout()
     {
+        _newTabButton.Flyout(_buildNewItemFlyout([weakThis{ get_weak() }](NewTerminalArgs args) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_OpenNewTerminalViaDropdown(args);
+            }
+        }));
+    }
+
+    // Method Description:
+    // - Builds (and returns) the "+ | v" dropdown MenuFlyout shared by the tab
+    //   strip's NewTabButton and the workspaces chrome's NewWorkspaceButton. The
+    //   per-profile menu items are parameterized by `onChosen`, which decides
+    //   what choosing a profile does (open a new terminal vs. create a new
+    //   workspace). The static Settings / Command Palette / About items and the
+    //   Opening/Closing focus handlers are identical for both consumers.
+    WUX::Controls::MenuFlyout TerminalPage::_buildNewItemFlyout(std::function<void(NewTerminalArgs)> onChosen)
+    {
         auto newTabFlyout = WUX::Controls::MenuFlyout{};
         newTabFlyout.Placement(WUX::Controls::Primitives::FlyoutPlacementMode::BottomEdgeAlignedLeft);
 
@@ -1027,7 +1046,7 @@ namespace winrt::TerminalApp::implementation
         // recursive helper function. This returns a std::vector of FlyoutItemBases,
         // that we then add to our Flyout.
         auto entries = _settings.GlobalSettings().NewTabMenu();
-        auto items = _CreateNewTabFlyoutItems(entries);
+        auto items = _CreateNewTabFlyoutItems(entries, onChosen);
         for (const auto& item : items)
         {
             newTabFlyout.Items().Append(item);
@@ -1139,14 +1158,14 @@ namespace winrt::TerminalApp::implementation
                     TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
             }
         });
-        _newTabButton.Flyout(newTabFlyout);
+        return newTabFlyout;
     }
 
     // Method Description:
     // - For a given list of tab menu entries, this method will create the corresponding
     //   list of flyout items. This is a recursive method that calls itself when it comes
     //   across a folder entry.
-    std::vector<WUX::Controls::MenuFlyoutItemBase> TerminalPage::_CreateNewTabFlyoutItems(IVector<NewTabMenuEntry> entries)
+    std::vector<WUX::Controls::MenuFlyoutItemBase> TerminalPage::_CreateNewTabFlyoutItems(IVector<NewTabMenuEntry> entries, std::function<void(NewTerminalArgs)> onChosen)
     {
         std::vector<WUX::Controls::MenuFlyoutItemBase> items;
 
@@ -1185,7 +1204,7 @@ namespace winrt::TerminalApp::implementation
                 }
 
                 // Recursively generate flyout items
-                auto folderEntryItems = _CreateNewTabFlyoutItems(folderEntries);
+                auto folderEntryItems = _CreateNewTabFlyoutItems(folderEntries, onChosen);
 
                 // If the folder should auto-inline and there is only one item, do so.
                 if (folderEntry.Inlining() == FolderEntryInlining::Auto && folderEntryItems.size() == 1)
@@ -1238,7 +1257,7 @@ namespace winrt::TerminalApp::implementation
 
                 for (auto&& [profileIndex, remainingProfile] : remainingProfilesEntry.Profiles())
                 {
-                    items.push_back(_CreateNewTabFlyoutProfile(remainingProfile, profileIndex, {}));
+                    items.push_back(_CreateNewTabFlyoutProfile(remainingProfile, profileIndex, {}, onChosen));
                 }
 
                 break;
@@ -1252,7 +1271,7 @@ namespace winrt::TerminalApp::implementation
                     break;
                 }
 
-                auto profileItem = _CreateNewTabFlyoutProfile(profileEntry.Profile(), profileEntry.ProfileIndex(), profileEntry.Icon().Resolved());
+                auto profileItem = _CreateNewTabFlyoutProfile(profileEntry.Profile(), profileEntry.ProfileIndex(), profileEntry.Icon().Resolved(), onChosen);
                 items.push_back(profileItem);
                 break;
             }
@@ -1277,7 +1296,7 @@ namespace winrt::TerminalApp::implementation
     // Method Description:
     // - This method creates a flyout menu item for a given profile with the given index.
     //   It makes sure to set the correct icon, keybinding, and click-action.
-    WUX::Controls::MenuFlyoutItem TerminalPage::_CreateNewTabFlyoutProfile(const Profile profile, int profileIndex, const winrt::hstring& iconPathOverride)
+    WUX::Controls::MenuFlyoutItem TerminalPage::_CreateNewTabFlyoutProfile(const Profile profile, int profileIndex, const winrt::hstring& iconPathOverride, std::function<void(NewTerminalArgs)> onChosen)
     {
         auto profileMenuItem = WUX::Controls::MenuFlyoutItem{};
 
@@ -1339,7 +1358,7 @@ namespace winrt::TerminalApp::implementation
         toolTip.Content(textBlock);
         WUX::Controls::ToolTipService::SetToolTip(profileMenuItem, toolTip);
 
-        profileMenuItem.Click([profileIndex, weakThis{ get_weak() }](auto&&, auto&&) {
+        profileMenuItem.Click([profileIndex, onChosen, weakThis{ get_weak() }](auto&&, auto&&) {
             if (auto page{ weakThis.get() })
             {
                 TraceLoggingWrite(
@@ -1352,7 +1371,7 @@ namespace winrt::TerminalApp::implementation
                     TelemetryPrivacyDataTag(PDT_ProductAndServiceUsage));
 
                 NewTerminalArgs newTerminalArgs{ profileIndex };
-                page->_OpenNewTerminalViaDropdown(newTerminalArgs);
+                onChosen(newTerminalArgs);
             }
         });
 
@@ -3842,6 +3861,85 @@ namespace winrt::TerminalApp::implementation
         return resultPane;
     }
 
+    // Big-flip Slice A (#54): the real ContentMounted factory. Materialises a
+    // live IPaneContent from a model TabContent spec for the ContentRegistry to
+    // own (the registry — not the classic Tab — becomes the strong owner of the
+    // content). Invoked from WorkspaceView::apply(ContentMounted), which runs
+    // well after page construction, so get_weak() (used by the close-revoker
+    // the TerminalPaneContent wires) is valid.
+    //
+    // This REPLICATES the minimal TerminalSpec content-build core of
+    // _MakeTerminalPane (recover the profile GUID -> NewTerminalArgs ->
+    // GetProfileForArgs -> CreateWithNewTerminalArgs -> connection -> control ->
+    // TerminalPaneContent) rather than extracting a shared helper:
+    // _MakeTerminalPane's body is entangled with the duplicate-from-sourceTab,
+    // content-id-attach, auto-elevation, debug-tap and session-restore paths
+    // and returns a std::shared_ptr<Pane>, not an IPaneContent — factoring a
+    // shared content-build helper out of it risked perturbing those classic
+    // paths (which this slice must leave byte-for-byte intact). The replicated
+    // steps below are exactly the from-spec subset: no split, no duplication,
+    // no debug-tap, no session restore.
+    //
+    // Returns nullptr ("do not attach") for any non-Terminal variant
+    // (Settings/Snippets/Markdown/Scratchpad — not yet model-materialisable) or
+    // on spawn failure / auto-elevation handoff (_maybeElevate reports the new
+    // window took over).
+    winrt::TerminalApp::IPaneContent TerminalPage::_makePaneContentForSpec(const ::WorkspaceModel::TabContent& spec)
+    {
+        // Big-flip Slice B (#54): test-only factory override. When a test has
+        // installed one, return its content instead of building a real
+        // TermControl — the host-attach tests want a MockPaneContent with a
+        // known root. Empty in production, so the live path below is unchanged.
+        if (_makePaneContentForSpecOverrideForTest)
+        {
+            return _makePaneContentForSpecOverrideForTest(spec);
+        }
+
+        const auto* terminalSpec = std::get_if<::WorkspaceModel::TerminalSpec>(&spec);
+        if (!terminalSpec)
+        {
+            // Settings / Snippets / Markdown / Scratchpad are not yet
+            // materialisable from the model; the classic Tab still owns them.
+            return nullptr;
+        }
+
+        // The 16-byte profile bytes are the canonical winrt::guid in-memory
+        // layout on Windows; reinterpret to recover the winrt::guid, then format
+        // as the bracketed-GUID string NewTerminalArgs::Profile accepts. A
+        // zero-GUID maps to the default profile (GetProfileForArgs falls back),
+        // so we leave Profile unset in that case — mirroring
+        // _openProfileTabForWorkspace.
+        winrt::guid g{};
+        static_assert(sizeof(winrt::guid) == 16, "winrt::guid must be 16 bytes");
+        std::memcpy(&g, terminalSpec->profile.data(), 16);
+
+        NewTerminalArgs newTerminalArgs{};
+        if (g != winrt::guid{})
+        {
+            newTerminalArgs.Profile(::Microsoft::Console::Utils::GuidToString(g));
+        }
+
+        const auto profile = _settings.GetProfileForArgs(newTerminalArgs);
+        const auto controlSettings = Settings::TerminalSettings::CreateWithNewTerminalArgs(_settings, newTerminalArgs);
+
+        // Auto-elevation handoff: if the profile wants elevation and we're not
+        // elevated, _maybeElevate spawns an elevated window to host this content
+        // and returns true. There is then no content to own in this window —
+        // return nullptr so the registry attaches nothing.
+        if (_maybeElevate(newTerminalArgs, controlSettings, profile))
+        {
+            return nullptr;
+        }
+
+        const auto sessionId = controlSettings.DefaultSettings()->SessionId();
+        const auto hasSessionId = sessionId != winrt::guid{};
+
+        auto connection = _CreateConnectionFromSettings(profile, *controlSettings.DefaultSettings(), hasSessionId);
+        const auto control = _CreateNewControlAndContent(controlSettings, connection);
+
+        return winrt::make<TerminalPaneContent>(profile, _terminalSettingsCache, control);
+    }
+
     // NOTE: callers of _MakePane should be able to accept nullptr as a return
     // value gracefully.
     std::shared_ptr<Pane> TerminalPage::_MakePane(const INewContentArgs& contentArgs,
@@ -6156,6 +6254,26 @@ namespace winrt::TerminalApp::implementation
         return _GetTabIndex(tab);
     }
 
+    // Big-flip Slice C (#54): true when `ws` already has a registered classic
+    // Tab whose weak_ref still resolves. The TabAdded arm uses this to tell a
+    // new workspace's FIRST tab (no entry yet) apart from an ADDITIONAL tab in
+    // an existing leaf (entry present) — see the header comment. We require the
+    // weak_ref to still resolve so a closed-then-reopened workspace id can't
+    // false-positive on a stale entry.
+    bool TerminalPage::_workspaceHasClassicTab(::WorkspaceModel::WorkspaceId ws) const
+    {
+        if (!ws.valid())
+        {
+            return false;
+        }
+        const auto it = _workspaceClassicTabs.find(ws);
+        if (it == _workspaceClassicTabs.end())
+        {
+            return false;
+        }
+        return static_cast<bool>(it->second.get());
+    }
+
     // Routed from the Tab::Closed handler (registered in
     // _InitializeTab) when the workspaces flag is on. The classic Tab
     // raised Closed via tab.Close(); instead of doing the classic
@@ -6451,7 +6569,7 @@ namespace winrt::TerminalApp::implementation
     // titlebar via SetTitleBarContent, which leaves the page's tab strip in
     // the client area UNDER the titlebar (reusing the existing tabs-under-
     // titlebar rendering — we simply do NOT hand the TabRow to the host). The
-    // sidebar StackPanel is realized and made visible so its Auto column takes
+    // sidebar ItemsControl is realized and made visible so its Auto column takes
     // up width. Called only when _workspacesFlagEnabled() is true, so the
     // flag-off path never touches any of this and stays byte-for-byte upstream.
     void TerminalPage::_initializeWorkspaceShell()
@@ -6478,6 +6596,30 @@ namespace winrt::TerminalApp::implementation
         // and the no-op raise just means it isn't re-hosted anywhere.)
         if (const auto chrome = FindName(L"WorkspaceChrome").try_as<UIElement>())
         {
+            // Wire the new-workspace split button while the chrome is still in
+            // the page's tree (FindName resolves against the page namescope; do
+            // it before the chrome is handed to the host titlebar). The primary
+            // button creates a default-profile workspace; the chevron flyout
+            // offers one entry per profile. Creation reuses the Phase-1 create
+            // path (newWorkspace -> _applyWorkspaceAction -> the TabAdded arm
+            // materializes the backing classic tab), so this is not new
+            // lifecycle code — just a new entry point into it.
+            if (const auto newWsButton = FindName(L"NewWorkspaceButton").try_as<MUX::Controls::SplitButton>())
+            {
+                newWsButton.Click([weakThis{ get_weak() }](auto&&, auto&&) {
+                    if (auto page{ weakThis.get() })
+                    {
+                        page->_createNewWorkspace(std::nullopt);
+                    }
+                });
+                newWsButton.Flyout(_buildNewItemFlyout([weakThis{ get_weak() }](NewTerminalArgs args) {
+                    if (auto page{ weakThis.get() })
+                    {
+                        page->_createWorkspaceFromArgs(args);
+                    }
+                }));
+            }
+
             uint32_t index = 0;
             if (Root().Children().IndexOf(chrome, index))
             {
@@ -6488,79 +6630,793 @@ namespace winrt::TerminalApp::implementation
 
         // Realize the sidebar and make its column take width. Flag-off it
         // stays x:Load="False" / Collapsed, so the Auto column is zero-width.
-        _workspaceSidebar = FindName(L"WorkspaceSidebar").try_as<Controls::StackPanel>();
+        _workspaceSidebar = FindName(L"WorkspaceSidebar").try_as<Controls::ItemsControl>();
         if (_workspaceSidebar)
         {
             _workspaceSidebar.Visibility(Visibility::Visible);
-        }
-    }
+            // Bind the observable collection once; from here the sidebar is a
+            // pure projection — only the by-id view-model mutators below touch
+            // it, and the DataTemplate re-renders each row from its bindings.
+            _workspaceSidebar.ItemsSource(_workspaceViewModels);
 
-    // Append one read-only sidebar row for a newly-added workspace, in
-    // declared order (WorkspaceAdded arrives in diff Phase 1, i.e. before any
-    // ActiveWorkspaceChanged, and in workspace display order). The row stores
-    // its WorkspaceId on the TextBlock Tag so the active-row highlight resolves
-    // by id identity rather than positional index. Read-only: the TextBlock has
-    // no input handlers, so a click does nothing and never mutates the model.
-    void TerminalPage::_addWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws, const std::string& name)
-    {
-        if (!_workspaceSidebar || !ws.valid())
-        {
-            return;
-        }
-
-        auto row = Controls::TextBlock{};
-        row.Text(winrt::hstring{ til::u8u16(name.empty() ? std::string{ "Workspace" } : name) });
-        row.Padding(Thickness{ 12, 8, 12, 8 });
-        row.TextTrimming(TextTrimming::CharacterEllipsis);
-        // Stash the stable WorkspaceId so the active-row highlight + removal can
-        // resolve this row by id, not by slot.
-        row.Tag(winrt::box_value(static_cast<uint64_t>(ws.v)));
-        _workspaceSidebar.Children().Append(row);
-    }
-
-    // Remove the sidebar row that backs a removed workspace, located by its
-    // stored WorkspaceId (id identity, not positional).
-    void TerminalPage::_removeWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId ws)
-    {
-        if (!_workspaceSidebar || !ws.valid())
-        {
-            return;
-        }
-        const auto children = _workspaceSidebar.Children();
-        for (uint32_t i = 0; i < children.Size(); ++i)
-        {
-            if (const auto tb = children.GetAt(i).try_as<Controls::TextBlock>())
+            // Seed a view-model for any workspace that already exists in the
+            // model. The live WorkspaceAdded arm only appends once the shell is
+            // initialized, so a workspace created before realization would
+            // otherwise have no row. The model is the source of truth, so
+            // re-project its current workspaces here in declared order.
+            if (_workspaceModelState)
             {
-                if (const auto boxed = tb.Tag().try_as<uint64_t>(); boxed && *boxed == ws.v)
+                for (const auto& ws : _workspaceModelState->workspaces_view())
                 {
-                    children.RemoveAt(i);
-                    return;
+                    _addWorkspaceVm(ws.id, ws.name, ws.color, ws.pinned);
                 }
             }
         }
+
+        // Big-flip Slice B (#54): realize the (collapsed) content host that
+        // sits inside TabContent behind the classic content. It is
+        // x:Load="False" so the flag-off path never realizes it; here on the
+        // flag-on path we materialize it via FindName, exactly like the
+        // sidebar/chrome above. We do NOT change its Visibility — it stays
+        // Collapsed this slice, so the user keeps seeing only the classic
+        // _tabContent display. _attachContentToWorkspaceHost parents the active
+        // workspace's content into it.
+        _workspaceContentHost = FindName(L"WorkspaceContentHost").try_as<Controls::Grid>();
+
+        // Big-flip Slice C (#54): realize the (invisible) per-leaf tab strip
+        // that lives INSIDE the collapsed WorkspaceContentHost. It is
+        // x:Load="False" so the flag-off path never realizes it; here on the
+        // flag-on path we materialize it via FindName like the host above. Its
+        // ItemsSource is bound to the active leaf's strip collection. We do NOT
+        // touch its visibility or the host's — both stay Collapsed this slice,
+        // so the strip is invisible and the classic tab stays the only thing on
+        // screen. Selecting WHICH leaf's collection to show, and wiring the
+        // visible row/close/+ triggers, is deferred to Slice F.
+        _paneTabStrip = FindName(L"PaneTabStrip").try_as<Controls::ListView>();
+
+        // Big-flip Slice D (#54): realize the (invisible) projected-pane-tree
+        // container that lives in the host's star row. It is x:Load="False" so
+        // the flag-off path never realizes it; here on the flag-on path we
+        // materialize it via FindName like the strip/host above. The split arms
+        // rebuild its single child from the active workspace's model pane tree.
+        // It stays inside the Collapsed host, so this changes nothing visible
+        // this slice — the classic Pane tree remains the displayed split.
+        _workspacePaneTreeRoot = FindName(L"WorkspacePaneTreeRoot").try_as<Controls::Grid>();
     }
 
-    // Highlight the sidebar row whose stored WorkspaceId matches the newly
-    // active workspace, clearing the highlight from the others. Resolution is
-    // by id identity (the S1-resolver philosophy): we never index the workspace
-    // list positionally to find the active row.
-    void TerminalPage::_highlightActiveWorkspaceSidebarRow(::WorkspaceModel::WorkspaceId active)
+    // Big-flip Slice B (#54): parent `content`'s GetRoot() into the collapsed
+    // WorkspaceContentHost as its SOLE child. The host shares TabContent's cell
+    // with the classic content, but it is Collapsed, so this changes nothing
+    // visible — the classic _tabContent swap still owns the display this slice.
+    //
+    // The classic _UpdatedSelectedTab swap does _tabContent.Children().Clear()
+    // then appends the selected tab's content; that Clear() also drops THIS
+    // host from _tabContent. So we re-append the host into _tabContent when it
+    // has been cleared away before attaching, restoring the plumbing the
+    // classic swap removed without touching the classic swap itself.
+    //
+    // Reparenting a FrameworkElement that still has a parent throws ("element
+    // is already the child of another element"); we clear the host's children
+    // first so a re-attach of the same or a different root is always safe.
+    void TerminalPage::_attachContentToWorkspaceHost(const winrt::TerminalApp::IPaneContent& content)
     {
-        if (!_workspaceSidebar)
+        if (!_workspaceContentHost || !_tabContent || !content)
         {
             return;
         }
-        const auto children = _workspaceSidebar.Children();
-        for (const auto& child : children)
+
+        const auto root = content.GetRoot();
+        if (!root)
         {
-            if (const auto tb = child.try_as<Controls::TextBlock>())
+            return;
+        }
+
+        // The classic swap (_UpdatedSelectedTab) clears _tabContent's children,
+        // which removes the host. Re-append it (after the classic content) so
+        // the host is back in the tree before we parent content into it. Being
+        // Collapsed, its position after the classic content does not occlude.
+        uint32_t hostIndex = 0;
+        if (!_tabContent.Children().IndexOf(_workspaceContentHost, hostIndex))
+        {
+            _tabContent.Children().Append(_workspaceContentHost);
+        }
+
+        // Clear first to release any prior parent claim on `root`, then parent
+        // it as the host's sole child.
+        _workspaceContentHost.Children().Clear();
+        _workspaceContentHost.Children().Append(root);
+    }
+
+    winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_workspaceHostChildForTest() const
+    {
+        if (!_workspaceContentHost || _workspaceContentHost.Children().Size() == 0)
+        {
+            return nullptr;
+        }
+        return _workspaceContentHost.Children().GetAt(0).try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
+    }
+
+    // Create a new workspace. nullopt profile -> the default profile; otherwise
+    // the workspace's initial tab uses the given profile. Flag-on only. Mirrors
+    // the _HandleNewTab flag-on dispatch: a workspace is the Phase-1 unit that
+    // materializes one classic backing tab through the TabAdded arm.
+    void TerminalPage::_createNewWorkspace(std::optional<winrt::guid> profile)
+    {
+        if (!_workspacesFlagEnabled())
+        {
+            return;
+        }
+
+        ::WorkspaceModel::TerminalSpec spec{};
+        if (profile)
+        {
+            const auto g = *profile;
+            std::memcpy(spec.profile.data(), &g, sizeof(g));
+        }
+
+        auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState,
+                                                      std::string{},
+                                                      ::WorkspaceModel::TabContent{ spec });
+        _applyWorkspaceAction(std::move(created.state));
+    }
+
+    // Bridge from the shared new-item dropdown's profile callback to the
+    // workspace create path. Resolves the chosen NewTerminalArgs to a concrete
+    // profile (so "remaining/match" collection entries and explicit profile
+    // entries both land on the right profile) and creates a workspace whose
+    // initial tab uses it; falls back to the default-profile workspace when no
+    // profile resolves.
+    void TerminalPage::_createWorkspaceFromArgs(NewTerminalArgs args)
+    {
+        const auto profile{ _settings.GetProfileForArgs(args) };
+        if (profile)
+        {
+            _createNewWorkspace(profile.Guid());
+        }
+        else
+        {
+            _createNewWorkspace(std::nullopt);
+        }
+    }
+
+    // Translate a model Color (optional, RGBA) to a winrt::Windows::UI::Color.
+    // Returns Transparent when unset; the row's HasColor flag is what actually
+    // gates the swatch's visibility, so the value here is only meaningful when
+    // HasColor is true.
+    static winrt::Windows::UI::Color _toWinrtColor(const std::optional<::WorkspaceModel::Color>& color)
+    {
+        if (!color)
+        {
+            return Windows::UI::Colors::Transparent();
+        }
+        return winrt::Windows::UI::Color{ color->a, color->r, color->g, color->b };
+    }
+
+    // The inverse of _toWinrtColor: a winrt Color (ARGB) to the model's RGBA
+    // Color. Used by the row color-picker handler before dispatching
+    // setWorkspaceColor.
+    static ::WorkspaceModel::Color _toModelColor(const winrt::Windows::UI::Color& color) noexcept
+    {
+        return ::WorkspaceModel::Color{ color.R, color.G, color.B, color.A };
+    }
+
+    // Append one view-model for a newly-added workspace, in declared order
+    // (WorkspaceAdded arrives in diff Phase 1, before any ActiveWorkspaceChanged,
+    // and in workspace display order). The view-model carries its stable
+    // WorkspaceId.v as Id, so the active highlight, removal, and metadata update
+    // resolve by id identity rather than positional index. New rows start
+    // inactive; the ActiveWorkspaceChanged arm flips IsActive.
+    void TerminalPage::_addWorkspaceVm(::WorkspaceModel::WorkspaceId ws, const std::string& name, const std::optional<::WorkspaceModel::Color>& color, bool pinned)
+    {
+        if (!ws.valid())
+        {
+            return;
+        }
+
+        winrt::TerminalApp::WorkspaceViewModel vm{};
+        vm.Id(ws.v);
+        vm.Title(winrt::hstring{ til::u8u16(name.empty() ? std::string{ "Workspace" } : name) });
+        vm.HasColor(color.has_value());
+        vm.Color(_toWinrtColor(color));
+        vm.IsPinned(pinned);
+        vm.IsActive(false);
+
+        // Subscribe to the row's intent signals (#52, Stage 3a). The VM never
+        // touches the model; it raises these and the page dispatches the model
+        // action, so the resulting diff re-projects the row (the
+        // WorkspaceMetadataUpdated arm calls _updateWorkspaceVm). We capture the
+        // page weakly; the sender VM carries its stable Id so we resolve the
+        // WorkspaceId from the event args rather than the captured local. These
+        // run on the UI thread.
+        vm.RenameCommitted([weakThis = get_weak()](const winrt::TerminalApp::WorkspaceViewModel& sender, const winrt::hstring& newName) {
+            auto page{ weakThis.get() };
+            if (!page)
             {
-                const auto boxed = tb.Tag().try_as<uint64_t>();
-                const bool isActive = active.valid() && boxed && *boxed == active.v;
-                tb.FontWeight(isActive ? Windows::UI::Text::FontWeights::Bold()
-                                       : Windows::UI::Text::FontWeights::Normal());
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::WorkspaceId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            auto newState = ::WorkspaceModel::renameWorkspace(page->_workspaceModelState, id, winrt::to_string(newName));
+            page->_applyWorkspaceAction(std::move(newState));
+        });
+
+        vm.PinToggleRequested([weakThis = get_weak()](const winrt::TerminalApp::WorkspaceViewModel& sender, bool desired) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::WorkspaceId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            auto newState = ::WorkspaceModel::setWorkspacePinned(page->_workspaceModelState, id, desired);
+            page->_applyWorkspaceAction(std::move(newState));
+        });
+
+        // Color picker (#52, Stage 3b). The VM owns/shows the picker (view
+        // layer) and raises ColorCommitted with the chosen color, or a null
+        // IReference to clear it. We map that to setWorkspaceColor(value) /
+        // setWorkspaceColor(std::nullopt); the WorkspaceMetadataUpdated diff arm
+        // re-projects the swatch.
+        vm.ColorCommitted([weakThis = get_weak()](const winrt::TerminalApp::WorkspaceViewModel& sender, const winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>& color) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::WorkspaceId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            std::optional<::WorkspaceModel::Color> colorOpt{ std::nullopt };
+            if (color)
+            {
+                colorOpt = _toModelColor(color.Value());
+            }
+            auto newState = ::WorkspaceModel::setWorkspaceColor(page->_workspaceModelState, id, colorOpt);
+            page->_applyWorkspaceAction(std::move(newState));
+        });
+
+        // Single-tap activation (#52, Stage 3c). The row raises ActivateRequested
+        // (the args carry no payload — the workspace is resolved from the
+        // sender's stable Id). We dispatch switchToWorkspace; the resulting
+        // ActiveWorkspaceChanged diff arm flips the active highlight
+        // (_setActiveWorkspaceVm) and selects the workspace's classic tab
+        // (_SelectTab). Activating the already-active workspace is a harmless
+        // no-op (switchToWorkspace re-finalizes; the diff emits at most a no-op
+        // ActiveWorkspaceChanged for the unchanged id).
+        vm.ActivateRequested([weakThis = get_weak()](const winrt::TerminalApp::WorkspaceViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::WorkspaceId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            auto next = ::WorkspaceModel::switchToWorkspace(page->_workspaceModelState, id);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
+        _workspaceViewModels.Append(vm);
+    }
+
+    // Remove the view-model that backs a removed workspace, located by its
+    // stored Id (id identity, not positional).
+    void TerminalPage::_removeWorkspaceVm(::WorkspaceModel::WorkspaceId ws)
+    {
+        if (!ws.valid())
+        {
+            return;
+        }
+        for (uint32_t i = 0; i < _workspaceViewModels.Size(); ++i)
+        {
+            if (_workspaceViewModels.GetAt(i).Id() == ws.v)
+            {
+                _workspaceViewModels.RemoveAt(i);
+                return;
             }
         }
+    }
+
+    // Mark the view-model whose Id matches the newly-active workspace active,
+    // clearing IsActive on all others. Resolution is by id identity (the
+    // S1-resolver philosophy): we never index the collection positionally to
+    // find the active row.
+    void TerminalPage::_setActiveWorkspaceVm(::WorkspaceModel::WorkspaceId active)
+    {
+        for (const auto& vm : _workspaceViewModels)
+        {
+            vm.IsActive(active.valid() && vm.Id() == active.v);
+        }
+    }
+
+    // Re-project a surviving workspace's display metadata (name / color / pin)
+    // onto its view-model, located by id identity. The workspace analogue of
+    // _applyTabDecoration; the bound DataTemplate re-renders from the observable
+    // property changes.
+    void TerminalPage::_updateWorkspaceVm(::WorkspaceModel::WorkspaceId ws, const std::string& name, const std::optional<::WorkspaceModel::Color>& color, bool pinned)
+    {
+        if (!ws.valid())
+        {
+            return;
+        }
+        for (const auto& vm : _workspaceViewModels)
+        {
+            if (vm.Id() == ws.v)
+            {
+                vm.Title(winrt::hstring{ til::u8u16(name.empty() ? std::string{ "Workspace" } : name) });
+                vm.HasColor(color.has_value());
+                vm.Color(_toWinrtColor(color));
+                vm.IsPinned(pinned);
+                return;
+            }
+        }
+    }
+
+    // Re-sequence the observable view-model collection to match the model's new
+    // display order (the WorkspaceReordered arm carries the full id-order, e.g.
+    // after a pin floats a workspace). This is a pure projection: we resolve
+    // each id to its EXISTING row view-model (preserving its observable state)
+    // and Move it into place, never rebuilding rows from model data. We perform
+    // a selection-sort of Move operations against the observable vector so the
+    // bound ItemsControl animates each row to its target slot rather than
+    // tearing the list down. Ids in `order` that have no matching row (or
+    // surplus rows not named in `order`) are left untouched — the add/remove
+    // arms own membership; this arm only reorders what already exists.
+    void TerminalPage::_reorderWorkspaceVms(const std::vector<::WorkspaceModel::WorkspaceId>& order)
+    {
+        uint32_t target = 0;
+        for (const auto& id : order)
+        {
+            if (!id.valid())
+            {
+                continue;
+            }
+            // Find the row currently holding this id at or after `target`.
+            uint32_t cur = target;
+            bool found = false;
+            for (; cur < _workspaceViewModels.Size(); ++cur)
+            {
+                if (_workspaceViewModels.GetAt(cur).Id() == id.v)
+                {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+            {
+                continue; // id has no row (membership arms own that) — skip.
+            }
+            if (cur != target)
+            {
+                const auto vm = _workspaceViewModels.GetAt(cur);
+                _workspaceViewModels.RemoveAt(cur);
+                _workspaceViewModels.InsertAt(target, vm);
+            }
+            ++target;
+        }
+    }
+
+    // Big-flip Slice C (#54): resolve (creating on first use) the observable
+    // strip collection for `leaf`. The per-leaf strips are keyed by PaneId;
+    // each holds one PaneTabViewModel per model tab in that leaf, in declared
+    // order. A pure projection store — only the arm-driven helpers below mutate
+    // it.
+    winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>& TerminalPage::_paneTabStripForLeaf(::WorkspaceModel::PaneId leaf)
+    {
+        auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            it = _paneTabStrips.emplace(leaf, winrt::single_threaded_observable_vector<winrt::TerminalApp::PaneTabViewModel>()).first;
+        }
+        return it->second;
+    }
+
+    // Append one strip view-model for a tab projected into `leaf`, in declared
+    // order (TabAdded arrives in diff Phase 1). The view-model carries its
+    // stable TabId.v as Id, so activation / removal resolve by id identity. New
+    // rows start inactive; the ActiveTabChanged arm flips IsActive. This creates
+    // NO classic Tab — the strip VM is the SOLE representation of an additional
+    // leaf tab (the classic Tab for a new workspace's first tab is created by
+    // the TabAdded arm before it calls here). INVISIBLE this slice (host
+    // Collapsed).
+    void TerminalPage::_appendPaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab, const std::string& title)
+    {
+        if (!leaf.valid() || !tab.valid())
+        {
+            return;
+        }
+
+        auto& strip = _paneTabStripForLeaf(leaf);
+
+        // Idempotent: a re-project of an already-present tab id must not
+        // duplicate the row (defensive — the arms emit one TabAdded per new
+        // tab, but keep the projection a set on id).
+        for (const auto& existing : strip)
+        {
+            if (existing.Id() == tab.v)
+            {
+                return;
+            }
+        }
+
+        winrt::TerminalApp::PaneTabViewModel vm{};
+        vm.Id(tab.v);
+        vm.Title(winrt::hstring{ til::u8u16(title.empty() ? std::string{ "Tab" } : title) });
+        vm.IsActive(false);
+
+        // Subscribe to the row's intent signals (Big-flip Slice C, #54). The VM
+        // never touches the model; it raises these and the page dispatches the
+        // model action, so the resulting diff re-projects the strip. We capture
+        // the page weakly; the sender VM carries its stable Id so we resolve the
+        // TabId from the event args. Production wiring of the VISIBLE triggers
+        // (row tap / close affordance) is deferred to Slice F — these
+        // subscriptions stand up the dispatch path now, but no on-screen control
+        // raises them this slice (the strip is invisible in the Collapsed host).
+        vm.ActivateRequested([weakThis = get_weak()](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, id);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
+        vm.CloseRequested([weakThis = get_weak()](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            auto next = ::WorkspaceModel::closeTab(page->_workspaceModelState, id);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
+        strip.Append(vm);
+    }
+
+    // Remove the strip view-model that backs a removed tab, located by its
+    // stored Id (id identity, not positional). A no-op when the leaf has no
+    // strip or the tab isn't projected. Leaves an emptied leaf's (now-empty)
+    // collection in place — leaf-disappearance cleanup is a later slice
+    // (single-leaf scope here); an empty collection projects an empty strip.
+    void TerminalPage::_removePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab)
+    {
+        if (!leaf.valid() || !tab.valid())
+        {
+            return;
+        }
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return;
+        }
+        auto& strip = it->second;
+        for (uint32_t i = 0; i < strip.Size(); ++i)
+        {
+            if (strip.GetAt(i).Id() == tab.v)
+            {
+                strip.RemoveAt(i);
+                return;
+            }
+        }
+    }
+
+    // Mark the strip view-model whose Id matches the newly-active tab active,
+    // clearing IsActive on all others in the SAME leaf. Resolution is by id
+    // identity (the S1-resolver philosophy): we never index the collection
+    // positionally to find the active row. A no-op when the leaf has no strip.
+    void TerminalPage::_setActivePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab)
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return;
+        }
+        for (const auto& vm : it->second)
+        {
+            vm.IsActive(tab.valid() && vm.Id() == tab.v);
+        }
+    }
+
+    // Big-flip Slice C (#54): flip the strip's active row to the tab at model
+    // index `idx` in `leaf`, and return the TabId now made active. The strip
+    // holds one VM per model tab in declared order, so `idx` indexes it
+    // directly; we resolve the target VM's stable Id, then flip IsActive across
+    // the leaf's rows by id identity (so the active highlight is single and
+    // correct). The ListView's SelectedItem follows IsActive via its binding.
+    // Returns an invalid TabId when the leaf has no strip or `idx` is out of
+    // range, so the caller skips the host swap rather than guessing.
+    ::WorkspaceModel::TabId TerminalPage::_activatePaneTabByIndex(::WorkspaceModel::PaneId leaf, std::size_t idx)
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return ::WorkspaceModel::TabId{};
+        }
+        auto& strip = it->second;
+        if (idx >= strip.Size())
+        {
+            return ::WorkspaceModel::TabId{};
+        }
+        const ::WorkspaceModel::TabId active{ strip.GetAt(static_cast<uint32_t>(idx)).Id() };
+        _setActivePaneTabVm(leaf, active);
+        return active;
+    }
+
+    uint32_t TerminalPage::_paneTabStripSizeForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return 0;
+        }
+        return it->second.Size();
+    }
+
+    std::optional<uint64_t> TerminalPage::_activePaneTabIdForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return std::nullopt;
+        }
+        for (const auto& vm : it->second)
+        {
+            if (vm.IsActive())
+            {
+                return vm.Id();
+            }
+        }
+        return std::nullopt;
+    }
+
+    // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane
+    // tree inside the (Collapsed) WorkspacePaneTreeRoot. See the header comment
+    // for the rebuild-vs-incremental rationale; in short we re-derive the whole
+    // active-workspace subtree from the model's `root` (the source of truth) and
+    // REUSE each leaf's existing Slice-C strip collection by PaneId, so the
+    // projection can never diverge from the model and no VM/content is dropped.
+    void TerminalPage::_rebuildActiveWorkspacePaneTree()
+    {
+        if (!_workspacePaneTreeRoot || !_workspaceModelState)
+        {
+            return;
+        }
+
+        const auto activeWsId = _workspaceModelState->activeWorkspaceId_view();
+        if (!activeWsId.has_value())
+        {
+            _workspacePaneTreeRoot.Children().Clear();
+            return;
+        }
+        const auto* ws = _workspaceModelState->workspace(*activeWsId);
+        if (!ws)
+        {
+            _workspacePaneTreeRoot.Children().Clear();
+            return;
+        }
+
+        // Resolve the root pane's id, then project from it. Both LeafPane and
+        // SplitPane carry an `id`, so we read it off the variant.
+        ::WorkspaceModel::PaneId rootId{};
+        if (const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&ws->root))
+        {
+            rootId = leaf->id;
+        }
+        else if (const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&ws->root))
+        {
+            rootId = split->id;
+        }
+
+        _workspacePaneTreeRoot.Children().Clear();
+        if (const auto projected = _projectPaneNode(rootId))
+        {
+            _workspacePaneTreeRoot.Children().Append(projected);
+        }
+    }
+
+    // Project the PaneNode with id `nodeId` (resolved from the model) into a
+    // FrameworkElement, recursing for splits. Each node carries its PaneId.v in
+    // Tag() for id-based resolution. Returns nullptr for an unknown node.
+    winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_projectPaneNode(::WorkspaceModel::PaneId nodeId)
+    {
+        if (!_workspaceModelState || !nodeId.valid())
+        {
+            return nullptr;
+        }
+        const auto* node = _workspaceModelState->pane(nodeId);
+        if (!node)
+        {
+            return nullptr;
+        }
+
+        // A leaf projects to its container (strip over content host).
+        if (std::holds_alternative<::WorkspaceModel::LeafPane>(*node))
+        {
+            return _projectLeafContainer(nodeId);
+        }
+
+        // A split projects to a Grid with exactly two star-sized cells along the
+        // axis, each holding the projected child. We deliberately do NOT add a
+        // draggable GridSplitter this slice: that splitter is a community-toolkit
+        // control not referenced by this project (adding it would touch the
+        // vcxproj, out of scope), it only matters once the host is VISIBLE, and a
+        // third boundary column/row would muddy the clean two-cell ratio
+        // structure D asserts. Slice F — which flips the host visible and retires
+        // the classic split — introduces the real GridSplitter and wires its drag
+        // to the resizePane model action. Until then the classic Pane tree's own
+        // separator is the visible, draggable one.
+        const auto& split = std::get<::WorkspaceModel::SplitPane>(*node);
+
+        Controls::Grid grid{};
+        grid.Tag(winrt::box_value(static_cast<uint64_t>(split.id.v)));
+        grid.HorizontalAlignment(HorizontalAlignment::Stretch);
+        grid.VerticalAlignment(VerticalAlignment::Stretch);
+
+        const double first = split.ratio;
+        const double second = 1.0 - split.ratio;
+
+        ::WorkspaceModel::PaneId leftId{};
+        ::WorkspaceModel::PaneId rightId{};
+        if (split.left)
+        {
+            if (const auto* l = std::get_if<::WorkspaceModel::LeafPane>(split.left.get()))
+            {
+                leftId = l->id;
+            }
+            else
+            {
+                leftId = std::get<::WorkspaceModel::SplitPane>(*split.left).id;
+            }
+        }
+        if (split.right)
+        {
+            if (const auto* r = std::get_if<::WorkspaceModel::LeafPane>(split.right.get()))
+            {
+                rightId = r->id;
+            }
+            else
+            {
+                rightId = std::get<::WorkspaceModel::SplitPane>(*split.right).id;
+            }
+        }
+
+        const auto leftChild = _projectPaneNode(leftId);
+        const auto rightChild = _projectPaneNode(rightId);
+
+        // Vertical axis = a vertical splitter between two side-by-side children
+        // (two columns); Horizontal axis = two stacked children (two rows). The
+        // star VALUES carry the model ratio so a test reads the ratio straight
+        // out of the GridLength without any laid-out geometry.
+        if (split.axis == ::WorkspaceModel::Axis::Vertical)
+        {
+            auto firstCol = Controls::ColumnDefinition{};
+            auto secondCol = Controls::ColumnDefinition{};
+            firstCol.Width(GridLengthHelper::FromValueAndType(first, GridUnitType::Star));
+            secondCol.Width(GridLengthHelper::FromValueAndType(second, GridUnitType::Star));
+            grid.ColumnDefinitions().Append(firstCol);
+            grid.ColumnDefinitions().Append(secondCol);
+
+            if (leftChild)
+            {
+                Controls::Grid::SetColumn(leftChild, 0);
+                grid.Children().Append(leftChild);
+            }
+            if (rightChild)
+            {
+                Controls::Grid::SetColumn(rightChild, 1);
+                grid.Children().Append(rightChild);
+            }
+        }
+        else
+        {
+            auto firstRow = Controls::RowDefinition{};
+            auto secondRow = Controls::RowDefinition{};
+            firstRow.Height(GridLengthHelper::FromValueAndType(first, GridUnitType::Star));
+            secondRow.Height(GridLengthHelper::FromValueAndType(second, GridUnitType::Star));
+            grid.RowDefinitions().Append(firstRow);
+            grid.RowDefinitions().Append(secondRow);
+
+            if (leftChild)
+            {
+                Controls::Grid::SetRow(leftChild, 0);
+                grid.Children().Append(leftChild);
+            }
+            if (rightChild)
+            {
+                Controls::Grid::SetRow(rightChild, 1);
+                grid.Children().Append(rightChild);
+            }
+        }
+
+        return grid;
+    }
+
+    // Build a leaf container for `leaf`: a Grid tagged with the leaf's id holding
+    // a per-leaf strip ListView whose ItemsSource is that leaf's REUSED Slice-C
+    // strip collection (so the split-sibling leaves' strips — which Slice C
+    // skipped — are now projected). The leaf's live content host attach is a
+    // Slice F concern (only one content host exists today; per-leaf content
+    // reparenting lands with the multi-content attach F owns), so this slice
+    // builds the strip surface only.
+    winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_projectLeafContainer(::WorkspaceModel::PaneId leaf)
+    {
+        Controls::Grid container{};
+        container.Tag(winrt::box_value(static_cast<uint64_t>(leaf.v)));
+        container.HorizontalAlignment(HorizontalAlignment::Stretch);
+        container.VerticalAlignment(VerticalAlignment::Stretch);
+
+        auto firstRow = Controls::RowDefinition{};
+        firstRow.Height(GridLengthHelper::Auto());
+        auto secondRow = Controls::RowDefinition{};
+        secondRow.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+        container.RowDefinitions().Append(firstRow);
+        container.RowDefinitions().Append(secondRow);
+
+        // The per-leaf strip ListView, bound to the leaf's reused Slice-C
+        // collection. _paneTabStripForLeaf creates the collection on first use,
+        // so a freshly-split sibling leaf (whose strip the TabAdded arm now
+        // appends) projects its row here. Invisible (the host is Collapsed).
+        Controls::ListView strip{};
+        strip.ItemsSource(_paneTabStripForLeaf(leaf));
+        Controls::Grid::SetRow(strip, 0);
+        container.Children().Append(strip);
+
+        return container;
+    }
+
+    winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_workspacePaneTreeRootChildForTest() const
+    {
+        if (!_workspacePaneTreeRoot || _workspacePaneTreeRoot.Children().Size() == 0)
+        {
+            return nullptr;
+        }
+        return _workspacePaneTreeRoot.Children().GetAt(0).try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
     }
 
 }

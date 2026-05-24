@@ -197,6 +197,8 @@ namespace WorkspaceModelUnitTests
             case Violation::ActiveWorkspaceIdInvalid: s = "ActiveWorkspaceIdInvalid"; break;
             case Violation::MruNotPermutationOfWorkspaces: s = "MruNotPermutationOfWorkspaces"; break;
             case Violation::DuplicateContentIdMount: s = "DuplicateContentIdMount"; break;
+            case Violation::ActiveContentNotMounted: s = "ActiveContentNotMounted"; break;
+            case Violation::PinnedNotContiguous: s = "PinnedNotContiguous"; break;
             }
             return Json::Value(s);
         }
@@ -213,6 +215,8 @@ namespace WorkspaceModelUnitTests
             if (s == "ActiveWorkspaceIdInvalid") return Violation::ActiveWorkspaceIdInvalid;
             if (s == "MruNotPermutationOfWorkspaces") return Violation::MruNotPermutationOfWorkspaces;
             if (s == "DuplicateContentIdMount") return Violation::DuplicateContentIdMount;
+            if (s == "ActiveContentNotMounted") return Violation::ActiveContentNotMounted;
+            if (s == "PinnedNotContiguous") return Violation::PinnedNotContiguous;
             return std::nullopt;
         }
     } // namespace

@@ -6,7 +6,7 @@
 // change by mutating its target representation (XAML, in production; an
 // in-memory recorder in tests).
 //
-// The 14 arms describe state transitions in the past tense — they are
+// The 16 arms describe state transitions in the past tense — they are
 // events the view observes, not commands applied to a reducer. Field
 // types mirror the model's own types (e.g. names are `std::string`,
 // colors are `WorkspaceModel::Color`) so the `WorkspaceModel` lib
@@ -21,6 +21,7 @@
 #include <optional>
 #include <string>
 #include <variant>
+#include <vector>
 
 #include "Ids.h"
 #include "PaneTree.h"
@@ -37,12 +38,17 @@ namespace WorkspaceModel
         WorkspaceId id{};
         std::string name{};
         std::optional<Color> color{};
+        bool pinned{ false };
         // The arm carries the workspace's stable id only; the view resolves
         // the display/insertion position from that id through its own
         // id->XAML resolver at apply time. (Phase 1 had a `position`
         // display-index here, but "workspace display index == classic tab
         // index" is a Phase-1-only invariant that breaks once multi-
         // workspace / per-pane tabs land — see #44/#45.)
+        //
+        // name/color/pinned are the workspace's initial render metadata; a
+        // later mutation to any of them while the workspace persists is
+        // carried by WorkspaceMetadataUpdated.
 
         [[nodiscard]] friend bool operator==(const WorkspaceAdded&, const WorkspaceAdded&) noexcept = default;
     };
@@ -64,6 +70,37 @@ namespace WorkspaceModel
         std::optional<WorkspaceId> id{};
 
         [[nodiscard]] friend bool operator==(const ActiveWorkspaceChanged&, const ActiveWorkspaceChanged&) noexcept = default;
+    };
+
+    // A surviving workspace's display metadata (name / color / pin) changed.
+    // The workspace analogue of TabDecorationUpdated: the view resolves `id`
+    // to its sidebar row through its own id->XAML resolver and re-renders.
+    struct WorkspaceMetadataUpdated
+    {
+        WorkspaceId id{};
+        std::string name{};
+        std::optional<Color> color{};
+        bool pinned{ false };
+        [[nodiscard]] friend bool operator==(const WorkspaceMetadataUpdated&, const WorkspaceMetadataUpdated&) noexcept = default;
+    };
+
+    // The sidebar display order of the (surviving) workspaces changed. Carries
+    // the FULL new display order as a list of stable WorkspaceIds — the view
+    // re-sequences its sidebar rows to match, resolving each id to its row.
+    //
+    // Carrying the whole order (rather than a single move) keeps the arm
+    // self-describing and order-agnostic: the view never has to reconstruct the
+    // target order from a delta, and the model never has to commit to a
+    // particular move encoding. It is emitted whenever the relative order of
+    // the ids common to (prev, next) differs — e.g. pinning a workspace floats
+    // it within the list. A pin therefore produces BOTH a
+    // WorkspaceMetadataUpdated (the pin glyph/bool, in place) AND a
+    // WorkspaceReordered (the new sequence); the two are orthogonal — one
+    // re-renders a row, the other moves rows.
+    struct WorkspaceReordered
+    {
+        std::vector<WorkspaceId> order{};
+        [[nodiscard]] friend bool operator==(const WorkspaceReordered&, const WorkspaceReordered&) noexcept = default;
     };
 
     // ---------------------------------------------------------------------
@@ -203,12 +240,23 @@ namespace WorkspaceModel
         TabId tabId{};
         ContentId contentId{};
         TabContent description{};
+        // The stable id of the workspace that owns the mounted tab. diff()
+        // resolves it from the tab's leaf the same way the decoration path
+        // does. The view records a workspace->contents reverse index from
+        // this so apply(WorkspaceRemoved) can tear down — and thus drop the
+        // ConPTY of — every content a whole-workspace close orphans (a
+        // whole-workspace close emits WorkspaceRemoved, not per-tab
+        // TabRemoved/ContentUnmounted, so without this the factory-built
+        // content would leak until the window exits). Appended (not inserted)
+        // so existing hand-built ContentMounted positions stay valid.
+        WorkspaceId owningWorkspace{};
 
         [[nodiscard]] friend bool operator==(const ContentMounted& lhs, const ContentMounted& rhs) noexcept
         {
             return lhs.tabId == rhs.tabId &&
                    lhs.contentId == rhs.contentId &&
-                   lhs.description == rhs.description;
+                   lhs.description == rhs.description &&
+                   lhs.owningWorkspace == rhs.owningWorkspace;
         }
     };
 
@@ -247,6 +295,8 @@ namespace WorkspaceModel
         WorkspaceAdded,
         WorkspaceRemoved,
         ActiveWorkspaceChanged,
+        WorkspaceMetadataUpdated,
+        WorkspaceReordered,
         LeafPaneCreated,
         SplitPaneCreated,
         SplitPaneCollapsed,

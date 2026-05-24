@@ -157,6 +157,11 @@ namespace WorkspaceModelUnitTests
         TEST_METHOD(TabMoved_SameLeafReorder);
         TEST_METHOD(ActiveTabChanged_SurvivingLeaf);
         TEST_METHOD(ContentMounted_FirstMount);
+        // Big-flip Slice E (#54): the ContentMounted arm now carries the
+        // owning workspace's stable id (resolved from the tab's leaf the same
+        // way the decoration path does) so the view can build a
+        // workspace->contents reverse index for whole-workspace-close teardown.
+        TEST_METHOD(Diff_ContentMounted_CarriesOwningWorkspace);
         TEST_METHOD(ContentUnmounted_OnTabRemove);
         // Phase 2 Slice 3 (#47): a workspace-switch-like prev->next where the
         // newly-active workspace's tab gains a mount (ContentMounted) and the
@@ -165,6 +170,26 @@ namespace WorkspaceModelUnitTests
         // ContentRegistry's mount/keep-alive lifecycle once S4 wires switching.
         TEST_METHOD(WorkspaceSwitch_MountsActive_UnmountsInactive);
         TEST_METHOD(TabDecorationUpdated_TitleChanged);
+
+        // ---- Workspace metadata (#52): a surviving workspace's name / color /
+        //      pin changed; diff projects it as WorkspaceMetadataUpdated. ----
+        TEST_METHOD(WorkspaceMetadataUpdated_Rename);
+        TEST_METHOD(WorkspaceMetadataUpdated_Recolor);
+        TEST_METHOD(WorkspaceMetadataUpdated_Repin);
+        TEST_METHOD(WorkspaceMetadataUpdated_NoOp_EmitsNothing);
+        TEST_METHOD(WorkspaceAdded_CarriesPinned_NotMetadataUpdated);
+
+        // ---- Pinned-float reorder: a surviving workspace's display order
+        //      changed; diff projects it as WorkspaceReordered carrying the
+        //      full new id-order. Pinning floats to the bottom of the pinned
+        //      block; unpinning sinks to the top of the unpinned block. ----
+        TEST_METHOD(Pin_MovesToBottomOfPinnedBlock);
+        TEST_METHOD(Pin_SecondPin_GoesBelowFirstPinned);
+        TEST_METHOD(Unpin_MovesToTopOfUnpinnedBlock);
+        TEST_METHOD(Unpinned_RelativeOrderPreserved);
+        TEST_METHOD(Diff_Pin_EmitsReorderArm);
+        TEST_METHOD(Diff_Reorder_NoOp_EmitsNothing);
+        TEST_METHOD(Diff_AddRemove_DoesNotEmitReorder);
 
         // ---- Enriched-payload coverage (the model->view contract that
         //      replaced WorkspaceView's held state) ----
@@ -194,6 +219,27 @@ namespace WorkspaceModelUnitTests
         // ---- Round-trip smoke tests using actions ----
         TEST_METHOD(Roundtrip_SplitPane_EmitsExpectedShape);
         TEST_METHOD(Roundtrip_NewWorkspace_EmitsExpectedShape);
+
+        // ---- Workspace-switch projection guard (this slice): a pure
+        //      switch is non-structural, so diff() must emit ONLY
+        //      ActiveWorkspaceChanged — never a TabAdded/TabRemoved/
+        //      WorkspaceRemoved that the view could mistake for a
+        //      membership change. The view-level "show only the active
+        //      workspace's tabs" reconcile is keyed off exactly this arm. ----
+        TEST_METHOD(Diff_SwitchToWorkspace_EmitsOnlyActiveWorkspaceChanged);
+        TEST_METHOD(Diff_NewWorkspace_EmitsActiveWorkspaceChangedToNew);
+
+        // ---- Mount policy (Phase 2 Slice 1): actions now materialise the
+        //      active workspace's active content (set TabRecord.mount), so
+        //      the previously-unreachable ContentMounted/ContentUnmounted
+        //      diff arms become reachable from real actions. The contract is
+        //      option I (lifetime mount): a mount is allocated once and never
+        //      reallocated, so a tab's ContentId is stable across switches and
+        //      within-leaf tab switches (no teardown of live content). ----
+        TEST_METHOD(NewWorkspace_ActiveTab_GetsMount);
+        TEST_METHOD(Switch_BetweenMaterialised_MountsNothing);
+        TEST_METHOD(SwitchBack_ReusesSameContentId);
+        TEST_METHOD(SelectTab_WithinLeaf_RemountsSelected);
     };
 
     // =====================================================================
@@ -422,6 +468,51 @@ namespace WorkspaceModelUnitTests
         VERIFY_ARE_EQUAL(ContentId{ 555 }.v, mounts[0].contentId.v);
     }
 
+    void DiffTests::Diff_ContentMounted_CarriesOwningWorkspace()
+    {
+        // Action path: newWorkspace materialises the active tab (sets its
+        // mount), so diff(empty -> new) emits a ContentMounted. That arm must
+        // carry the NEW workspace's stable id as owningWorkspace — the field
+        // the view keys its workspace->contents reverse index off so
+        // apply(WorkspaceRemoved) can tear the content down on a whole-
+        // workspace close.
+        //
+        // RED before Diff resolves it: owningWorkspace is default (zero), not
+        // the workspace id. GREEN after: it equals the workspace's id.
+        auto f = WorkspaceModelUnitTests::makeSingleWorkspace();
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        const auto ops = diff(initial, f.state);
+        const auto mounts = changesOfKind<ContentMounted>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), mounts.size());
+        VERIFY_ARE_EQUAL(f.tabId.v, mounts[0].tabId.v);
+        VERIFY_IS_TRUE(mounts[0].owningWorkspace.valid(),
+                       L"the ContentMounted arm must carry a valid owning workspace id");
+        VERIFY_ARE_EQUAL(f.wsId.v, mounts[0].owningWorkspace.v,
+                         L"owningWorkspace must be the workspace that owns the mounted tab");
+
+        // Hand-built second-workspace variant: the mount appears on the SECOND
+        // workspace's tab, so a diff that mis-attributed the owner to the
+        // first slot would be caught. Mirrors TabAdded_SecondWorkspace_*.
+        auto t200Next = makeTab(200);
+        t200Next.mount = ContentId{ 902 };
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { makeTab(200) }), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+        auto next = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }),
+              makeWs(2, makeLeaf(20, { t200Next }), PaneId{ 20 }) },
+            WorkspaceId{ 1 });
+
+        const auto ops2 = diff(prev, next);
+        const auto mounts2 = changesOfKind<ContentMounted>(ops2);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), mounts2.size());
+        VERIFY_ARE_EQUAL(TabId{ 200 }.v, mounts2[0].tabId.v);
+        VERIFY_ARE_EQUAL(ContentId{ 902 }.v, mounts2[0].contentId.v);
+        VERIFY_ARE_EQUAL(WorkspaceId{ 2 }.v, mounts2[0].owningWorkspace.v,
+                         L"owningWorkspace is the SECOND workspace's id, not the first slot");
+    }
+
     void DiffTests::ContentUnmounted_OnTabRemove()
     {
         auto t100 = makeTab(100);
@@ -445,23 +536,28 @@ namespace WorkspaceModelUnitTests
 
     void DiffTests::WorkspaceSwitch_MountsActive_UnmountsInactive()
     {
-        // Two workspaces. In prev, ws1 is active and its tab is mounted
-        // (ContentId 901); ws2 is inactive and unmounted. A workspace switch
-        // makes ws2 active: the model mounts ws2's content (902) and unmounts
-        // ws1's (901, which becomes detached but — at the ContentRegistry layer
-        // — stays alive). This is the prev->next shape S4 will produce.
+        // Exercises diff()'s mount-op MACHINERY in isolation. This test
+        // hand-builds a prev->next pair of states (it runs NO action) where a
+        // mount appears on one tab and is cleared on another, then asserts diff
+        // emits the matching ContentMounted / ContentUnmounted ops. It is a
+        // unit test of the diff arms, NOT a model of the action-level switch
+        // contract: under the chosen lifetime mount contract (option I) a real
+        // switch NEVER clears a mount (a mount is a stable lifetime id) and
+        // emits only ActiveWorkspaceChanged — see Switch_BetweenMaterialised_
+        // MountsNothing for the actual switch behaviour. The hand-built states
+        // below deliberately violate that contract to drive diff's unmount arm.
         auto ws1TabPrev = makeTab(100);
-        ws1TabPrev.mount = ContentId{ 901 }; // ws1 active+mounted in prev
-        auto ws2TabPrev = makeTab(200); // ws2 inactive, no mount in prev
+        ws1TabPrev.mount = ContentId{ 901 }; // ws1 mounted in prev (hand-built)
+        auto ws2TabPrev = makeTab(200); // ws2 has no mount in prev
 
         auto prev = makeState(
             { makeWs(1, makeLeaf(10, { ws1TabPrev }), PaneId{ 10 }, "alpha"),
               makeWs(2, makeLeaf(20, { ws2TabPrev }), PaneId{ 20 }, "beta") },
             WorkspaceId{ 1 });
 
-        auto ws1TabNext = makeTab(100); // ws1 now inactive: mount cleared
+        auto ws1TabNext = makeTab(100); // mount removed in next (hand-built, to drive diff's unmount arm)
         auto ws2TabNext = makeTab(200);
-        ws2TabNext.mount = ContentId{ 902 }; // ws2 now active+mounted
+        ws2TabNext.mount = ContentId{ 902 }; // ws2 gains a mount in next (hand-built)
 
         auto next = makeState(
             { makeWs(1, makeLeaf(10, { ws1TabNext }), PaneId{ 10 }, "alpha"),
@@ -470,24 +566,24 @@ namespace WorkspaceModelUnitTests
 
         const auto ops = diff(prev, next);
 
-        // The newly-active workspace's content is mounted.
+        // A tab that gained a mount between the two states yields ContentMounted.
         const auto mounts = changesOfKind<ContentMounted>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), mounts.size());
         VERIFY_ARE_EQUAL(TabId{ 200 }.v, mounts[0].tabId.v);
         VERIFY_ARE_EQUAL(ContentId{ 902 }.v, mounts[0].contentId.v);
 
-        // The now-inactive workspace's content is unmounted (NOT removed — the
-        // tab still exists in next, so the registry keeps it alive).
+        // A tab that lost a mount yields ContentUnmounted (NOT removed — the tab
+        // still exists in next, so the registry keeps it alive).
         const auto unmounts = changesOfKind<ContentUnmounted>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), unmounts.size());
         VERIFY_ARE_EQUAL(TabId{ 100 }.v, unmounts[0].tabId.v);
         VERIFY_ARE_EQUAL(ContentId{ 901 }.v, unmounts[0].contentId.v);
 
-        // No tab was removed: both tabs survive the switch, so the unmount is a
-        // keep-alive detach, not a teardown.
+        // No tab was removed: both tabs survive, so the unmount is a keep-alive
+        // detach, not a teardown.
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<TabRemoved>(ops));
 
-        // And the active workspace flips to ws2.
+        // And the active workspace id change yields ActiveWorkspaceChanged(ws2).
         const auto active = changesOfKind<ActiveWorkspaceChanged>(ops);
         VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), active.size());
         VERIFY_IS_TRUE(active[0].id.has_value());
@@ -516,6 +612,236 @@ namespace WorkspaceModelUnitTests
         // Enriched payload: the owning workspace's stable id (workspace 1).
         // The view resolves this to the classic tab; no display index.
         VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, decos[0].workspaceId.v);
+    }
+
+    void DiffTests::WorkspaceMetadataUpdated_Rename()
+    {
+        // A surviving workspace renamed via the renameWorkspace action emits
+        // exactly one WorkspaceMetadataUpdated with the new name; color/pinned
+        // are unchanged and carried at their (default) values.
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "old name") },
+            WorkspaceId{ 1 });
+        auto next = renameWorkspace(prev, WorkspaceId{ 1 }, "new name");
+
+        const auto ops = diff(prev, next);
+        const auto meta = changesOfKind<WorkspaceMetadataUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), meta.size());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, meta[0].id.v);
+        VERIFY_IS_TRUE(meta[0].name == "new name");
+        VERIFY_IS_FALSE(meta[0].color.has_value());
+        VERIFY_IS_FALSE(meta[0].pinned);
+        // A rename is not an add/remove of the workspace.
+        VERIFY_IS_FALSE(containsChange<WorkspaceAdded>(ops));
+    }
+
+    void DiffTests::WorkspaceMetadataUpdated_Recolor()
+    {
+        // setWorkspaceColor emits WorkspaceMetadataUpdated carrying the new
+        // color (and the unchanged name).
+        const Color red{ 200, 30, 30, 0xFF };
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "alpha") },
+            WorkspaceId{ 1 });
+        auto next = setWorkspaceColor(prev, WorkspaceId{ 1 }, red);
+
+        const auto ops = diff(prev, next);
+        const auto meta = changesOfKind<WorkspaceMetadataUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), meta.size());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, meta[0].id.v);
+        VERIFY_IS_TRUE(meta[0].color.has_value());
+        VERIFY_IS_TRUE(*meta[0].color == red);
+        VERIFY_IS_TRUE(meta[0].name == "alpha");
+    }
+
+    void DiffTests::WorkspaceMetadataUpdated_Repin()
+    {
+        // setWorkspacePinned emits WorkspaceMetadataUpdated carrying the new
+        // pinned value.
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "alpha") },
+            WorkspaceId{ 1 });
+        auto next = setWorkspacePinned(prev, WorkspaceId{ 1 }, true);
+
+        const auto ops = diff(prev, next);
+        const auto meta = changesOfKind<WorkspaceMetadataUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), meta.size());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, meta[0].id.v);
+        VERIFY_IS_TRUE(meta[0].pinned);
+    }
+
+    void DiffTests::WorkspaceMetadataUpdated_NoOp_EmitsNothing()
+    {
+        // Identical workspace metadata in prev and next emits no
+        // WorkspaceMetadataUpdated.
+        auto prev = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "alpha") },
+            WorkspaceId{ 1 });
+        auto next = makeState(
+            { makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "alpha") },
+            WorkspaceId{ 1 });
+
+        const auto ops = diff(prev, next);
+        VERIFY_IS_FALSE(containsChange<WorkspaceMetadataUpdated>(ops));
+    }
+
+    void DiffTests::WorkspaceAdded_CarriesPinned_NotMetadataUpdated()
+    {
+        // Creating a workspace is projected as WorkspaceAdded (now carrying
+        // the initial pinned value), NOT WorkspaceMetadataUpdated.
+        auto prev = emptyState();
+        auto pinnedWs = makeWs(1, makeLeaf(10, { makeTab(100) }), PaneId{ 10 }, "alpha");
+        pinnedWs.pinned = true;
+        auto next = makeState({ pinnedWs }, WorkspaceId{ 1 });
+
+        const auto ops = diff(prev, next);
+        const auto adds = changesOfKind<WorkspaceAdded>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), adds.size());
+        VERIFY_ARE_EQUAL(WorkspaceId{ 1 }.v, adds[0].id.v);
+        VERIFY_IS_TRUE(adds[0].pinned);
+        VERIFY_IS_FALSE(containsChange<WorkspaceMetadataUpdated>(ops));
+    }
+
+    // =====================================================================
+    // Pinned-float reorder
+    //
+    // Semantics (user-locked): the display order always satisfies "all pinned
+    // before all unpinned". PIN(x) moves x to the END of the pinned block
+    // (most-recently-pinned at the bottom of that block); UNPIN(x) moves x to
+    // the START of the unpinned block. Unpinned workspaces keep their relative
+    // order; they only shift to accommodate.
+    // =====================================================================
+
+    // Helper: the workspace ids of a state in display order.
+    namespace
+    {
+        std::vector<WorkspaceId> orderOf(const ModelState& s)
+        {
+            std::vector<WorkspaceId> out;
+            for (const auto& ws : s->workspaces)
+            {
+                out.push_back(ws.id);
+            }
+            return out;
+        }
+    }
+
+    void DiffTests::Pin_MovesToBottomOfPinnedBlock()
+    {
+        // workspaces [a(1), b(2), c(3)], all unpinned. Pin c → it lands at the
+        // end of the (empty) pinned block, i.e. the front: [c, a, b].
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+        VERIFY_IS_TRUE((orderOf(c.state) == std::vector<WorkspaceId>{ a.id, b.id, c.id }));
+
+        auto next = setWorkspacePinned(c.state, c.id, true);
+        VERIFY_IS_FALSE(validate(*next).has_value());
+        VERIFY_IS_TRUE((orderOf(next) == std::vector<WorkspaceId>{ c.id, a.id, b.id }));
+        VERIFY_IS_TRUE(next->workspace(c.id)->pinned);
+    }
+
+    void DiffTests::Pin_SecondPin_GoesBelowFirstPinned()
+    {
+        // [a, b, c] unpinned. Pin a → [a, b, c] (a already at the front of an
+        // empty pinned block). Then pin c → c goes BELOW a (most-recently-
+        // pinned at the bottom of the pinned block): [a, c, b].
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+
+        auto s1 = setWorkspacePinned(c.state, a.id, true);
+        VERIFY_IS_FALSE(validate(*s1).has_value());
+        VERIFY_IS_TRUE((orderOf(s1) == std::vector<WorkspaceId>{ a.id, b.id, c.id }));
+
+        auto s2 = setWorkspacePinned(s1, c.id, true);
+        VERIFY_IS_FALSE(validate(*s2).has_value());
+        // a stays at the top of the pinned block; c is the more-recently
+        // pinned, so it sits below a but still before the unpinned b.
+        VERIFY_IS_TRUE((orderOf(s2) == std::vector<WorkspaceId>{ a.id, c.id, b.id }));
+    }
+
+    void DiffTests::Unpin_MovesToTopOfUnpinnedBlock()
+    {
+        // Build [a(pinned), b(pinned), c, d] then unpin a → a sinks to the TOP
+        // of the unpinned block (immediately after the last pinned b):
+        // [b, a, c, d].
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+        auto d = newWorkspace(c.state, "d", termSpec(4));
+        auto p1 = setWorkspacePinned(d.state, a.id, true); // [a, b, c, d]
+        auto p2 = setWorkspacePinned(p1, b.id, true); // a pinned, then b pinned -> [a, b, c, d]
+        VERIFY_IS_TRUE((orderOf(p2) == std::vector<WorkspaceId>{ a.id, b.id, c.id, d.id }));
+
+        auto next = setWorkspacePinned(p2, a.id, false);
+        VERIFY_IS_FALSE(validate(*next).has_value());
+        VERIFY_IS_TRUE((orderOf(next) == std::vector<WorkspaceId>{ b.id, a.id, c.id, d.id }));
+        VERIFY_IS_FALSE(next->workspace(a.id)->pinned);
+    }
+
+    void DiffTests::Unpinned_RelativeOrderPreserved()
+    {
+        // [a, b, c, d] all unpinned. Pin b → [b, a, c, d]: a, c, d keep their
+        // relative order among the unpinned block (a before c before d).
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+        auto d = newWorkspace(c.state, "d", termSpec(4));
+
+        auto next = setWorkspacePinned(d.state, b.id, true);
+        VERIFY_IS_FALSE(validate(*next).has_value());
+        VERIFY_IS_TRUE((orderOf(next) == std::vector<WorkspaceId>{ b.id, a.id, c.id, d.id }));
+    }
+
+    void DiffTests::Diff_Pin_EmitsReorderArm()
+    {
+        // Pinning the 3rd of [a, b, c] changes display order to [c, a, b];
+        // diff emits exactly one WorkspaceReordered carrying that id-order,
+        // AND a WorkspaceMetadataUpdated for the pin glyph/bool.
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+        auto next = setWorkspacePinned(c.state, c.id, true);
+
+        const auto ops = diff(c.state, next);
+        const auto reorders = changesOfKind<WorkspaceReordered>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), reorders.size());
+        VERIFY_IS_TRUE((reorders[0].order == std::vector<WorkspaceId>{ c.id, a.id, b.id }));
+
+        // The pin bool/glyph still rides its own metadata arm.
+        const auto meta = changesOfKind<WorkspaceMetadataUpdated>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), meta.size());
+        VERIFY_ARE_EQUAL(c.id.v, meta[0].id.v);
+        VERIFY_IS_TRUE(meta[0].pinned);
+    }
+
+    void DiffTests::Diff_Reorder_NoOp_EmitsNothing()
+    {
+        // Identical display order in prev and next emits no WorkspaceReordered.
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        const auto ops = diff(b.state, b.state);
+        VERIFY_IS_FALSE(containsChange<WorkspaceReordered>(ops));
+    }
+
+    void DiffTests::Diff_AddRemove_DoesNotEmitReorder()
+    {
+        // Appending a workspace (WorkspaceAdded) does not perturb the relative
+        // order of the surviving ids, so no WorkspaceReordered is emitted.
+        auto a = newWorkspace(emptyModel(), "a", termSpec(1));
+        auto b = newWorkspace(a.state, "b", termSpec(2));
+        const auto opsAdd = diff(a.state, b.state);
+        VERIFY_IS_TRUE(containsChange<WorkspaceAdded>(opsAdd));
+        VERIFY_IS_FALSE(containsChange<WorkspaceReordered>(opsAdd));
+
+        // Removing a workspace likewise leaves the survivors in their relative
+        // order — no spurious reorder.
+        auto c = newWorkspace(b.state, "c", termSpec(3));
+        auto removed = closeWorkspace(c.state, b.id);
+        const auto opsRemove = diff(c.state, removed);
+        VERIFY_IS_TRUE(containsChange<WorkspaceRemoved>(opsRemove));
+        VERIFY_IS_FALSE(containsChange<WorkspaceReordered>(opsRemove));
     }
 
     // =====================================================================
@@ -956,5 +1282,292 @@ namespace WorkspaceModelUnitTests
         VERIFY_IS_TRUE(containsChange<LeafPaneCreated>(ops));
         VERIFY_IS_TRUE(containsChange<TabAdded>(ops));
         VERIFY_IS_TRUE(containsChange<ActiveWorkspaceChanged>(ops));
+    }
+
+    // =====================================================================
+    // Workspace-switch projection guard (this slice)
+    // =====================================================================
+
+    // A pure switch between two existing workspaces is non-structural: no
+    // tab is born or destroyed and no workspace is added or removed. diff()
+    // must therefore emit EXACTLY ONE ActiveWorkspaceChanged carrying the
+    // newly-active id, and nothing else that the view could mistake for a
+    // membership change. The view's "show only the active workspace's tabs"
+    // reconcile keys off this arm alone, so this pins the contract it relies
+    // on: it can hide every other workspace's strip item precisely because a
+    // switch never re-issues a TabAdded for the workspace being shown.
+    void DiffTests::Diff_SwitchToWorkspace_EmitsOnlyActiveWorkspaceChanged()
+    {
+        // Two workspaces; ws1 (id 2) is active. Switch active back to ws0.
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        auto r0 = WorkspaceModel::newWorkspace(initial, "ws0", WorkspaceModelUnitTests::termSpec(1));
+        auto r1 = WorkspaceModel::newWorkspace(r0.state, "ws1", WorkspaceModelUnitTests::termSpec(2));
+
+        // newWorkspace makes the just-created workspace active, so ws1 is
+        // active in `before`. Switching to ws0 is the only change.
+        const auto before = r1.state;
+        const auto after = WorkspaceModel::switchToWorkspace(before, r0.id);
+
+        const auto ops = diff(before, after);
+
+        // Exactly one ActiveWorkspaceChanged, carrying ws0's id.
+        const auto setActive = changesOfKind<ActiveWorkspaceChanged>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), setActive.size());
+        VERIFY_IS_TRUE(setActive[0].id.has_value());
+        VERIFY_ARE_EQUAL(r0.id.v, setActive[0].id->v);
+
+        // A switch is non-structural: nothing that smells like a membership
+        // change may ride along.
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<TabAdded>(ops),
+                         L"a switch must not add a tab");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<TabRemoved>(ops),
+                         L"a switch must not remove a tab");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<TabMoved>(ops),
+                         L"a switch must not move a tab");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<WorkspaceAdded>(ops),
+                         L"a switch must not add a workspace");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<WorkspaceRemoved>(ops),
+                         L"a switch must not remove a workspace");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<LeafPaneCreated>(ops),
+                         L"a switch must not create a leaf");
+
+        // The whole change set is just the single switch.
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), ops.size(),
+                         L"a pure switch is exactly one ActiveWorkspaceChanged");
+    }
+
+    // newWorkspace on a non-empty model is the OTHER path that drives the
+    // switch reconcile: it both materialises a new tab AND makes that new
+    // workspace active. diff() emits the additive arms (WorkspaceAdded ->
+    // ... -> TabAdded) BEFORE the ActiveWorkspaceChanged{newId}, so the
+    // view's TabAdded arm inserts the new strip item first and the trailing
+    // ActiveWorkspaceChanged then hides the previously-active workspace's
+    // item. This pins that phase ordering (additive before active-change).
+    void DiffTests::Diff_NewWorkspace_EmitsActiveWorkspaceChangedToNew()
+    {
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        auto r0 = WorkspaceModel::newWorkspace(initial, "ws0", WorkspaceModelUnitTests::termSpec(1));
+        auto r1 = WorkspaceModel::newWorkspace(r0.state, "ws1", WorkspaceModelUnitTests::termSpec(2));
+
+        const auto ops = diff(r0.state, r1.state);
+
+        // The new workspace, its leaf and its tab are all added, and the
+        // active workspace flips to the new id.
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), countChangesOfKind<WorkspaceAdded>(ops));
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), countChangesOfKind<LeafPaneCreated>(ops));
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), countChangesOfKind<TabAdded>(ops));
+
+        const auto setActive = changesOfKind<ActiveWorkspaceChanged>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), setActive.size());
+        VERIFY_IS_TRUE(setActive[0].id.has_value());
+        VERIFY_ARE_EQUAL(r1.id.v, setActive[0].id->v,
+                         L"newWorkspace makes the new workspace active");
+
+        // Phase ordering the view relies on: every additive arm precedes the
+        // ActiveWorkspaceChanged, so the new strip item exists before the
+        // switch reconcile hides the old one.
+        std::optional<std::size_t> activeIdx;
+        std::size_t lastAdditiveIdx = 0;
+        for (std::size_t i = 0; i < ops.size(); ++i)
+        {
+            if (std::holds_alternative<ActiveWorkspaceChanged>(ops[i]))
+            {
+                activeIdx = i;
+            }
+            else if (std::holds_alternative<WorkspaceAdded>(ops[i]) ||
+                     std::holds_alternative<LeafPaneCreated>(ops[i]) ||
+                     std::holds_alternative<TabAdded>(ops[i]))
+            {
+                lastAdditiveIdx = i;
+            }
+        }
+        VERIFY_IS_TRUE(activeIdx.has_value());
+        VERIFY_IS_TRUE(*activeIdx > lastAdditiveIdx,
+                       L"WorkspaceAdded/TabAdded must precede ActiveWorkspaceChanged");
+    }
+
+    // =====================================================================
+    // Mount policy (Phase 2 Slice 1)
+    // =====================================================================
+
+    namespace
+    {
+        // Resolve a tab's mount across the whole model by walking every
+        // workspace's pane tree. Returns std::nullopt if the tab is unknown
+        // or carries no mount.
+        std::optional<ContentId> mountOf(const ModelState& state, TabId id)
+        {
+            if (!state)
+            {
+                return std::nullopt;
+            }
+            for (const auto& ws : state->workspaces)
+            {
+                std::vector<const LeafPane*> leaves;
+                std::function<void(const PaneNode&)> walk = [&](const PaneNode& n) {
+                    if (const auto* leaf = std::get_if<LeafPane>(&n))
+                    {
+                        leaves.push_back(leaf);
+                        return;
+                    }
+                    const auto& sp = std::get<SplitPane>(n);
+                    if (sp.left)
+                    {
+                        walk(*sp.left);
+                    }
+                    if (sp.right)
+                    {
+                        walk(*sp.right);
+                    }
+                };
+                walk(ws.root);
+                for (const auto* leaf : leaves)
+                {
+                    for (const auto& t : leaf->tabs)
+                    {
+                        if (t.id == id)
+                        {
+                            return t.mount;
+                        }
+                    }
+                }
+            }
+            return std::nullopt;
+        }
+    }
+
+    void DiffTests::NewWorkspace_ActiveTab_GetsMount()
+    {
+        // The mount policy materialises the new (active) workspace's active
+        // tab, so its TabRecord.mount is set right after newWorkspace.
+        auto f = WorkspaceModelUnitTests::makeSingleWorkspace();
+        const auto mount = mountOf(f.state, f.tabId);
+        VERIFY_IS_TRUE(mount.has_value(), L"newWorkspace must materialise the active tab");
+
+        // And diff(empty -> new) emits a ContentMounted for that tab/content.
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        const auto ops = diff(initial, f.state);
+        const auto mounts = changesOfKind<ContentMounted>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), mounts.size());
+        VERIFY_ARE_EQUAL(f.tabId.v, mounts[0].tabId.v);
+        VERIFY_ARE_EQUAL(mount->v, mounts[0].contentId.v);
+    }
+
+    void DiffTests::Switch_BetweenMaterialised_MountsNothing()
+    {
+        // Two workspaces. newWorkspace makes each active in turn and the
+        // policy materialises each at creation, so by the time both exist
+        // both active tabs are already mounted. A switch BACK to ws0 is then
+        // a pure ActiveWorkspaceChanged: under the lifetime mount contract
+        // (option I) content stays alive, so a switch between two
+        // already-materialised workspaces mounts and unmounts NOTHING.
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        auto r0 = WorkspaceModel::newWorkspace(initial, "ws0", WorkspaceModelUnitTests::termSpec(1));
+        auto r1 = WorkspaceModel::newWorkspace(r0.state, "ws1", WorkspaceModelUnitTests::termSpec(2));
+
+        const auto ws0Tab = std::get<LeafPane>(r1.state->workspaces[0].root).tabs[0].id;
+        const auto ws1Tab = std::get<LeafPane>(r1.state->workspaces[1].root).tabs[0].id;
+
+        // Both active tabs are materialised in r1 (ws0 from its creation, ws1
+        // from its creation), and ws1 is active.
+        VERIFY_IS_TRUE(mountOf(r1.state, ws0Tab).has_value());
+        VERIFY_IS_TRUE(mountOf(r1.state, ws1Tab).has_value());
+
+        const auto before = r1.state;
+        const auto after = WorkspaceModel::switchToWorkspace(before, r0.id);
+
+        const auto ops = diff(before, after);
+
+        // Exactly one ActiveWorkspaceChanged carrying ws0; no mount churn,
+        // because both contents were already materialised and option I keeps
+        // them alive across the switch.
+        const auto active = changesOfKind<ActiveWorkspaceChanged>(ops);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), active.size());
+        VERIFY_IS_TRUE(active[0].id.has_value());
+        VERIFY_ARE_EQUAL(r0.id.v, active[0].id->v);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<ContentMounted>(ops),
+                         L"switching to an already-materialised workspace re-mounts nothing");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<ContentUnmounted>(ops),
+                         L"option I keeps the previously-active content alive — no unmount");
+    }
+
+    void DiffTests::SwitchBack_ReusesSameContentId()
+    {
+        // THE load-bearing survival test. Switch away from ws0 and back; the
+        // ContentId on ws0's active tab must be the SAME value both times, so
+        // the view's EnsureMounted resolves the same live content (ConPTY /
+        // scrollback survive). Under option I the mount is allocated once and
+        // never reallocated, so this holds by construction.
+        auto initial = WorkspaceModelUnitTests::emptyModel();
+        auto r0 = WorkspaceModel::newWorkspace(initial, "ws0", WorkspaceModelUnitTests::termSpec(1));
+        auto r1 = WorkspaceModel::newWorkspace(r0.state, "ws1", WorkspaceModelUnitTests::termSpec(2));
+
+        const auto ws0Tab = std::get<LeafPane>(r1.state->workspaces[0].root).tabs[0].id;
+        const auto before = mountOf(r1.state, ws0Tab);
+        VERIFY_IS_TRUE(before.has_value());
+
+        // Switch to ws0, then back to ws1, then back to ws0 again.
+        auto s0 = WorkspaceModel::switchToWorkspace(r1.state, r0.id);
+        const auto whileActive = mountOf(s0, ws0Tab);
+        VERIFY_IS_TRUE(whileActive.has_value());
+        VERIFY_ARE_EQUAL(before->v, whileActive->v, L"mount is stable when ws0 becomes active");
+
+        auto s1 = WorkspaceModel::switchToWorkspace(s0, r1.id);
+        const auto whileInactive = mountOf(s1, ws0Tab);
+        VERIFY_IS_TRUE(whileInactive.has_value(),
+                       L"option I keeps the mount on the now-inactive workspace");
+        VERIFY_ARE_EQUAL(before->v, whileInactive->v);
+
+        auto s2 = WorkspaceModel::switchToWorkspace(s1, r0.id);
+        const auto andBack = mountOf(s2, ws0Tab);
+        VERIFY_IS_TRUE(andBack.has_value());
+        VERIFY_ARE_EQUAL(before->v, andBack->v,
+                         L"ContentId must never change across an unmount->remount cycle");
+
+        // A switch back to an already-materialised workspace emits no
+        // ContentMounted (the view would otherwise build fresh content).
+        const auto ops = diff(s1, s2);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<ContentMounted>(ops),
+                         L"switch-back must not re-mount (would tear down + rebuild content)");
+    }
+
+    void DiffTests::SelectTab_WithinLeaf_RemountsSelected()
+    {
+        // A leaf with two tabs. The active tab is materialised; selecting the
+        // sibling materialises the sibling while the originally-active tab
+        // KEEPS its mount (option I: a leaf may hold multiple materialised
+        // tabs so switching tabs within a pane never tears content down).
+        // Re-selecting the first tab reuses its original ContentId.
+        auto f = WorkspaceModelUnitTests::makeSingleWorkspace();
+        auto added = WorkspaceModel::newTab(f.state, f.wsId, f.leafId,
+                                            WorkspaceModelUnitTests::termSpec(2));
+
+        // After newTab, the new tab is active and materialised; the first tab
+        // retains the mount it got at workspace creation.
+        const auto firstMountInitial = mountOf(added.state, f.tabId);
+        const auto secondMount = mountOf(added.state, added.id);
+        VERIFY_IS_TRUE(firstMountInitial.has_value(), L"first tab keeps its creation mount");
+        VERIFY_IS_TRUE(secondMount.has_value(), L"the newly-active second tab is materialised");
+        VERIFY_IS_FALSE(firstMountInitial->v == secondMount->v,
+                        L"distinct tabs get distinct ContentIds");
+
+        // Select the first tab again. It must reuse its ORIGINAL ContentId.
+        auto selected = WorkspaceModel::selectTab(added.state, f.tabId);
+        const auto firstMountReselected = mountOf(selected, f.tabId);
+        VERIFY_IS_TRUE(firstMountReselected.has_value());
+        VERIFY_ARE_EQUAL(firstMountInitial->v, firstMountReselected->v,
+                         L"re-selecting a tab reuses its stable ContentId");
+
+        // The second tab still carries its mount (kept alive while inactive).
+        const auto secondStill = mountOf(selected, added.id);
+        VERIFY_IS_TRUE(secondStill.has_value());
+        VERIFY_ARE_EQUAL(secondMount->v, secondStill->v);
+
+        // diff(added -> selected) is the within-leaf tab switch: it flips the
+        // leaf's active tab (ActiveTabChanged) but mounts nothing new.
+        const auto ops = diff(added.state, selected);
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), countChangesOfKind<ContentMounted>(ops),
+                         L"a within-leaf tab switch must not re-mount either tab");
+        VERIFY_ARE_EQUAL(static_cast<std::size_t>(1), countChangesOfKind<ActiveTabChanged>(ops));
     }
 }

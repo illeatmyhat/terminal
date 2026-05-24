@@ -116,9 +116,13 @@ namespace WorkspaceModelUnitTests
     void SerializerTests::SingleWorkspace_RoundTrips()
     {
         auto f = makeSingleWorkspace();
+        // The active workspace's active tab is materialised by the mount
+        // policy (a runtime-only lifetime ContentId), and mount is dropped on
+        // serialize, so compare modulo mount — every other field round-trips.
+        const auto cleaned = clearMounts(*f.state);
         const auto j = toJson(*f.state);
         const auto back = fromJson(j);
-        VERIFY_ARE_EQUAL(*f.state, back);
+        VERIFY_ARE_EQUAL(cleaned, back);
     }
 
     void SerializerTests::RichModel_RoundTrips()

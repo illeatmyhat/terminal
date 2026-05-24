@@ -325,7 +325,18 @@ namespace winrt::TerminalApp::implementation
     // (Profile / ProfileIndex) carries a non-default value. Phase 1 only
     // models the profile selector, so any of these overrides means the
     // new tab must take the classic path or the override is silently
-    // dropped. Covers all 11 settable NewTerminalArgs fields.
+    // dropped. Covers 10 of the 11 settable NewTerminalArgs fields;
+    // ReloadEnvironmentVariables is deliberately excluded.
+    //
+    // ReloadEnvironmentVariables is set on essentially every launch by
+    // _getNewTerminalArgs (it is forced true for any no-commandline
+    // launch). For a no-commandline tab its value (true) equals the
+    // default reload behavior, so it is not a meaningful per-tab override
+    // worth dropping to the classic path -- treating it as one routed the
+    // normal startup new-tab through the classic path, leaving the
+    // workspace model (and sidebar) empty. Any launch with a real
+    // commandline still takes the classic path via the Commandline()
+    // check; full fidelity for ReloadEnvironmentVariables is deferred to #48.
     static bool _hasUnmodelledNewTabFields(const NewTerminalArgs& terminalArgs) noexcept
     {
         return !terminalArgs.Commandline().empty() ||
@@ -337,8 +348,7 @@ namespace winrt::TerminalApp::implementation
                terminalArgs.AppendCommandLine() ||
                terminalArgs.SuppressApplicationTitle() != nullptr ||
                !terminalArgs.ColorScheme().empty() ||
-               terminalArgs.Elevate() != nullptr ||
-               terminalArgs.ReloadEnvironmentVariables() != nullptr;
+               terminalArgs.Elevate() != nullptr;
     }
 
     // Detects the "default profile, no extra arguments" shape of a

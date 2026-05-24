@@ -1,0 +1,38 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace TerminalApp
+{
+    [default_interface] runtimeclass PaneTabViewModel : Windows.UI.Xaml.Data.INotifyPropertyChanged
+    {
+        PaneTabViewModel();
+
+        // Stable identity (the model's TabId.v); not observed.
+        UInt64 Id { get; set; };
+
+        // Observable display state. Title drives the row label; IsActive drives
+        // the active-tab highlight / SelectedItem in the strip ListView.
+        String Title { get; set; };
+        Boolean IsActive { get; set; };
+
+        // Intent signals (Big-flip Slice C, #54). The VM NEVER touches the
+        // WorkspaceModel; it raises these so the owning TerminalPage can
+        // dispatch the model action (selectTab / closeTab / newTab) and let the
+        // resulting diff re-project the strip. Production wiring of the visible
+        // triggers (the strip's row tap / close button / +) is deferred to
+        // Slice F, when the strip becomes visible; this slice only builds the
+        // signals + their projection arms.
+        void RequestActivate();
+        void RequestClose();
+
+        // Converter-free x:Bind function-binding helpers, mirroring
+        // WorkspaceViewModel. They re-evaluate whenever their observable input
+        // raises PropertyChanged.
+        static Windows.UI.Text.FontWeight ActiveToFontWeight(Boolean isActive);
+
+        // sender = the VM (carries Id so the page resolves the tab); args =
+        // null (the intent carries no payload beyond Id).
+        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> ActivateRequested;
+        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> CloseRequested;
+    }
+}

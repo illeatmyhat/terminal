@@ -80,8 +80,9 @@
 
             <Button x:Name="WorkspaceHamburgerButton"
                     Grid.Column="0"
-                    Width="40"
-                    Height="36"
+                    Width="32"
+                    Height="24"
+                    VerticalAlignment="Center"
                     Background="Transparent"
                     BorderThickness="0"
                     Content="&#xE700;"
@@ -89,35 +90,142 @@
                     FontSize="14"
                     IsEnabled="False" />
 
+            <!--
+                New-workspace split button. Styled to match the tab strip's
+                NewTabButton (+ | v chevron): the primary button creates a
+                workspace with the default profile, the chevron flyout offers
+                one entry per profile. Click + flyout are wired in code in
+                TerminalPage::_initializeWorkspaceShell.
+            -->
+            <!--
+                Brush overrides + button sizes are hoisted to App.xaml's
+                app-level resources (shared with the tab strip's NewTabButton).
+            -->
             <mux:SplitButton x:Name="NewWorkspaceButton"
                              Grid.Column="1"
-                             Height="32"
+                             Height="24"
                              Margin="4,0,0,0"
+                             Padding="0"
                              VerticalAlignment="Center"
+                             BorderThickness="0"
                              Content="&#xE710;"
                              FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                             FontSize="12"
-                             IsEnabled="False" />
+                             FontSize="12" />
         </Grid>
 
         <!--
-            Read-only workspace sidebar. Lives in the CLIENT area BELOW the
-            titlebar (rows 1-3, column 0), so it never interferes with the
-            custom non-client caption drag area / min-max-close hit-testing.
+            Read-only workspace sidebar (#52, Stage 2). Lives in the CLIENT area
+            BELOW the titlebar (rows 1-3, column 0), so it never interferes with
+            the custom non-client caption drag area / min-max-close hit-testing.
             Collapsed (zero-width Auto column) unless the flag is on; on the
             flag-on path TerminalPage realizes it via FindName, flips Visibility
-            to Visible, and maintains one row per workspace in declared order
-            from the WorkspaceView projection. Read-only this slice: rows are
-            non-interactive TextBlocks.
+            to Visible, and binds its ItemsSource to the observable
+            WorkspaceViewModel collection. The UI is a pure projection of the
+            model: each DataTemplate row re-renders from its OneWay bindings as
+            the change-stream arms mutate the view-models. Read-only this stage:
+            rows carry no input handlers (rename/color/pin triggers land in
+            Stage 3).
         -->
-        <StackPanel x:Name="WorkspaceSidebar"
-                    Grid.Row="1"
-                    Grid.RowSpan="3"
-                    Grid.Column="0"
-                    x:Load="False"
-                    Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
-                    Orientation="Vertical"
-                    Visibility="Collapsed" />
+        <ItemsControl x:Name="WorkspaceSidebar"
+                      Grid.Row="1"
+                      Grid.RowSpan="3"
+                      Grid.Column="0"
+                      MinWidth="220"
+                      x:Load="False"
+                      Background="{ThemeResource ApplicationPageBackgroundThemeBrush}"
+                      Visibility="Collapsed">
+            <!--
+                A bare ItemsControl's generated template is just an
+                ItemsPresenter with no Border, so it never paints its own
+                Background and the sidebar reads through to the acrylic/desktop.
+                Supply an explicit template that fills the control with its
+                Background brush behind the rows.
+            -->
+            <ItemsControl.Template>
+                <ControlTemplate TargetType="ItemsControl">
+                    <Border Background="{TemplateBinding Background}">
+                        <ItemsPresenter />
+                    </Border>
+                </ControlTemplate>
+            </ItemsControl.Template>
+            <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="local:WorkspaceViewModel">
+                    <Grid Padding="12,8,12,8"
+                          Background="{x:Bind local:WorkspaceViewModel.ActiveToRowBrush(IsActive), Mode=OneWay}"
+                          ColumnSpacing="8"
+                          DoubleTapped="{x:Bind BeginRename}"
+                          Loaded="{x:Bind OnRowLoaded}"
+                          Tapped="{x:Bind RequestActivate}">
+                        <!--
+                            Right-click context menu (#52, Stage 3a). x:Bind Click
+                            handlers in a DataTemplate bind to the row's VM, which
+                            raises intent events; the page dispatches the model
+                            action. Literal "Rename"/"Pin"/"Unpin" this slice (no
+                            workspace-specific RS_ resources yet); the Pin label is
+                            dynamic via the PinLabel(IsPinned) static helper.
+                        -->
+                        <Grid.ContextFlyout>
+                            <MenuFlyout>
+                                <MenuFlyoutItem Click="{x:Bind BeginRename}"
+                                                Text="Rename" />
+                                <MenuFlyoutItem Click="{x:Bind TogglePin}"
+                                                Text="{x:Bind local:WorkspaceViewModel.PinLabel(IsPinned), Mode=OneWay}" />
+                                <MenuFlyoutItem Click="{x:Bind ShowColorPicker}"
+                                                Text="Change color&#x2026;">
+                                    <MenuFlyoutItem.Icon>
+                                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                                  Glyph="&#xE790;" />
+                                    </MenuFlyoutItem.Icon>
+                                </MenuFlyoutItem>
+                            </MenuFlyout>
+                        </Grid.ContextFlyout>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <!-- Color swatch: shown only when the workspace has a color. -->
+                        <Border Grid.Column="0"
+                                Width="10"
+                                Height="10"
+                                VerticalAlignment="Center"
+                                Background="{x:Bind mtu:Converters.ColorToBrush(Color), Mode=OneWay}"
+                                CornerRadius="2"
+                                Visibility="{x:Bind local:WorkspaceViewModel.BoolToVisibility(HasColor), Mode=OneWay}" />
+                        <!--
+                            Title TextBlock (shown when NOT editing) vs inline
+                            rename TextBox (shown when IsEditing). The editor is
+                            two-way bound to EditText, focuses + selects-all on
+                            load, commits on Enter / LostFocus, cancels on Escape.
+                        -->
+                        <TextBlock Grid.Column="1"
+                                   VerticalAlignment="Center"
+                                   FontWeight="{x:Bind local:WorkspaceViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
+                                   Text="{x:Bind Title, Mode=OneWay}"
+                                   TextTrimming="CharacterEllipsis"
+                                   Visibility="{x:Bind local:WorkspaceViewModel.InvertedBoolToVisibility(IsEditing), Mode=OneWay}" />
+                        <TextBox Grid.Column="1"
+                                 MinHeight="0"
+                                 Padding="4,2,4,2"
+                                 VerticalAlignment="Center"
+                                 IsSpellCheckEnabled="False"
+                                 KeyDown="{x:Bind OnEditorKeyDown}"
+                                 Loaded="{x:Bind OnEditorLoaded}"
+                                 LostFocus="{x:Bind CommitRename}"
+                                 MaxLength="1024"
+                                 Text="{x:Bind EditText, Mode=TwoWay}"
+                                 Visibility="{x:Bind local:WorkspaceViewModel.BoolToVisibility(IsEditing), Mode=OneWay}" />
+                        <!-- Pin glyph: shown only when the workspace is pinned. -->
+                        <FontIcon Grid.Column="2"
+                                  VerticalAlignment="Center"
+                                  FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                  FontSize="12"
+                                  Glyph="&#xE718;"
+                                  Visibility="{x:Bind local:WorkspaceViewModel.BoolToVisibility(IsPinned), Mode=OneWay}" />
+                    </Grid>
+                </DataTemplate>
+            </ItemsControl.ItemTemplate>
+        </ItemsControl>
 
         <local:TabRowControl x:Name="TabRow"
                              Grid.Row="1"
@@ -164,6 +272,119 @@
             <Grid.Background>
                 <ImageBrush />
             </Grid.Background>
+
+            <!--
+                Big-flip Slice B (#54): the flag-on content host. The
+                ContentRegistry's factory-built IPaneContent for the ACTIVE
+                workspace is parented in here (its GetRoot()), so the
+                attach/swap-on-switch plumbing can be proved structurally
+                BEHIND the still-visible classic tab content. Kept
+                Collapsed this slice — Slice F flips its visibility and
+                retires the classic _tabContent swap. x:Load="False" so the
+                flag-off path never realizes it (byte-for-byte upstream);
+                _initializeWorkspaceShell realizes it via FindName when the
+                flag is on. It shares TabContent's single cell, but Collapsed
+                means it neither renders nor hit-tests, so it cannot occlude
+                the classic content.
+            -->
+            <Grid x:Name="WorkspaceContentHost"
+                  x:Load="False"
+                  HorizontalAlignment="Stretch"
+                  VerticalAlignment="Stretch"
+                  Visibility="Collapsed">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!--
+                    Big-flip Slice C (#54): the per-leaf tab strip — the
+                    invisible projection of a leaf pane's tabs. A ListView (NOT
+                    a MUX TabView: AllowDropTabs + CanReorderTabs crash on
+                    drag-out, GH#mux-tabview-drag) bound to the ACTIVE leaf's
+                    PaneTabViewModel collection; SelectedItem follows IsActive,
+                    a per-row close affordance raises CloseRequested, and the
+                    row's Tapped raises ActivateRequested. The VM never touches
+                    the model; the page dispatches the action and the diff
+                    re-projects the strip.
+
+                    INVISIBLE this slice: the strip is Collapsed AND lives
+                    inside the Collapsed host, so it neither renders nor
+                    hit-tests — the classic tab stays the only thing on screen.
+                    The strip's ItemsSource is bound by the page (active leaf),
+                    and the visible new-tab "+"/keybinding triggers are wired in
+                    Slice F when the strip becomes visible; this slice only
+                    builds the strip + its arm projection.
+                -->
+                <ListView x:Name="PaneTabStrip"
+                          Grid.Row="0"
+                          x:Load="False"
+                          ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                          ScrollViewer.HorizontalScrollMode="Auto"
+                          ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                          ScrollViewer.VerticalScrollMode="Disabled"
+                          SelectionMode="Single"
+                          Visibility="Collapsed">
+                    <ListView.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <StackPanel Orientation="Horizontal" />
+                        </ItemsPanelTemplate>
+                    </ListView.ItemsPanel>
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="local:PaneTabViewModel">
+                            <Grid ColumnSpacing="6"
+                                  Padding="8,4,4,4"
+                                  Tapped="{x:Bind RequestActivate}">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0"
+                                           VerticalAlignment="Center"
+                                           FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
+                                           Text="{x:Bind Title, Mode=OneWay}"
+                                           TextTrimming="CharacterEllipsis" />
+                                <Button Grid.Column="1"
+                                        Width="20"
+                                        Height="20"
+                                        Padding="0"
+                                        VerticalAlignment="Center"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        Click="{x:Bind RequestClose}">
+                                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                              FontSize="10"
+                                              Glyph="&#xE711;" />
+                                </Button>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+
+                <!--
+                    Big-flip Slice D (#54): the projected SPLIT pane tree of the
+                    ACTIVE workspace. The page rebuilds this container's single
+                    child from the active workspace's model pane tree on the
+                    split arms (SplitPaneCreated / SplitPaneCollapsed /
+                    SplitRatioChanged): each SplitPane node becomes a nested Grid
+                    with two star-sized cells (sized from the model ratio) along
+                    the split axis; each LeafPane node becomes a leaf container
+                    holding that leaf's own Slice-C strip (reused by PaneId) over
+                    the leaf's content host. It mirrors the model tree
+                    structurally so the XAML can never diverge from `root`.
+
+                    INVISIBLE this slice: it lives inside the Collapsed host, so
+                    it neither renders nor hit-tests — the classic Pane tree
+                    stays the visible split. Slice F flips the host visible,
+                    retires the classic split, and swaps the placeholder
+                    separators for draggable GridSplitters.
+                -->
+                <Grid x:Name="WorkspacePaneTreeRoot"
+                      Grid.Row="1"
+                      x:Load="False"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch" />
+            </Grid>
         </Grid>
 
         <!--

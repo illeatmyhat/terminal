@@ -195,15 +195,58 @@ namespace WorkspaceModel
     }
 
     // ---------------------------------------------------------------------
+    // Pin/unpin and FLOAT the workspace within the sidebar display order
+    // (invariant 10: all pinned precede all unpinned). The recency semantics
+    // are user-locked:
+    //   PIN(x)   → x.pinned = true,  move x to the END of the pinned block
+    //              (most-recently-pinned sits at the BOTTOM of that block).
+    //   UNPIN(x) → x.pinned = false, move x to the START of the unpinned block
+    //              (immediately after the last pinned; other unpinned shift
+    //              down).
+    // Both reduce to "insert x at the index equal to the number of pinned
+    // workspaces remaining after x is removed" — for a pin that index is the
+    // end of the (now-x-excluded) pinned run; for an unpin x is no longer
+    // pinned so that same index is the front of the unpinned run. Unpinned
+    // workspaces keep their relative order; they only shift to accommodate.
+    // detail::finalize()'s stable-partition normalizer is then a no-op for this
+    // already-correctly-ordered result (it exists to catch free-form reorders).
     ModelState setWorkspacePinned(const ModelState& state, WorkspaceId id, bool pinned)
     {
         auto m = detail::copyOf(state);
-        if (auto* ws = detail::findWorkspace(m, id))
+
+        std::size_t srcIdx = m.workspaces.size();
+        for (std::size_t i = 0; i < m.workspaces.size(); ++i)
         {
-            ws->pinned = pinned;
-            return detail::finalize(std::move(m));
+            if (m.workspaces[i].id == id)
+            {
+                srcIdx = i;
+                break;
+            }
         }
-        return state ? state : detail::finalize(std::move(m));
+        if (srcIdx == m.workspaces.size())
+        {
+            return state ? state : detail::finalize(std::move(m));
+        }
+
+        auto ws = std::move(m.workspaces[srcIdx]);
+        ws.pinned = pinned;
+        m.workspaces.erase(m.workspaces.begin() + static_cast<std::ptrdiff_t>(srcIdx));
+
+        // Insertion point: just past the last pinned workspace in the
+        // remaining (x-excluded) vector. For a PIN this is the bottom of the
+        // pinned block; for an UNPIN it is the top of the unpinned block.
+        std::size_t dstIdx = 0;
+        for (const auto& other : m.workspaces)
+        {
+            if (other.pinned)
+            {
+                ++dstIdx;
+            }
+        }
+        m.workspaces.insert(m.workspaces.begin() + static_cast<std::ptrdiff_t>(dstIdx),
+                            std::move(ws));
+
+        return detail::finalize(std::move(m));
     }
 
     // ---------------------------------------------------------------------

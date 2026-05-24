@@ -79,6 +79,12 @@
     <Midl Include="TerminalTabStatus.idl">
       <Filter>tab</Filter>
     </Midl>
+    <Midl Include="WorkspaceViewModel.idl">
+      <Filter>tab</Filter>
+    </Midl>
+    <Midl Include="PaneTabViewModel.idl">
+      <Filter>tab</Filter>
+    </Midl>
     <Midl Include="PaletteItemTemplateSelector.idl" />
     <Midl Include="Tab.idl" />
     <Midl Include="TerminalWindow.idl" />

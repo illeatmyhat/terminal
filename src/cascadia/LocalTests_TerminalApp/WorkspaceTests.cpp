@@ -3,12 +3,16 @@
 
 #include "pch.h"
 
+#include <cmath>
+
 #include "../TerminalApp/TerminalPage.h"
 #include "../TerminalApp/TerminalWindow.h"
 #include "../TerminalApp/ContentManager.h"
 #include "../TerminalApp/ContentRegistry.h"
 #include "../TerminalApp/BasicPaneEvents.h"
 #include "../TerminalApp/WorkspaceView.h"
+#include "../TerminalApp/WorkspaceViewModel.h"
+#include "../TerminalApp/PaneTabViewModel.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
 #include "../WorkspaceModel/Diff.h"
 #include "../WorkspaceModel/Validator.h"
@@ -76,13 +80,16 @@ namespace TerminalAppLocalTests
 
         // #41: any non-default NewTerminalArgs field (beyond the profile
         // selector) must keep a flag-on new-tab on the classic path.
+        // ReloadEnvironmentVariables is the exception: it is set on nearly
+        // every launch and equals the default reload behavior, so it routes
+        // through the model instead (see method comment / #48).
         TEST_METHOD(NewTab_FlagOn_TabColorField_RoutesClassic);
         TEST_METHOD(NewTab_FlagOn_SessionIdField_RoutesClassic);
         TEST_METHOD(NewTab_FlagOn_AppendCommandLineField_RoutesClassic);
         TEST_METHOD(NewTab_FlagOn_SuppressApplicationTitleField_RoutesClassic);
         TEST_METHOD(NewTab_FlagOn_ColorSchemeField_RoutesClassic);
         TEST_METHOD(NewTab_FlagOn_ElevateField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesClassic);
+        TEST_METHOD(NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesThroughModel);
 
         // Slice 6 review fixes:
         //  - sender-bypass: flag-on rename/color must honour the
@@ -121,6 +128,31 @@ namespace TerminalAppLocalTests
         TEST_METHOD(Sidebar_FlagOn_MirrorsWorkspacesInDeclaredOrder);
         TEST_METHOD(Sidebar_FlagOn_RowIsReadOnly_NoModelMutation);
 
+        // #52, Stage 3a: the row's intent events (RenameCommitted /
+        // PinToggleRequested) route through the page into a model action, and
+        // the resulting WorkspaceMetadataUpdated diff arm re-projects the row.
+        TEST_METHOD(Sidebar_FlagOn_RenameCommit_DispatchesModelAndReProjects);
+        TEST_METHOD(Sidebar_FlagOn_TogglePin_DispatchesModelAndReProjects);
+
+        // #52, Stage 3b: the row's ColorCommitted event routes through the page
+        // into setWorkspaceColor (set with a value / clear with a null
+        // IReference), and the WorkspaceMetadataUpdated diff arm re-projects the
+        // swatch (Color / HasColor).
+        TEST_METHOD(Sidebar_FlagOn_ColorCommit_DispatchesModelAndReProjects);
+
+        // #52, Stage 3c: clicking a sidebar row raises the VM's RequestActivate
+        // intent; the page (subscribed in _addWorkspaceVm) dispatches
+        // switchToWorkspace and the resulting ActiveWorkspaceChanged diff arm
+        // flips the active-row highlight and selects the workspace's classic
+        // tab. The VM never touches the model — it only raises the intent.
+        TEST_METHOD(Sidebar_FlagOn_RowClick_DispatchesSwitchToWorkspace);
+        TEST_METHOD(Sidebar_FlagOn_RowClick_FlipsActiveHighlightById);
+
+        // Pinned-float: pinning a workspace floats it to the bottom of the
+        // pinned block; the WorkspaceReordered diff arm reorders
+        // _workspaceViewModels to match the model's new display order (by id).
+        TEST_METHOD(Sidebar_FlagOn_Pin_ReordersViewModels);
+
         // Phase 2 Slice 3 (#47): the ContentRegistry lifetime contract.
         //  - mount-then-unmount keeps the SAME live IPaneContent instance
         //    alive and resolvable (its ConPTY survives an inactive workspace);
@@ -131,6 +163,54 @@ namespace TerminalAppLocalTests
         //    only way to obtain mountable content is EnsureMounted, which
         //    either resolves an owned id or creates+inserts it.
         TEST_METHOD(ContentRegistry_UnmountKeepsAlive_RemoveTearsDown);
+
+        // Big-flip Slice A (#54): the ContentMounted factory is real, so the
+        // ContentRegistry genuinely owns a live IPaneContent per active tab.
+        // The classic Tab still displays — this slice changes NO display
+        // ownership; it only proves the registry materialises content from the
+        // model's mount policy through the live page factory.
+        TEST_METHOD(BigFlipA_FactoryMaterialisesContentIntoRegistry);
+
+        // Big-flip Slice E (#54): closing a WHOLE workspace tears down its
+        // registry content (drops its ConPTY). A whole-workspace close emits
+        // WorkspaceRemoved — NOT per-tab TabRemoved/ContentUnmounted — so
+        // apply(WorkspaceRemoved) is the only arm that can plug the leak; it
+        // does so via the workspace->contents reverse index. Two workspaces ->
+        // registry Size()==2; close one -> Size()==1, surviving content alive.
+        TEST_METHOD(BigFlipE_WorkspaceClose_RemovesItsContent);
+
+        // Big-flip Slice B (#54): the flag-on content host. A collapsed
+        // WorkspaceContentHost inside TabContent receives the ACTIVE
+        // workspace's factory-built content GetRoot(), proving the
+        // attach/swap-on-switch plumbing BEHIND the still-visible classic tab.
+        // The classic _tabContent display is unchanged (host is Collapsed), so
+        // the user still sees only the classic terminal this slice.
+        TEST_METHOD(BigFlipB_ActiveWorkspaceContentAttachedToHost);
+        TEST_METHOD(BigFlipB_SwitchSwapsHostChild);
+
+        // Big-flip Slice C (#54): the per-leaf MVVM tab strip — the INVISIBLE
+        // projection of a leaf pane's tabs (it lives inside the still-Collapsed
+        // WorkspaceContentHost). Adding a tab to an existing leaf appends a
+        // PaneTabViewModel WITHOUT creating a 2nd classic Tab; ActiveTabChanged
+        // flips the strip's active row and swaps the host child to that tab's
+        // content; TabRemoved removes the strip VM. The classic tab stays the
+        // only visible thing — ZERO visible change this slice.
+        TEST_METHOD(BigFlipC_TabAdded_AppendsStripVm);
+        TEST_METHOD(BigFlipC_ActiveTabChanged_FlipsSelectionAndSwapsHostChild);
+        TEST_METHOD(BigFlipC_TabRemoved_RemovesStripVm);
+
+        // Big-flip Slice D (#54): the active workspace's SPLIT pane tree is
+        // projected into nested XAML inside the still-Collapsed
+        // WorkspaceContentHost — a split Grid (two star-sized cells along the
+        // axis) per SplitPane, a leaf container (carrying that leaf's Slice-C
+        // strip) per LeafPane. A split builds the nested containers; a ratio
+        // change updates the split Grid's star sizes; collapsing a child lifts
+        // the surviving leaf back to a single container. Structure/ratio are
+        // asserted (NOT laid-out pixel widths). The classic split stays the
+        // visible one — ZERO visible change this slice.
+        TEST_METHOD(BigFlipD_Split_BuildsNestedContainers);
+        TEST_METHOD(BigFlipD_SplitRatio_SetsStarSizes);
+        TEST_METHOD(BigFlipD_Collapse_LiftsSurvivor);
 
         TEST_CLASS_SETUP(ClassSetup)
         {
@@ -143,8 +223,14 @@ namespace TerminalAppLocalTests
         }
 
     private:
+        // `beforeCreate`, when set, runs on the UI thread AFTER the page is
+        // constructed and _settings is assigned but BEFORE Create() and the
+        // startup-replay dispatch. Big-flip Slice B (#54) uses it to install
+        // the test-only content-factory override so the startup mount builds a
+        // MockPaneContent (known root) instead of a real TermControl.
         void _initializeTerminalPageWithFlagOn(winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage>& page,
-                                               CascadiaSettings initialSettings);
+                                               CascadiaSettings initialSettings,
+                                               std::function<void(winrt::TerminalApp::implementation::TerminalPage*)> beforeCreate = nullptr);
         void _initializeTerminalPageWithFlagOff(winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage>& page,
                                                 CascadiaSettings initialSettings);
 
@@ -165,7 +251,8 @@ namespace TerminalAppLocalTests
     // routes the startup NewTab action through WorkspaceActions ->
     // diff -> WorkspaceView -> _openDefaultTabForWorkspace.
     void WorkspaceTests::_initializeTerminalPageWithFlagOn(winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage>& page,
-                                                           CascadiaSettings initialSettings)
+                                                           CascadiaSettings initialSettings,
+                                                           std::function<void(winrt::TerminalApp::implementation::TerminalPage*)> beforeCreate)
     {
         winrt::TerminalApp::TerminalPage projectedPage{ nullptr };
 
@@ -197,9 +284,18 @@ namespace TerminalAppLocalTests
         });
 
         Log::Comment(L"Create() the TerminalPage");
-        result = RunOnUIThread([&page]() {
+        result = RunOnUIThread([&page, &beforeCreate]() {
             VERIFY_IS_NOT_NULL(page);
             VERIFY_IS_NOT_NULL(page->_settings);
+
+            // Big-flip Slice B (#54): run any pre-Create hook (e.g. installing
+            // the test-only content-factory override) so it is in place before
+            // the startup-replay's ContentMounted fires.
+            if (beforeCreate)
+            {
+                beforeCreate(page.get());
+            }
+
             page->Create();
             Log::Comment(L"Create()'d the page successfully");
 
@@ -660,11 +756,59 @@ namespace TerminalAppLocalTests
             L"an Elevate override must keep the new tab on the classic path");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesClassic()
+    // ReloadEnvironmentVariables is set true on essentially every launch by
+    // _getNewTerminalArgs, so for a no-commandline tab its value equals the
+    // default reload behavior and is NOT treated as an unmodelled override.
+    // Unlike the other #41 fields, a NewTab carrying only
+    // ReloadEnvironmentVariables(true) must route THROUGH the model so the
+    // normal startup new-tab populates the workspace (and sidebar). See
+    // _hasUnmodelledNewTabFields; full fidelity is deferred to #48.
+    void WorkspaceTests::NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
-            [](NewTerminalArgs& a) { a.ReloadEnvironmentVariables(true); },
-            L"a ReloadEnvironmentVariables override must keep the new tab on the classic path");
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"startup-replay should produce exactly one workspace");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a flag-on NewTab carrying only ReloadEnvironmentVariables(true)");
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            newTerminalArgs.ReloadEnvironmentVariables(true);
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            // ReloadEnvironmentVariables is not a meaningful per-tab override,
+            // so the new tab routes through the model: the workspace count
+            // grows from one to two rather than staying on the classic path.
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"a ReloadEnvironmentVariables-only new tab must route through the model");
+        });
+        VERIFY_SUCCEEDED(result);
     }
 
     // -------------------------------------------------------------------
@@ -2591,10 +2735,10 @@ namespace TerminalAppLocalTests
 
         auto result = RunOnUIThread([&page]() {
             // The shell is never initialized on the flag-off path, so the
-            // sidebar StackPanel member stays null — nothing was lifted into
+            // sidebar ItemsControl member stays null — nothing was lifted into
             // the titlebar, nothing was given width.
             VERIFY_IS_TRUE(page->_workspaceSidebar == nullptr,
-                           L"flag-off must NOT realize/show the sidebar StackPanel");
+                           L"flag-off must NOT realize/show the sidebar ItemsControl");
 
             // The classic content (TabContent / TabRow) still lives, and the
             // single startup tab landed exactly as upstream.
@@ -2610,7 +2754,7 @@ namespace TerminalAppLocalTests
             // is Collapsed, so the Auto sidebar column contributes zero width.
             // This is the structural guarantee that flag-off layout is upstream.
             auto realized = page->FindName(L"WorkspaceSidebar")
-                                .try_as<winrt::Windows::UI::Xaml::Controls::StackPanel>();
+                                .try_as<winrt::Windows::UI::Xaml::Controls::ItemsControl>();
             VERIFY_IS_NOT_NULL(realized, L"the sidebar element should exist in the tree");
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              realized.Visibility(),
@@ -2648,12 +2792,15 @@ namespace TerminalAppLocalTests
         // Startup gives workspace 0 (one row). Add a second workspace.
         auto result = RunOnUIThread([&page]() {
             VERIFY_IS_TRUE(page->_workspaceSidebar != nullptr,
-                           L"flag-on must realize the sidebar StackPanel");
+                           L"flag-on must realize the sidebar ItemsControl");
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceSidebar.Visibility(),
                              L"flag-on sidebar must be visible (non-zero-width column)");
-            VERIFY_ARE_EQUAL(1u, page->_workspaceSidebar.Children().Size(),
-                             L"startup-replay must produce exactly one sidebar row");
+            // Stage 2 (#52): the sidebar is an MVVM projection — its rows are
+            // the observable WorkspaceViewModel collection bound as ItemsSource,
+            // not imperative Children. Assert against the collection.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size(),
+                             L"startup-replay must produce exactly one sidebar view-model");
 
             NewTerminalArgs newTerminalArgs{};
             NewTabArgs newTabArgs{ newTerminalArgs };
@@ -2666,32 +2813,31 @@ namespace TerminalAppLocalTests
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size());
 
-            const auto children = page->_workspaceSidebar.Children();
-            VERIFY_ARE_EQUAL(2u, children.Size(),
-                             L"sidebar row count must equal the workspace count");
+            const auto vms = page->_workspaceViewModels;
+            VERIFY_ARE_EQUAL(2u, vms.Size(),
+                             L"sidebar view-model count must equal the workspace count");
 
-            // Each row, in order, carries the matching workspace's id on its
-            // Tag — proving declared-order projection by id identity (no
+            // Each view-model, in order, carries the matching workspace's id as
+            // Id — proving declared-order projection by id identity (no
             // positional indexing into the workspace list).
-            for (uint32_t i = 0; i < children.Size(); ++i)
+            for (uint32_t i = 0; i < vms.Size(); ++i)
             {
-                auto tb = children.GetAt(i).try_as<winrt::Windows::UI::Xaml::Controls::TextBlock>();
-                VERIFY_IS_NOT_NULL(tb, L"every sidebar row must be a read-only TextBlock");
-                const auto boxed = tb.Tag().try_as<uint64_t>();
-                VERIFY_IS_TRUE(boxed.has_value(), L"each row must stash its WorkspaceId on Tag");
-                VERIFY_ARE_EQUAL(workspaces[i].id.v, boxed.value(),
-                                 L"sidebar rows must mirror workspaces in declared order");
+                VERIFY_ARE_EQUAL(workspaces[i].id.v, vms.GetAt(i).Id(),
+                                 L"sidebar view-models must mirror workspaces in declared order");
             }
         });
         VERIFY_SUCCEEDED(result);
     }
 
-    // AC: the sidebar is read-only this slice — clicking a row does nothing
-    // and never mutates the model. There is no clickable control: each row is
-    // a plain TextBlock (not a ButtonBase / Control / ListViewItem), so there
-    // is no input path from the sidebar into a model action. We assert the row
-    // type is non-interactive and that the model state object is identical
-    // (same shared_ptr, same workspace count) before and after touching it.
+    // AC: the sidebar is read-only this stage — there is no input path from a
+    // row into a model action (rename/color/pin triggers land in Stage 3). The
+    // rows are an MVVM projection: an observable WorkspaceViewModel collection
+    // bound as the ItemsControl's ItemsSource, with a converter-free
+    // DataTemplate carrying no input handlers. We assert the only sidebar-facing
+    // entry point (re-running the active-row projection) is a pure view
+    // mutation: the model state object is identical (same shared_ptr, same
+    // workspace count) before and after, and the view-model active-flag is set
+    // by id identity without touching the model.
     void WorkspaceTests::Sidebar_FlagOn_RowIsReadOnly_NoModelMutation()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -2719,27 +2865,27 @@ namespace TerminalAppLocalTests
         size_t countBefore = 0;
         auto result = RunOnUIThread([&]() {
             VERIFY_IS_TRUE(page->_workspaceSidebar != nullptr);
-            VERIFY_ARE_EQUAL(1u, page->_workspaceSidebar.Children().Size());
+            VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size());
 
             modelBefore = page->_workspaceModelState.get();
             countBefore = page->_workspaceModelState->workspaces_view().size();
 
-            // The row exposes no interactive surface a click could route
-            // through: it is a TextBlock, not a ButtonBase or even a Control.
-            auto row = page->_workspaceSidebar.Children().GetAt(0);
-            VERIFY_IS_NOT_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::TextBlock>(),
-                               L"sidebar row must be a read-only TextBlock");
-            VERIFY_IS_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::Primitives::ButtonBase>(),
-                           L"sidebar row must NOT be a clickable ButtonBase");
-            VERIFY_IS_NULL(row.try_as<winrt::Windows::UI::Xaml::Controls::Control>(),
-                           L"sidebar row must NOT be an interactive Control");
+            // The single startup workspace's view-model is active (the
+            // startup-replay's ActiveWorkspaceChanged arm flipped IsActive by
+            // id identity). The DataTemplate that renders it carries no input
+            // handlers, so there is no path from a row into a model action.
+            const auto vm = page->_workspaceViewModels.GetAt(0);
+            VERIFY_IS_TRUE(vm.IsActive(),
+                           L"the single startup workspace's view-model must be active");
 
-            // Re-running the active-row highlight (the only sidebar-facing
-            // entry point this slice exposes) is a pure view mutation: it must
+            // Re-running the active-row projection (the only sidebar-facing
+            // entry point this stage exposes) is a pure view mutation: it must
             // not allocate a new model state nor change the workspace set.
             const auto active = page->_workspaceModelState->activeWorkspaceId_view();
             VERIFY_IS_TRUE(active.has_value());
-            page->_highlightActiveWorkspaceSidebarRow(active.value());
+            page->_setActiveWorkspaceVm(active.value());
+            VERIFY_IS_TRUE(page->_workspaceViewModels.GetAt(0).IsActive(),
+                           L"re-projecting the active workspace must keep its view-model active");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -2748,6 +2894,396 @@ namespace TerminalAppLocalTests
                              L"touching the sidebar must not replace the model state");
             VERIFY_ARE_EQUAL(countBefore, page->_workspaceModelState->workspaces_view().size(),
                              L"touching the sidebar must not change the workspace set");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #52, Stage 3a. Committing an inline rename on a row's view-model raises
+    // RenameCommitted; the page (subscribed in _addWorkspaceVm) dispatches
+    // renameWorkspace and the resulting WorkspaceMetadataUpdated diff arm
+    // re-projects the row's Title. The VM never touches the model directly:
+    // BeginRename/CommitRename only mutate VM state + raise the event.
+    void WorkspaceTests::Sidebar_FlagOn_RenameCommit_DispatchesModelAndReProjects()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size());
+            const auto vm = page->_workspaceViewModels.GetAt(0);
+            const auto wsId = ::WorkspaceModel::WorkspaceId{ vm.Id() };
+
+            // Drive the inline-rename flow exactly as the editor would: begin,
+            // overwrite the buffered text, commit.
+            vm.BeginRename();
+            VERIFY_IS_TRUE(vm.IsEditing());
+            vm.EditText(L"Renamed WS");
+            vm.CommitRename();
+
+            // The model now holds the new name (the page dispatched
+            // renameWorkspace via the RenameCommitted subscription)...
+            const auto* ws = page->_workspaceModelState->workspace(wsId);
+            VERIFY_IS_NOT_NULL(ws);
+            VERIFY_ARE_EQUAL(std::string{ "Renamed WS" }, ws->name,
+                             L"committing a rename must dispatch renameWorkspace into the model");
+
+            // ...and the WorkspaceMetadataUpdated arm re-projected it onto the
+            // row's view-model, which also left edit mode.
+            VERIFY_IS_FALSE(vm.IsEditing());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"Renamed WS" }, vm.Title(),
+                             L"the row must re-render its Title from the model diff");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #52, Stage 3a. TogglePin raises PinToggleRequested with the desired new
+    // value; the page dispatches setWorkspacePinned and the diff re-projects
+    // IsPinned. The VM does NOT flip IsPinned itself — it only signals intent.
+    void WorkspaceTests::Sidebar_FlagOn_TogglePin_DispatchesModelAndReProjects()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size());
+            const auto vm = page->_workspaceViewModels.GetAt(0);
+            const auto wsId = ::WorkspaceModel::WorkspaceId{ vm.Id() };
+            VERIFY_IS_FALSE(vm.IsPinned(), L"workspaces start unpinned");
+
+            // Pin: the desired value is !IsPinned == true.
+            vm.TogglePin();
+            const auto* pinned = page->_workspaceModelState->workspace(wsId);
+            VERIFY_IS_NOT_NULL(pinned);
+            VERIFY_IS_TRUE(pinned->pinned,
+                           L"TogglePin must dispatch setWorkspacePinned(true) into the model");
+            VERIFY_IS_TRUE(vm.IsPinned(), L"the row must re-render IsPinned from the model diff");
+
+            // Unpin: round-trips back.
+            vm.TogglePin();
+            const auto* unpinned = page->_workspaceModelState->workspace(wsId);
+            VERIFY_IS_NOT_NULL(unpinned);
+            VERIFY_IS_FALSE(unpinned->pinned,
+                            L"a second TogglePin must dispatch setWorkspacePinned(false)");
+            VERIFY_IS_FALSE(vm.IsPinned());
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #52, Stage 3b. The picker is a view-layer flyout that needs a realized
+    // anchor, so we can't drive ShowColorPicker() headless. Instead we raise
+    // the VM's ColorCommitted event directly (the same signal the picker
+    // forwards) and assert the page dispatches setWorkspaceColor and the diff
+    // re-projects the swatch: a non-null IReference sets the color, a null one
+    // clears it. The VM never touches the model itself.
+    void WorkspaceTests::Sidebar_FlagOn_ColorCommit_DispatchesModelAndReProjects()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size());
+            const auto vm = page->_workspaceViewModels.GetAt(0);
+            const auto wsId = ::WorkspaceModel::WorkspaceId{ vm.Id() };
+            VERIFY_IS_FALSE(vm.HasColor(), L"workspaces start with no color");
+
+            // Set: a non-null IReference dispatches setWorkspaceColor(value).
+            const winrt::Windows::UI::Color chosen{ 0xFF, 0x12, 0x34, 0x56 };
+            const auto implVm = winrt::get_self<winrt::TerminalApp::implementation::WorkspaceViewModel>(vm);
+            implVm->ColorCommitted.raise(vm, winrt::box_value(chosen).try_as<winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>>());
+
+            const auto* colored = page->_workspaceModelState->workspace(wsId);
+            VERIFY_IS_NOT_NULL(colored);
+            VERIFY_IS_TRUE(colored->color.has_value(),
+                           L"ColorCommitted(value) must dispatch setWorkspaceColor into the model");
+            VERIFY_ARE_EQUAL(static_cast<uint8_t>(0x12), colored->color->r);
+            VERIFY_ARE_EQUAL(static_cast<uint8_t>(0x34), colored->color->g);
+            VERIFY_ARE_EQUAL(static_cast<uint8_t>(0x56), colored->color->b);
+            VERIFY_IS_TRUE(vm.HasColor(), L"the row must re-render HasColor from the model diff");
+            VERIFY_ARE_EQUAL(static_cast<uint8_t>(0x12), vm.Color().R);
+
+            // Clear: a null IReference dispatches setWorkspaceColor(std::nullopt).
+            implVm->ColorCommitted.raise(vm, nullptr);
+            const auto* cleared = page->_workspaceModelState->workspace(wsId);
+            VERIFY_IS_NOT_NULL(cleared);
+            VERIFY_IS_FALSE(cleared->color.has_value(),
+                            L"ColorCommitted(null) must dispatch setWorkspaceColor(std::nullopt)");
+            VERIFY_IS_FALSE(vm.HasColor(), L"the row must clear HasColor from the model diff");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #52, Stage 3c. Clicking a sidebar row raises RequestActivate; the page
+    // (subscribed in _addWorkspaceVm) dispatches switchToWorkspace and the
+    // resulting ActiveWorkspaceChanged diff arm flips the active highlight and
+    // selects the workspace's classic tab. We drive the intent directly (a
+    // synthetic Tapped doesn't land headless), exactly as the rename test calls
+    // CommitRename(). This mirrors SwitchToTab_FlagOn_ChangesActiveWorkspace but
+    // via the sidebar VM intent rather than the classic tab strip.
+    void WorkspaceTests::Sidebar_FlagOn_RowClick_DispatchesSwitchToWorkspace()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Startup gives workspace 0; a NewTab adds workspace 1 and makes it the
+        // active one (newWorkspace's contract), selecting classic tab 1.
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(2u, page->_workspaceViewModels.Size());
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size());
+
+            // Pre-condition: workspace 1 is active and classic tab 1 is focused.
+            const auto activeBefore = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeBefore.has_value());
+            VERIFY_ARE_EQUAL(activeBefore.value(), workspaces[1].id,
+                             L"workspaces[1] should be active after a NewTab");
+            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
+
+            // The row 0 view-model carries workspace 0's id; activating it is the
+            // sidebar click intent.
+            const auto vm0 = page->_workspaceViewModels.GetAt(0);
+            VERIFY_ARE_EQUAL(workspaces[0].id.v, vm0.Id());
+            vm0.RequestActivate();
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+
+            // The page dispatched switchToWorkspace via RequestActivate: the
+            // model now reports workspaces[0] as active...
+            const auto activeAfter = page->_workspaceModelState->activeWorkspaceId_view();
+            VERIFY_IS_TRUE(activeAfter.has_value());
+            VERIFY_ARE_EQUAL(activeAfter.value(), workspaces[0].id,
+                             L"RequestActivate must dispatch switchToWorkspace to workspaces[0]");
+
+            // ...the MRU front is workspaces[0]...
+            VERIFY_IS_FALSE(page->_workspaceModelState->mru_view().empty());
+            VERIFY_ARE_EQUAL(page->_workspaceModelState->mru_view().front(), workspaces[0].id,
+                             L"switchToWorkspace must touch the MRU front");
+
+            // ...and the ActiveWorkspaceChanged arm drove _SelectTab to
+            // workspace 0's classic tab (tab 0) without changing the tab count.
+            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
+                             L"WorkspaceView should have driven _SelectTab(0) via ActiveWorkspaceChanged");
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"a switch is non-structural — the tab count must not change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // #52, Stage 3c. After a sidebar-row activation, the ActiveWorkspaceChanged
+    // arm flips IsActive on the view-models by id identity: the activated row's
+    // VM is active and the previously-active row's VM is not.
+    void WorkspaceTests::Sidebar_FlagOn_RowClick_FlipsActiveHighlightById()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(2u, page->_workspaceViewModels.Size());
+            const auto vm0 = page->_workspaceViewModels.GetAt(0);
+            const auto vm1 = page->_workspaceViewModels.GetAt(1);
+
+            // After NewTab, workspace 1 is active: its row is highlighted, 0 isn't.
+            VERIFY_IS_FALSE(vm0.IsActive());
+            VERIFY_IS_TRUE(vm1.IsActive());
+
+            // Activate row 0 via the click intent.
+            vm0.RequestActivate();
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            const auto vm0 = page->_workspaceViewModels.GetAt(0);
+            const auto vm1 = page->_workspaceViewModels.GetAt(1);
+
+            // The ActiveWorkspaceChanged arm flipped the highlight by id identity.
+            VERIFY_IS_TRUE(vm0.IsActive(),
+                           L"the activated row's view-model must be active");
+            VERIFY_IS_FALSE(vm1.IsActive(),
+                            L"the previously-active row's view-model must be inactive");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Pinned-float. Pinning a workspace floats it to the bottom of the pinned
+    // block; the WorkspaceReordered diff arm must reorder _workspaceViewModels
+    // so the sidebar's row order matches the model's new display order (by id).
+    // We drive the pin via the VM's TogglePin intent (synthetic clicks don't
+    // land headless), exactly as Sidebar_FlagOn_TogglePin_* does.
+    void WorkspaceTests::Sidebar_FlagOn_Pin_ReordersViewModels()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Startup gives workspace 0; two NewTabs add workspaces 1 and 2 so the
+        // sidebar has three rows [w0, w1, w2] in declared order.
+        auto result = RunOnUIThread([&page]() {
+            for (int i = 0; i < 2; ++i)
+            {
+                NewTerminalArgs newTerminalArgs{};
+                NewTabArgs newTabArgs{ newTerminalArgs };
+                ActionEventArgs eventArgs{ newTabArgs };
+                page->_HandleNewTab(nullptr, eventArgs);
+            }
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(3u, page->_workspaceViewModels.Size());
+            VERIFY_ARE_EQUAL(static_cast<size_t>(3),
+                             page->_workspaceModelState->workspaces_view().size());
+
+            // Pre-condition: VM order matches model order [w0, w1, w2].
+            const auto& wsBefore = page->_workspaceModelState->workspaces_view();
+            for (uint32_t i = 0; i < page->_workspaceViewModels.Size(); ++i)
+            {
+                VERIFY_ARE_EQUAL(wsBefore[i].id.v, page->_workspaceViewModels.GetAt(i).Id());
+            }
+
+            // Pin the THIRD row (last). It should float to the bottom of the
+            // (empty) pinned block, i.e. the front of the list.
+            const auto vm2 = page->_workspaceViewModels.GetAt(2);
+            const auto pinnedId = vm2.Id();
+            vm2.TogglePin();
+
+            // Model moved the pinned workspace to the front: [w2, w0, w1].
+            const auto& wsAfter = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(static_cast<size_t>(3), wsAfter.size());
+            VERIFY_ARE_EQUAL(pinnedId, wsAfter[0].id.v,
+                             L"the pinned workspace must be first in the model display order");
+            VERIFY_IS_TRUE(wsAfter[0].pinned);
+
+            // The WorkspaceReordered arm must have reordered the VM collection
+            // to match the model's new order, by id.
+            VERIFY_ARE_EQUAL(3u, page->_workspaceViewModels.Size(),
+                             L"reorder must not add or drop rows");
+            for (uint32_t i = 0; i < page->_workspaceViewModels.Size(); ++i)
+            {
+                VERIFY_ARE_EQUAL(wsAfter[i].id.v, page->_workspaceViewModels.GetAt(i).Id(),
+                                 L"sidebar VM order must match the model display order after a pin");
+            }
+            // The floated row carries the pinned glyph (metadata arm) too.
+            VERIFY_IS_TRUE(page->_workspaceViewModels.GetAt(0).IsPinned());
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -2769,8 +3305,24 @@ namespace TerminalAppLocalTests
             uint64_t Tag() const noexcept { return _tag; }
             int CloseCount() const noexcept { return _closeCount; }
 
-            // -- IPaneContent --
-            winrt::Windows::UI::Xaml::FrameworkElement GetRoot() { return nullptr; }
+            // Big-flip Slice B (#54): the host-attach plumbing parents this
+            // content's GetRoot() into the (collapsed) WorkspaceContentHost. A
+            // headless test asserts that parented element by identity, so the
+            // mock must hand back a real, stable FrameworkElement — the SAME
+            // instance every call (the registry keeps one content alive across
+            // (un)mounts, so its root must be stable too). We lazily build a
+            // bare Grid and cache it. Using a real TermControl's root in a
+            // headless attach test is unnecessary and couples the test to
+            // control geometry; this mock root keeps the attach test about the
+            // plumbing only.
+            winrt::Windows::UI::Xaml::FrameworkElement GetRoot()
+            {
+                if (!_root)
+                {
+                    _root = winrt::Windows::UI::Xaml::Controls::Grid{};
+                }
+                return _root;
+            }
             void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings&) {}
             winrt::Windows::Foundation::Size MinimumSize() { return { 0, 0 }; }
             winrt::hstring Title() { return L"mock"; }
@@ -2787,6 +3339,7 @@ namespace TerminalAppLocalTests
         private:
             uint64_t _tag{ 0 };
             int _closeCount{ 0 };
+            winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         };
     }
 
@@ -2853,5 +3406,1213 @@ namespace TerminalAppLocalTests
         // Removing an unowned id is a benign explicit no-op (returns false).
         VERIFY_IS_FALSE(registry.Remove(id));
         VERIFY_IS_FALSE(registry.Remove(ContentId{ 999 }));
+    }
+
+    // Big-flip Slice A (#54): the ContentMounted factory is real. The model's
+    // mount policy assigns a lifetime ContentId to every active-workspace
+    // active-leaf active tab; diff() emits a ContentMounted carrying that id +
+    // the tab's TabContent spec; the WorkspaceView arm now drives the live page
+    // factory (TerminalSpec -> a real TerminalPaneContent backed by a
+    // TermControl/ConPTY) into the ContentRegistry. The registry — not the
+    // classic Tab — is therefore the strong owner of one live content per
+    // active tab. The classic Tab STILL displays (this slice changes no
+    // display/close-guard ownership), so _tabs tracks the workspace count and
+    // the user still sees a single terminal.
+    //
+    // RED before the factory is real: EnsureMounted's factory returns nullptr,
+    // so the registry stays empty (Size()==0) and no mount resolves.
+    // GREEN after: registry Size() == workspace count, and every model mount
+    // ContentId resolves to a live content via the registry.
+    void WorkspaceTests::BigFlipA_FactoryMaterialisesContentIntoRegistry()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Resolve every model mount ContentId in the ACTIVE-materialised set and
+        // assert each is owned by the registry. Returns the count of mounts seen
+        // so the caller can cross-check it against the registry Size.
+        const auto verifyAllMountsResolve = [](winrt::TerminalApp::implementation::TerminalPage* p) -> size_t {
+            size_t mountsSeen = 0;
+            for (const auto& ws : p->_workspaceModelState->workspaces_view())
+            {
+                for (const auto* leaf : p->_workspaceModelState->leaves(ws.id))
+                {
+                    for (const auto& t : leaf->tabs)
+                    {
+                        if (t.mount.has_value())
+                        {
+                            ++mountsSeen;
+                            VERIFY_IS_TRUE(
+                                p->_workspaceView->contentRegistryContainsForTest(*t.mount),
+                                L"every model mount ContentId must resolve to a live content in the registry");
+                        }
+                    }
+                }
+            }
+            return mountsSeen;
+        };
+
+        // Startup-replay landed exactly one workspace + one classic tab. The
+        // mount policy materialised that workspace's active tab, so the factory
+        // built one live content into the registry.
+        auto result = RunOnUIThread([&page, &verifyAllMountsResolve]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"the classic Tab still displays — exactly one after startup");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"startup-replay produces exactly one workspace");
+
+            // RED today: factory returns nullptr -> registry stays empty.
+            // GREEN after: the factory materialises one live content.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), page->_workspaceView->contentRegistrySizeForTest(),
+                             L"the factory must materialise one live content into the registry at startup");
+
+            const auto mountsSeen = verifyAllMountsResolve(page.get());
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mountsSeen,
+                             L"the active workspace's active tab carries exactly one model mount");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a default-profile NewTab (a 2nd, activated workspace)");
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // The new workspace is now active and materialised; the first
+        // workspace's content stays alive in the registry (mount policy leaves
+        // already-materialised tabs untouched), so the registry now owns TWO
+        // live contents — one per workspace.
+        result = RunOnUIThread([&page, &verifyAllMountsResolve]() {
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"the classic Tab still displays — two after a 2nd workspace");
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on new-tab created a second workspace");
+
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), page->_workspaceView->contentRegistrySizeForTest(),
+                             L"the registry owns one live content per active workspace");
+
+            const auto mountsSeen = verifyAllMountsResolve(page.get());
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mountsSeen,
+                             L"both workspaces' active tabs carry a model mount, and both resolve");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice E (#54): plug the whole-workspace-close ConPTY leak.
+    //
+    // Slice A made the ContentMounted factory real, so the ContentRegistry now
+    // owns one live IPaneContent (TermControl/ConPTY) per active workspace.
+    // Closing a WHOLE workspace routes through closeWorkspace -> diff, which
+    // emits WorkspaceRemoved (NOT per-tab TabRemoved/ContentUnmounted — diff()
+    // suppresses those for a removed workspace). Before Slice E,
+    // apply(WorkspaceRemoved) only tore down the classic Tab and never Removed
+    // the workspace's registry content, so each whole-workspace close leaked
+    // its factory-built ConPTY until the window exited.
+    //
+    // This drives the close via the SAME model path the app uses
+    // (closeWorkspace -> _applyWorkspaceAction; the Tab::Closed handler routes
+    // through _closeTabViaWorkspaceModel to exactly this), then asserts the
+    // registry dropped from 2 to 1 and the SURVIVING workspace's content stayed
+    // alive.
+    //
+    // RED before the teardown: registry Size() stays 2 (leak).
+    // GREEN after: it drops to 1, and the survivor still resolves.
+    void WorkspaceTests::BigFlipE_WorkspaceClose_RemovesItsContent()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        Log::Comment(L"Create a 2nd workspace via a default new-tab");
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Capture the id of the workspace we'll close (the 2nd, now active) and
+        // the surviving (1st) workspace's mount ContentId so we can assert it
+        // stays alive across the close.
+        ::WorkspaceModel::WorkspaceId closingWsId{ 0 };
+        ::WorkspaceModel::WorkspaceId survivingWsId{ 0 };
+        ::WorkspaceModel::ContentId survivingMount{ 0 };
+        result = RunOnUIThread([&page, &closingWsId, &survivingWsId, &survivingMount]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(2u, workspaces.size(),
+                             L"flag-on new-tab created a second workspace");
+
+            survivingWsId = workspaces[0].id;
+            closingWsId = workspaces[1].id;
+
+            // The surviving workspace's active tab carries the mount we expect
+            // to outlive the close.
+            const auto* survivingLeaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(survivingLeaf);
+            VERIFY_ARE_EQUAL(1u, survivingLeaf->tabs.size());
+            VERIFY_IS_TRUE(survivingLeaf->tabs[0].mount.has_value());
+            survivingMount = *survivingLeaf->tabs[0].mount;
+
+            // Pre-close: the registry owns one live content per workspace.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), page->_workspaceView->contentRegistrySizeForTest(),
+                             L"two workspaces -> two live contents before the close");
+            VERIFY_IS_TRUE(page->_workspaceView->contentRegistryContainsForTest(survivingMount));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Close the 2nd workspace via the model (closeWorkspace -> _applyWorkspaceAction)");
+        result = RunOnUIThread([&page, closingWsId]() {
+            auto next = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, closingWsId);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Post-close: the closed workspace's content was Removed (its ConPTY
+        // torn down), so the registry dropped 2 -> 1; the surviving workspace's
+        // content is untouched and still resolves.
+        result = RunOnUIThread([&page, survivingWsId, survivingMount]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"closeWorkspace dropped the second workspace from the model");
+            VERIFY_ARE_EQUAL(survivingWsId.v,
+                             page->_workspaceModelState->workspaces_view()[0].id.v,
+                             L"the first workspace survives");
+
+            // The leak fix: RED leaves Size()==2; GREEN drops it to 1.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), page->_workspaceView->contentRegistrySizeForTest(),
+                             L"closing a whole workspace must Remove its registry content (no ConPTY leak)");
+            VERIFY_IS_TRUE(page->_workspaceView->contentRegistryContainsForTest(survivingMount),
+                           L"the surviving workspace's content must stay alive across the close");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice B (#54): the flag-on content host receives the ACTIVE
+    // workspace's factory-built content GetRoot(). This proves the new display
+    // PLUMBING structurally: a collapsed WorkspaceContentHost inside TabContent
+    // holds the active workspace's content, while the classic _tabContent swap
+    // still owns the VISIBLE display (so the user sees no change this slice).
+    //
+    // We install the test-only factory override (via beforeCreate) so the
+    // ContentMounted factory builds a MockPaneContent whose GetRoot() is a
+    // known, stable Grid — that lets us assert the host's child by IDENTITY
+    // without depending on a real TermControl's root. (Slice A proved the real
+    // factory works headlessly; here we only care about the attach plumbing,
+    // so the mock root keeps the test focused and decoupled from control
+    // geometry.)
+    //
+    // RED before the host attach: the WorkspaceContentHost is empty (no
+    // _showActiveWorkspaceContentInHost wiring), so _workspaceHostChildForTest()
+    // is null and hostContentIdForTest() is nullopt.
+    // GREEN after: the host's sole child == the active workspace's content
+    // GetRoot() (by identity), hostContentIdForTest() == that content's mount
+    // id, the host is Collapsed, and the classic _tabContent still holds the
+    // classic content (visible path intact).
+    void WorkspaceTests::BigFlipB_ActiveWorkspaceContentAttachedToHost()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // The factory override records every MockPaneContent it hands out so
+        // the test can recover the exact instance (and its known root) the
+        // registry owns for a given workspace.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            // Each mount builds a fresh, tagged MockPaneContent with a stable
+            // Grid root, rather than a real TermControl.
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xB000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        auto result = RunOnUIThread([&page, mocks]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+
+            // The classic display is intact: exactly one classic Tab whose
+            // content is the VISIBLE child of _tabContent.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"the classic Tab still displays — exactly one after startup");
+
+            // The factory built exactly one content (one active workspace) and
+            // the registry owns it.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"the override factory materialised one content at startup");
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), page->_workspaceView->contentRegistrySizeForTest(),
+                             L"the registry owns one live content at startup");
+
+            // The active workspace's mount id is what the host should back.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(1u, leaf->tabs.size());
+            VERIFY_IS_TRUE(leaf->tabs[0].mount.has_value());
+            const auto activeMount = *leaf->tabs[0].mount;
+
+            // GREEN: the host's sole child is the active workspace's content
+            // GetRoot(), by identity, and hostContentIdForTest agrees on the id.
+            const auto hostChild = page->_workspaceHostChildForTest();
+            VERIFY_IS_NOT_NULL(hostChild,
+                               L"the WorkspaceContentHost must hold the active workspace's content root");
+
+            const auto expectedRoot = (*mocks)[0]->GetRoot();
+            VERIFY_IS_NOT_NULL(expectedRoot);
+            VERIFY_IS_TRUE(hostChild == expectedRoot,
+                           L"the host's child must be the active workspace content's GetRoot() (by identity)");
+
+            const auto hostId = page->_workspaceView->hostContentIdForTest();
+            VERIFY_IS_TRUE(hostId.has_value(),
+                           L"the view must record which content the host backs");
+            VERIFY_ARE_EQUAL(activeMount.v, hostId->v,
+                             L"the host must back the active workspace's mount content id");
+
+            // INVISIBLE this slice: the host stays Collapsed, so the user sees
+            // only the classic terminal.
+            VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must remain Collapsed — no visible change this slice");
+
+            // The classic visible path is intact: _tabContent holds the classic
+            // Tab's content (NOT the mock root), and that classic content is a
+            // child of _tabContent.
+            VERIFY_IS_TRUE(page->_tabContent != nullptr);
+            const auto classicContent = page->_tabs.GetAt(0).Content();
+            VERIFY_IS_NOT_NULL(classicContent);
+            uint32_t classicIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(classicContent, classicIndex),
+                           L"the classic Tab content must still be a child of _tabContent (visible path intact)");
+            VERIFY_IS_TRUE(classicContent != expectedRoot,
+                           L"the classic visible content is distinct from the host's factory content this slice");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice B (#54): switching the active workspace swaps the host's
+    // child to the newly-active workspace's content. Create a 2nd workspace
+    // (now active; the host backs ws1's content), then switch active back to
+    // ws0 via the model (switchToWorkspace -> _applyWorkspaceAction, the same
+    // path a sidebar-row activation drives), and assert the host's child flips
+    // to ws0's content GetRoot. The classic _tabContent / _SelectTab behavior
+    // is unchanged (the classic display still follows the selected tab).
+    //
+    // RED before the attach wiring: the host is empty, so the child never
+    // flips. GREEN after: the host's child == ws0's content root, by identity.
+    void WorkspaceTests::BigFlipB_SwitchSwapsHostChild()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // Map every materialised content's mount id -> its MockPaneContent, so
+        // the test can recover each workspace's known root by id. The override
+        // can't see the mount id (it only gets the spec), so we tag each mock
+        // and resolve mount->mock via the registry identity below instead.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xB000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        Log::Comment(L"Create a 2nd workspace via a default new-tab (now active)");
+        auto result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Capture ws0/ws1 ids + the root each workspace's content resolves to.
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::WorkspaceId ws1{ 0 };
+        winrt::Windows::UI::Xaml::FrameworkElement ws0Root{ nullptr };
+        winrt::Windows::UI::Xaml::FrameworkElement ws1Root{ nullptr };
+        result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(2u, workspaces.size(),
+                             L"flag-on new-tab created a second workspace");
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"the classic Tab still displays — two after a 2nd workspace");
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"the override factory materialised one content per workspace");
+
+            ws0 = workspaces[0].id;
+            ws1 = workspaces[1].id;
+
+            // The two mocks were created in workspace-creation order: index 0
+            // is ws0's content (startup), index 1 is ws1's (the new-tab).
+            ws0Root = (*mocks)[0]->GetRoot();
+            ws1Root = (*mocks)[1]->GetRoot();
+            VERIFY_IS_NOT_NULL(ws0Root);
+            VERIFY_IS_NOT_NULL(ws1Root);
+            VERIFY_IS_TRUE(ws0Root != ws1Root);
+
+            // After creating ws1 it is active, so the host backs ws1's content.
+            const auto hostChild = page->_workspaceHostChildForTest();
+            VERIFY_IS_TRUE(hostChild == ws1Root,
+                           L"after creating ws1, the host backs ws1's content root");
+            const auto hostId = page->_workspaceView->hostContentIdForTest();
+            VERIFY_IS_TRUE(hostId.has_value());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Switch active back to ws0 via the model (switchToWorkspace -> _applyWorkspaceAction)");
+        result = RunOnUIThread([&page, ws0]() {
+            auto next = ::WorkspaceModel::switchToWorkspace(page->_workspaceModelState, ws0);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // GREEN: the host's child flipped to ws0's content root; the classic
+        // display followed the selected tab (still two tabs, ws0's now selected).
+        result = RunOnUIThread([&]() {
+            const auto hostChild = page->_workspaceHostChildForTest();
+            VERIFY_IS_TRUE(hostChild == ws0Root,
+                           L"switching active to ws0 must swap the host's child to ws0's content root");
+            VERIFY_IS_TRUE(hostChild != ws1Root,
+                           L"the host must no longer show ws1's content after the switch");
+
+            // The host stays Collapsed; no visible change.
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must remain Collapsed across a switch");
+
+            // Classic path intact: still two classic tabs, and the classic
+            // content of the selected tab is a child of _tabContent.
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
+                             L"the switch must not change the classic tab count");
+            const auto focusedIdx = page->_GetFocusedTabIndex();
+            VERIFY_IS_TRUE(focusedIdx.has_value());
+            const auto classicContent = page->_tabs.GetAt(*focusedIdx).Content();
+            uint32_t classicIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(classicContent, classicIndex),
+                           L"the selected classic Tab content must be a child of _tabContent (visible path intact)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    namespace
+    {
+        // Big-flip Slice C (#54) test helper: the root leaf's PaneId of the
+        // workspace at index `wsIdx`. The startup workspace is a single root
+        // leaf; the tests add a 2nd tab to it (no split), so the root stays a
+        // leaf. Returns an invalid PaneId if the root isn't a leaf.
+        ::WorkspaceModel::PaneId _rootLeafId(const ::WorkspaceModel::ModelState& state, size_t wsIdx)
+        {
+            const auto& workspaces = state->workspaces_view();
+            if (wsIdx >= workspaces.size())
+            {
+                return ::WorkspaceModel::PaneId{};
+            }
+            if (const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[wsIdx].root))
+            {
+                return leaf->id;
+            }
+            return ::WorkspaceModel::PaneId{};
+        }
+    }
+
+    // Big-flip Slice C (#54): adding a tab to an EXISTING leaf (via the model
+    // newTab action) appends a PaneTabViewModel to that leaf's invisible strip
+    // collection — and creates NO second classic Tab. The strip VM is the SOLE
+    // representation of an additional leaf tab; the classic-tab creation in the
+    // TabAdded arm fires ONLY for a new workspace's first tab. The host stays
+    // Collapsed and _tabs is unchanged, so the user sees ZERO change this slice.
+    //
+    // RED before the arm projects the strip: the leaf's strip size never grows
+    // past the single startup tab (no _appendPaneTabVm wiring), so it stays 1.
+    // (And without the new-vs-additional distinguisher, the arm would WRONGLY
+    // grow _tabs to 2 — the no-2nd-classic-tab assert guards that too.)
+    // GREEN after: the leaf's strip size == 2, _tabs.Size() stays 1, host
+    // Collapsed.
+    void WorkspaceTests::BigFlipC_TabAdded_AppendsStripVm()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xC000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+
+            // Startup baseline: one classic Tab, one workspace, the root leaf's
+            // strip has exactly one VM (the startup tab projected by TabAdded).
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"startup: exactly one classic Tab");
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM (the first tab)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a SECOND tab to the existing root leaf via the model (newTab)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid(), L"newTab on an existing leaf must allocate a tab");
+            page->_applyWorkspaceAction(std::move(added.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the leaf's strip grew to 2 VMs.
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0),
+                             L"adding a tab to the leaf appends a strip VM (now two)");
+
+            // The model leaf indeed holds two tabs now.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), leaf->tabs.size());
+
+            // CRITICAL: NO second classic Tab was created — the additional tab
+            // is represented ONLY as a strip VM (invisible). _tabs stays at one.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"an additional leaf tab must NOT create a 2nd classic Tab");
+
+            // INVISIBLE: the host (and thus the strip inside it) stays Collapsed.
+            VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must remain Collapsed — no visible change this slice");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice C (#54): apply(ActiveTabChanged) flips the strip's active
+    // row to the newly-active tab AND swaps the (collapsed) host's child to that
+    // tab's content GetRoot (extending Slice B's single-content attach to
+    // per-tab). We add a 2nd tab (which becomes active, firing ActiveTabChanged
+    // 0->1), then selectTab back to the first (firing ActiveTabChanged 1->0),
+    // asserting the active VM and the host child follow each time. The classic
+    // path is untouched (still one classic Tab, host Collapsed).
+    //
+    // RED before the arm is real: ActiveTabChanged is a no-op, so neither the
+    // active VM nor the host child ever flips. GREEN after: the active strip VM
+    // is the newly-active tab and the host child is that tab's content root, by
+    // identity.
+    void WorkspaceTests::BigFlipC_ActiveTabChanged_FlipsSelectionAndSwapsHostChild()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // The override hands out a fresh tagged MockPaneContent per mount, in
+        // creation order: index 0 == the startup (first) tab's content, index 1
+        // == the added (second) tab's content.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xC000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId firstTabId{ 0 };
+        ::WorkspaceModel::TabId secondTabId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            firstTabId = leaf->tabs[0].id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a 2nd tab — it becomes active, firing ActiveTabChanged 0->1");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            secondTabId = added.id;
+            page->_applyWorkspaceAction(std::move(added.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"two contents materialised — one per tab");
+
+            // GREEN: the active strip VM is the newly-added (second) tab.
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value(),
+                           L"after ActiveTabChanged, one strip row must be active");
+            VERIFY_ARE_EQUAL(secondTabId.v, *activeId,
+                             L"the active strip row must be the newly-active (2nd) tab");
+
+            // The host child swapped to the 2nd tab's content GetRoot (mock 1).
+            const auto hostChild = page->_workspaceHostChildForTest();
+            const auto secondRoot = (*mocks)[1]->GetRoot();
+            VERIFY_IS_NOT_NULL(secondRoot);
+            VERIFY_IS_TRUE(hostChild == secondRoot,
+                           L"the host child must be the newly-active tab's content root");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across an active-tab change");
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"an active-tab change must not touch the classic tab count");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Select the FIRST tab — ActiveTabChanged 1->0 flips back");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, firstTabId);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(firstTabId.v, *activeId,
+                             L"selecting the first tab flips the active strip row back to it");
+
+            // The host child swapped to the first tab's content GetRoot (mock 0).
+            const auto hostChild = page->_workspaceHostChildForTest();
+            const auto firstRoot = (*mocks)[0]->GetRoot();
+            VERIFY_IS_TRUE(hostChild == firstRoot,
+                           L"the host child must swap back to the first tab's content root");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the second active-tab change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice C (#54): apply(TabRemoved) removes the strip VM that
+    // mirrored a closed tab from its leaf's collection. We add a 2nd tab (strip
+    // size 2), then closeTab it — a multi-tab leaf close emits TabRemoved (NOT
+    // WorkspaceRemoved, which only fires when the WHOLE workspace goes). The
+    // strip shrinks back to 1 and the classic tab count is unchanged (the
+    // additional tab never had a classic Tab). Host stays Collapsed.
+    //
+    // RED before the arm removes the VM: closing the additional tab leaves the
+    // strip at 2 (no _removePaneTabVm wiring). GREEN after: the strip is 1
+    // again, _tabs unchanged, host Collapsed.
+    void WorkspaceTests::BigFlipC_TabRemoved_RemovesStripVm()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xC000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId secondTabId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a 2nd tab to the leaf (strip -> 2)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            secondTabId = added.id;
+            page->_applyWorkspaceAction(std::move(added.state));
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0),
+                             L"precondition: the leaf's strip has two VMs before the close");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Close the additional tab (multi-tab leaf -> TabRemoved, NOT WorkspaceRemoved)");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::closeTab(page->_workspaceModelState, secondTabId);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // The workspace + its leaf survive (only the 2nd tab closed).
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size(),
+                             L"closing one of two tabs must NOT remove the workspace");
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), leaf->tabs.size());
+
+            // GREEN: the strip shrank back to one VM (the removed tab's VM gone).
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"closing the additional tab removes its strip VM (back to one)");
+
+            // The classic tab count is unchanged — the additional tab never had
+            // a classic Tab to remove.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"closing the additional tab must not change the classic tab count");
+
+            // Host still Collapsed.
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across a tab close");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    namespace
+    {
+        // Big-flip Slice D (#54) test helper: the star value of the
+        // ColumnDefinition (axis Vertical) or RowDefinition (axis Horizontal)
+        // at index `cell` of a projected split Grid. The projector sizes the
+        // first cell `ratio` and the second `1-ratio` in star units, so this
+        // reads the model ratio back out of the XAML structure WITHOUT
+        // measuring any laid-out pixel width (the headless-resize-clamp trap).
+        double _splitCellStar(const winrt::Windows::UI::Xaml::Controls::Grid& grid,
+                              ::WorkspaceModel::Axis axis,
+                              uint32_t cell)
+        {
+            if (axis == ::WorkspaceModel::Axis::Vertical)
+            {
+                const auto def = grid.ColumnDefinitions().GetAt(cell);
+                return def.Width().Value;
+            }
+            const auto def = grid.RowDefinitions().GetAt(cell);
+            return def.Height().Value;
+        }
+
+        // Find the leaf container the projector tagged with `leaf`.v anywhere in
+        // the projected subtree rooted at `node`. Leaf containers and split
+        // Grids both carry their PaneId.v in Tag(); a leaf container holds the
+        // leaf's Slice-C strip, a split Grid holds two child cells. Returns
+        // nullptr if no leaf container with that tag exists.
+        winrt::Windows::UI::Xaml::FrameworkElement _findLeafContainer(
+            const winrt::Windows::UI::Xaml::FrameworkElement& node,
+            ::WorkspaceModel::PaneId leaf)
+        {
+            if (!node)
+            {
+                return nullptr;
+            }
+            const auto tag = node.Tag().try_as<uint64_t>();
+            const auto grid = node.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            // A split Grid carries star-sized child cells (2+ children that are
+            // themselves projected nodes). A leaf container is the terminal node
+            // whose tag matches the leaf id we want.
+            if (tag && *tag == leaf.v)
+            {
+                // Disambiguate a leaf container from a split with the same tag:
+                // splits never share a leaf's id, so a tag match IS the leaf.
+                return node;
+            }
+            if (grid)
+            {
+                for (uint32_t i = 0; i < grid.Children().Size(); ++i)
+                {
+                    const auto child = grid.Children().GetAt(i).try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
+                    if (const auto found = _findLeafContainer(child, leaf))
+                    {
+                        return found;
+                    }
+                }
+            }
+            return nullptr;
+        }
+    }
+
+    // Big-flip Slice D (#54): splitting the active workspace's root leaf builds
+    // a NESTED split container in the (collapsed) WorkspaceContentHost — a split
+    // Grid with two star-sized cells, each holding a leaf container, mirroring
+    // the model's 1->2 leaves. Each leaf container carries its leaf's Slice-C
+    // strip. We drive the model splitPane action (NOT a classic resize), so this
+    // asserts the projected element-tree STRUCTURE/nesting, never pixel widths.
+    // The classic split path is left intact (still one classic Tab; the classic
+    // pane tree grew to 2 leaves), and the host stays Collapsed.
+    //
+    // RED before the split arms project the tree: SplitPaneCreated /
+    // LeafPaneCreated are no-ops for the new tree, so the host's projected
+    // pane-tree root never becomes a split Grid (it stays a single leaf
+    // container, or null). GREEN after: the root is a split Grid with two leaf
+    // containers, one per model leaf.
+    void WorkspaceTests::BigFlipD_Split_BuildsNestedContainers()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xD000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(workspaces[0].root),
+                           L"fresh workspace root must be a single leaf");
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            // Baseline: the projected pane-tree root is a single leaf container
+            // for leaf0 — not yet a split.
+            const auto rootBefore = page->_workspacePaneTreeRootChildForTest();
+            const auto leafBefore = _findLeafContainer(rootBefore, leaf0);
+            VERIFY_IS_NOT_NULL(leafBefore,
+                               L"baseline: the root leaf must already have a projected leaf container");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf via the model (splitPane, vertical, ratio 0.5)");
+        ::WorkspaceModel::PaneId rightLeaf{ 0 };
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid(), L"splitPane must allocate a new sibling leaf");
+            rightLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // Model: the active workspace's root is now a SplitPane with two
+            // leaf children.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split, L"model root must be a SplitPane after the split");
+
+            // GREEN: the projected pane-tree root is now a split Grid (carrying
+            // the SplitPane's id), with two star-sized cells.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            VERIFY_IS_NOT_NULL(rootChild, L"the host must have a projected pane-tree root");
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid, L"the projected root must be a Grid for the split");
+            const auto rootTag = splitGrid.Tag().try_as<uint64_t>();
+            VERIFY_IS_TRUE(rootTag.has_value() && *rootTag == split->id.v,
+                           L"the split Grid must carry the SplitPane's id in Tag");
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), splitGrid.ColumnDefinitions().Size(),
+                             L"a vertical split projects two columns (two cells along the axis)");
+
+            // Both model leaves have a projected leaf container nested in the
+            // split (structure mirrors the model's 1->2 leaves).
+            const auto leftContainer = _findLeafContainer(rootChild, leaf0);
+            const auto rightContainer = _findLeafContainer(rootChild, rightLeaf);
+            VERIFY_IS_NOT_NULL(leftContainer, L"the original leaf must have a container in the split");
+            VERIFY_IS_NOT_NULL(rightContainer, L"the new sibling leaf must have a container in the split");
+
+            // Each leaf container holds that leaf's Slice-C strip — the strip
+            // collections for both leaves exist and are non-empty (one tab each).
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the original leaf keeps its one-tab strip across the split");
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(rightLeaf),
+                             L"the new sibling leaf gets its own one-tab strip (split-sibling skip lifted)");
+
+            // INVISIBLE + classic intact: one classic Tab, host Collapsed.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"the split must not create a 2nd classic Tab");
+            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
+            VERIFY_IS_NOT_NULL(tab);
+            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
+                             L"the classic pane tree (the visible one) still grew to two leaves");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the split — no visible change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice D (#54): a SplitRatioChanged updates the projected split
+    // Grid's two cells' star sizes to match the model's new ratio. We split, then
+    // resizePane to a non-0.5 ratio via the model and assert the GridLength star
+    // VALUES (not measured widths) of the two cells are ratio and 1-ratio. This
+    // is the headless-safe ratio assertion — pure GridLength inspection, no real
+    // geometry. Host stays Collapsed; classic split untouched.
+    //
+    // RED before SplitRatioChanged updates the star sizes: the cells keep their
+    // 0.5/0.5 split-creation sizes. GREEN after: they are 0.7/0.3.
+    void WorkspaceTests::BigFlipD_SplitRatio_SetsStarSizes()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xD100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId splitId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf (vertical, ratio 0.5)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            splitId = sp->id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // The freshly-created split Grid's cells are 0.5 / 0.5 in star units.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+            VERIFY_ARE_EQUAL(0.5, _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 0),
+                             L"created split: first cell star == ratio (0.5)");
+            VERIFY_ARE_EQUAL(0.5, _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 1),
+                             L"created split: second cell star == 1-ratio (0.5)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Change the split ratio to 0.7 via the model (resizePane)");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::resizePane(page->_workspaceModelState, splitId, 0.7);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+
+            // The model recorded the new ratio.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* sp = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(sp);
+            VERIFY_ARE_EQUAL(0.7, sp->ratio);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the projected split Grid's cells follow the model ratio.
+            // XAML's GridLength backs its Value with float precision, so the
+            // double 0.7 round-trips to ~0.69999998; compare with a small
+            // tolerance (this asserts the RATIO structure, never a laid-out
+            // pixel width — the headless-resize-clamp trap).
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid);
+            VERIFY_IS_TRUE(std::abs(0.7 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 0)) < 1e-5,
+                           L"after resize: first cell star == ratio (0.7)");
+            VERIFY_IS_TRUE(std::abs(0.3 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 1)) < 1e-5,
+                           L"after resize: second cell star == 1-ratio (0.3)");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across a ratio change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice D (#54): closing one of a split's two leaves collapses the
+    // split — the model lifts the surviving sibling to the workspace root — and
+    // the projection follows: the host's projected pane-tree root becomes a
+    // single leaf container again (no split Grid). We split, then closePane the
+    // new sibling leaf; the model's root reverts to a LeafPane and the projected
+    // root is a leaf container for the survivor. Host stays Collapsed.
+    //
+    // RED before SplitPaneCollapsed lifts the survivor: the projected root stays
+    // a split Grid. GREEN after: it is a single leaf container for the survivor.
+    void WorkspaceTests::BigFlipD_Collapse_LiftsSurvivor()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xD200 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId rightLeaf{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf (vertical), then confirm the projection is a split Grid");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            rightLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto splitGrid = rootChild.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            VERIFY_IS_NOT_NULL(splitGrid, L"precondition: the projection is a split Grid before collapse");
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), splitGrid.ColumnDefinitions().Size());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Close the new sibling leaf (closePane) — the split collapses to the survivor");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::closePane(page->_workspaceModelState, rightLeaf);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+
+            // Model: the root is a single LeafPane again (the survivor, leaf0).
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size(), L"closing a split child must NOT remove the workspace");
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf, L"the root must collapse back to a single leaf");
+            VERIFY_ARE_EQUAL(leaf0.v, leaf->id.v, L"the surviving leaf is the original (leaf0)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the projected root is a single leaf container for the
+            // survivor, NOT a split Grid.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            VERIFY_IS_NOT_NULL(rootChild, L"the host must still have a projected pane-tree root");
+            const auto rootTag = rootChild.Tag().try_as<uint64_t>();
+            VERIFY_IS_TRUE(rootTag.has_value() && *rootTag == leaf0.v,
+                           L"the projected root must now be the survivor leaf's container (tag == leaf0)");
+
+            // The collapsed-away leaf's container is gone from the tree.
+            const auto goneContainer = _findLeafContainer(rootChild, rightLeaf);
+            VERIFY_IS_NULL(goneContainer, L"the closed leaf's container must be lifted out of the tree");
+
+            // The survivor still has its container + strip.
+            const auto survivor = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(survivor);
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the survivor keeps its one-tab strip");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the collapse");
+        });
+        VERIFY_SUCCEEDED(result);
     }
 }

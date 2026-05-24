@@ -114,6 +114,14 @@
       <DependentUpon>TerminalTabStatus.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClInclude>
+    <ClInclude Include="WorkspaceViewModel.h">
+      <DependentUpon>WorkspaceViewModel.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
+    <ClInclude Include="PaneTabViewModel.h">
+      <DependentUpon>PaneTabViewModel.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClInclude>
     <ClInclude Include="TitlebarControl.h">
       <DependentUpon>TitlebarControl.xaml</DependentUpon>
     </ClInclude>
@@ -227,6 +235,14 @@
       <DependentUpon>TerminalTabStatus.idl</DependentUpon>
       <SubType>Code</SubType>
     </ClCompile>
+    <ClCompile Include="WorkspaceViewModel.cpp">
+      <DependentUpon>WorkspaceViewModel.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
+    <ClCompile Include="PaneTabViewModel.cpp">
+      <DependentUpon>PaneTabViewModel.idl</DependentUpon>
+      <SubType>Code</SubType>
+    </ClCompile>
     <ClCompile Include="TitlebarControl.cpp">
       <DependentUpon>TitlebarControl.xaml</DependentUpon>
     </ClCompile>
@@ -332,6 +348,12 @@
       <SubType>Code</SubType>
     </Midl>
     <Midl Include="TerminalTabStatus.idl">
+      <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="WorkspaceViewModel.idl">
+      <SubType>Designer</SubType>
+    </Midl>
+    <Midl Include="PaneTabViewModel.idl">
       <SubType>Designer</SubType>
     </Midl>
     <Midl Include="TitlebarControl.idl">

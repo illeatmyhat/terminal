@@ -67,6 +67,52 @@ namespace WorkspaceModel
             return std::get<SplitPane>(node).id.valid();
         }
 
+        // True iff every leaf in the subtree has its active tab materialised
+        // (tabs[activeTabIdx].mount set). Used by invariant 9 to check that
+        // the active workspace's content is live. Malformed leaves (empty /
+        // out-of-range activeTabIdx) are reported by earlier invariants, so
+        // here they are treated as "not unmounted" to avoid masking the more
+        // specific violation.
+        [[nodiscard]] bool activeTabsMaterialised(const PaneNode& node) noexcept
+        {
+            if (const auto* leaf = std::get_if<LeafPane>(&node))
+            {
+                if (leaf->tabs.empty() || leaf->activeTabIdx >= leaf->tabs.size())
+                {
+                    return true; // structural problem already caught upstream
+                }
+                return leaf->tabs[leaf->activeTabIdx].mount.has_value();
+            }
+            const auto& split = std::get<SplitPane>(node);
+            if (split.left && !activeTabsMaterialised(*split.left))
+            {
+                return false;
+            }
+            if (split.right && !activeTabsMaterialised(*split.right))
+            {
+                return false;
+            }
+            return true;
+        }
+
+        // The workspace named by activeWorkspaceId, or nullptr if the model
+        // is empty / the id is dangling (invariant 6 reports the latter).
+        [[nodiscard]] const WorkspaceState* findActiveWorkspace(const WorkspaceModelData& m) noexcept
+        {
+            if (!m.activeWorkspaceId.has_value())
+            {
+                return nullptr;
+            }
+            for (const auto& ws : m.workspaces)
+            {
+                if (ws.id == *m.activeWorkspaceId)
+                {
+                    return &ws;
+                }
+            }
+            return nullptr;
+        }
+
         // Append every TabRecord.mount in the subtree to `out`.
         void collectMounts(const PaneNode& node, std::vector<ContentId>& out)
         {
@@ -111,6 +157,27 @@ namespace WorkspaceModel
             if (!ws.activePaneId.valid() || !subtreeContainsLeafWithId(ws.root, ws.activePaneId))
             {
                 return Violation::ActivePaneIdInvalid;
+            }
+        }
+
+        // Invariant 10: in display order, every pinned workspace precedes
+        // every unpinned one (the pinned block is a contiguous prefix). Once we
+        // have seen an unpinned workspace, no later workspace may be pinned.
+        {
+            bool sawUnpinned = false;
+            for (const auto& ws : m.workspaces)
+            {
+                if (ws.pinned)
+                {
+                    if (sawUnpinned)
+                    {
+                        return Violation::PinnedNotContiguous;
+                    }
+                }
+                else
+                {
+                    sawUnpinned = true;
+                }
             }
         }
 
@@ -181,6 +248,22 @@ namespace WorkspaceModel
                 if (!seen.insert(cid).second)
                 {
                     return Violation::DuplicateContentIdMount;
+                }
+            }
+        }
+
+        // Invariant 9: the active workspace's content is materialised — every
+        // leaf's active tab in the active workspace carries a mount. (The
+        // mount policy establishes this at the end of every action; here we
+        // assert it as a model-wide invariant. Inactive workspaces are
+        // intentionally unconstrained.)
+        if (m.activeWorkspaceId.has_value())
+        {
+            if (const auto* ws = findActiveWorkspace(m))
+            {
+                if (!activeTabsMaterialised(ws->root))
+                {
+                    return Violation::ActiveContentNotMounted;
                 }
             }
         }
