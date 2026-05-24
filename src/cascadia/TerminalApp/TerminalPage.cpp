@@ -6648,6 +6648,34 @@ namespace winrt::TerminalApp::implementation
         return ws->activePaneId;
     }
 
+    // Flag-on new-tab dispatch shared by every new-tab intent in
+    // _HandleNewTab. The rule: if there is an active workspace AND an active
+    // leaf, append a tab to that focused leaf via WorkspaceModel::newTab;
+    // otherwise (no active workspace/leaf — startup / empty model) fall back
+    // to newWorkspace so a new-tab intent still produces a tab rather than a
+    // silent no-op. Either way we _applyWorkspaceAction the result, which
+    // drives the diff -> view (strip VM append + ContentMounted factory).
+    void TerminalPage::_dispatchNewTabInActiveLeafOrWorkspace(const ::WorkspaceModel::TerminalSpec& spec)
+    {
+        const auto activeWsId = _workspaceModelState
+                                    ? _workspaceModelState->activeWorkspaceId_view()
+                                    : std::nullopt;
+        const auto activeLeaf = _activeLeafModelId();
+        if (activeWsId.has_value() && activeLeaf.has_value())
+        {
+            auto created = ::WorkspaceModel::newTab(_workspaceModelState,
+                                                    *activeWsId,
+                                                    *activeLeaf,
+                                                    ::WorkspaceModel::TabContent{ spec });
+            _applyWorkspaceAction(std::move(created.state));
+        }
+        else
+        {
+            auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+            _applyWorkspaceAction(std::move(created.state));
+        }
+    }
+
     std::optional<::WorkspaceModel::PaneId> TerminalPage::_focusedSplitIdInActiveWorkspace() const
     {
         if (!_workspaceModelState)

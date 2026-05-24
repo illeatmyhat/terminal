@@ -54,6 +54,9 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StartupReplay_FlagOn_CreatesInitialTab);
         TEST_METHOD(NewTab_FlagOn_AppendsTab);
         TEST_METHOD(NewTab_FlagOff_AppendsTabWithoutModel);
+        // Slice F follow-up (#54): the Ctrl+Shift+T action shape (NewTabArgs
+        // wrapping default NewTerminalArgs) adds a tab to the focused leaf.
+        TEST_METHOD(NewTab_FlagOn_DefaultNewTabArgs_AppendsTabToFocusedLeaf);
 
         // #43: the keybinding-less _HandleNewTab(sender, nullptr) branch.
         TEST_METHOD(NewTab_FlagOn_NullArgs_AppendsTabThroughModel);
@@ -79,16 +82,18 @@ namespace TerminalAppLocalTests
         TEST_METHOD(NewTab_FlagOff_ExplicitProfileByName_AppendsTab);
 
         // #41: any non-default NewTerminalArgs field (beyond the profile
-        // selector) must keep a flag-on new-tab on the classic path.
-        // ReloadEnvironmentVariables is the exception: it is set on nearly
-        // every launch and equals the default reload behavior, so it routes
-        // through the model instead (see method comment / #48).
-        TEST_METHOD(NewTab_FlagOn_TabColorField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_SessionIdField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_AppendCommandLineField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_SuppressApplicationTitleField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_ColorSchemeField_RoutesClassic);
-        TEST_METHOD(NewTab_FlagOn_ElevateField_RoutesClassic);
+        // selector) is NOT modelled in the TerminalSpec yet. BEHAVIOR CHANGE
+        // (Slice F follow-up, #54): flag-on these no longer fall through to the
+        // classic _OpenNewTab (that breach builds a classic Tab that drops the
+        // workspace host -> blank window). They now route THROUGH the model —
+        // a tab in the focused leaf — with the unmodelled fields dropped (a
+        // tracked follow-up; the spec only carries the profile GUID today).
+        TEST_METHOD(NewTab_FlagOn_TabColorField_RoutesThroughModel);
+        TEST_METHOD(NewTab_FlagOn_SessionIdField_RoutesThroughModel);
+        TEST_METHOD(NewTab_FlagOn_AppendCommandLineField_RoutesThroughModel);
+        TEST_METHOD(NewTab_FlagOn_SuppressApplicationTitleField_RoutesThroughModel);
+        TEST_METHOD(NewTab_FlagOn_ColorSchemeField_RoutesThroughModel);
+        TEST_METHOD(NewTab_FlagOn_ElevateField_RoutesThroughModel);
         TEST_METHOD(NewTab_FlagOn_ReloadEnvironmentVariablesField_RoutesThroughModel);
 
         // Slice 6 review fixes:
@@ -335,9 +340,13 @@ namespace TerminalAppLocalTests
                                                 CascadiaSettings initialSettings);
 
         // #41 shared body: fire a flag-on default-profile NewTab whose
-        // NewTerminalArgs carries a single non-default field, and assert
-        // the model was NOT grown (the new tab took the classic path).
-        void _verifyFlagOnNonDefaultFieldRoutesClassic(
+        // NewTerminalArgs carries a single non-default (unmodelled) field, and
+        // assert it routes THROUGH the model — a tab added to the focused leaf
+        // of the active workspace (workspace count unchanged, strip +1, `_tabs`
+        // stays empty), NOT a classic tab. Slice F follow-up (#54): the
+        // pre-cutover fall-through to classic _OpenNewTab was a blank-window
+        // breach; the unmodelled fields are dropped flag-on (tracked follow-up).
+        void _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs&)> setField,
             const wchar_t* fieldLabel);
 
@@ -607,13 +616,22 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         // Pre-condition: startup-replay landed one workspace and NO classic tab
-        // (cutover). The args-carrying default NewTab still dispatches
-        // newWorkspace flag-on (only the keybinding-less Ctrl+T path changed to
-        // newTab).
-        auto result = RunOnUIThread([&page]() {
+        // (cutover). BEHAVIOR CHANGE (Slice F follow-up, #54): an args-carrying
+        // default NewTab (the action a keybinding sends) now adds a TAB to the
+        // focused leaf of the active workspace — NOT a new workspace. Previously
+        // this test pinned the buggy "creates a second workspace" behavior; the
+        // new-tab keybinding fix makes every flag-on new-tab intent append to the
+        // focused leaf. Capture the active leaf so we can assert its strip grew.
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the active leaf starts with exactly one tab in its strip");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -626,26 +644,83 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
+        result = RunOnUIThread([&page, activeLeaf]() {
             // Big-flip Slice F-5 (#54): no classic tab is built flag-on.
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on default-profile new-tab must NOT build a classic tab (cutover)");
 
-            // The args-carrying default NewTab maps to a new workspace, so the
-            // model now has two workspaces.
-            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"flag-on new-tab should create a second workspace");
+            // The args-carrying default NewTab adds a tab to the focused leaf,
+            // so the workspace COUNT is unchanged (still one workspace).
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on new-tab must NOT create a new workspace — same workspace count");
 
-            // Each workspace has exactly one leaf with exactly one tab
-            // (the Phase 1 implicit constraint).
-            for (const auto& ws : page->_workspaceModelState->workspaces_view())
-            {
-                const auto leaves = page->_workspaceModelState->leaves(ws.id);
-                VERIFY_ARE_EQUAL(1u, leaves.size(),
-                                 L"Phase 1 holds exactly one leaf per workspace");
-                VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size(),
-                                 L"Phase 1 holds exactly one tab per leaf");
-            }
+            // The active leaf's strip grew by one row (1 -> 2): the new tab
+            // landed in the focused leaf, not a fresh workspace.
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"flag-on new-tab adds a pane-tab to the focused leaf's strip (1 -> 2)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice F follow-up (#54): the Ctrl+Shift+T shape — a NewTabArgs wrapping a
+    // DEFAULT NewTerminalArgs — must add a TAB to the focused leaf of the active
+    // workspace, NOT spawn a new workspace. This is the exact action a keybinding
+    // dispatches (distinct from the keybinding-less null-args path covered by
+    // NewTab_FlagOn_NullArgs_AppendsTabThroughModel). Assert: workspace count
+    // unchanged (still 1), focused leaf strip +1 (1 -> 2), `_tabs` stays empty.
+    void WorkspaceTests::NewTab_FlagOn_DefaultNewTabArgs_AppendsTabToFocusedLeaf()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the active leaf starts with exactly one tab in its strip");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire the Ctrl+Shift+T shape: NewTabArgs wrapping default NewTerminalArgs");
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+            VERIFY_IS_TRUE(eventArgs.Handled(),
+                           L"the new-tab action must be marked handled flag-on");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, activeLeaf]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"Ctrl+Shift+T flag-on must NOT build a classic tab (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"Ctrl+Shift+T flag-on must NOT create a new workspace — same workspace count");
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"Ctrl+Shift+T flag-on adds a pane-tab to the focused leaf's strip (1 -> 2)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -899,7 +974,7 @@ namespace TerminalAppLocalTests
     }
 
     // #41 shared body. See declaration.
-    void WorkspaceTests::_verifyFlagOnNonDefaultFieldRoutesClassic(
+    void WorkspaceTests::_verifyFlagOnNonDefaultFieldRoutesThroughModel(
         std::function<void(winrt::Microsoft::Terminal::Settings::Model::NewTerminalArgs&)> setField,
         const wchar_t* fieldLabel)
     {
@@ -923,9 +998,15 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        auto result = RunOnUIThread([&page]() {
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"startup-replay should produce exactly one workspace");
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the active leaf starts with exactly one tab in its strip");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -939,56 +1020,64 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page, fieldLabel]() {
-            // The field is not modelled in Phase 1, so the new tab must
-            // take the classic path: the workspace model stays at its
-            // single startup workspace rather than growing to two.
+        result = RunOnUIThread([&page, activeLeaf, fieldLabel]() {
+            // BEHAVIOR CHANGE (Slice F follow-up, #54): the field is not modelled
+            // in the TerminalSpec, but flag-on we no longer fall through to the
+            // classic path (that built a classic Tab and dropped the workspace
+            // host -> blank window). The new tab routes THROUGH the model — a tab
+            // added to the focused leaf — so the workspace count is UNCHANGED, the
+            // focused leaf's strip grew by one, and `_tabs` stays empty. The
+            // unmodelled field is dropped flag-on (a tracked follow-up).
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the unmodelled-field new-tab must NOT build a classic tab");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              fieldLabel);
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the unmodelled-field new-tab lands in the focused leaf's strip (1 -> 2)");
         });
         VERIFY_SUCCEEDED(result);
     }
 
-    void WorkspaceTests::NewTab_FlagOn_TabColorField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_TabColorField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.TabColor(winrt::Windows::UI::Color{ 255, 10, 20, 30 }); },
-            L"a TabColor override must keep the new tab on the classic path");
+            L"a TabColor override routes through the model (one workspace, tab in focused leaf)");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_SessionIdField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_SessionIdField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.SessionId(winrt::guid{ 0x12345678, 0x1234, 0x1234, { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 } }); },
-            L"a SessionId override must keep the new tab on the classic path");
+            L"a SessionId override routes through the model (one workspace, tab in focused leaf)");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_AppendCommandLineField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_AppendCommandLineField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.AppendCommandLine(true); },
-            L"an AppendCommandLine override must keep the new tab on the classic path");
+            L"an AppendCommandLine override routes through the model (one workspace, tab in focused leaf)");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_SuppressApplicationTitleField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_SuppressApplicationTitleField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.SuppressApplicationTitle(true); },
-            L"a SuppressApplicationTitle override must keep the new tab on the classic path");
+            L"a SuppressApplicationTitle override routes through the model (one workspace, tab in focused leaf)");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_ColorSchemeField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_ColorSchemeField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.ColorScheme(L"Campbell"); },
-            L"a ColorScheme override must keep the new tab on the classic path");
+            L"a ColorScheme override routes through the model (one workspace, tab in focused leaf)");
     }
 
-    void WorkspaceTests::NewTab_FlagOn_ElevateField_RoutesClassic()
+    void WorkspaceTests::NewTab_FlagOn_ElevateField_RoutesThroughModel()
     {
-        _verifyFlagOnNonDefaultFieldRoutesClassic(
+        _verifyFlagOnNonDefaultFieldRoutesThroughModel(
             [](NewTerminalArgs& a) { a.Elevate(true); },
-            L"an Elevate override must keep the new tab on the classic path");
+            L"an Elevate override routes through the model (one workspace, tab in focused leaf)");
     }
 
     // ReloadEnvironmentVariables is set true on essentially every launch by
@@ -1020,9 +1109,15 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        auto result = RunOnUIThread([&page]() {
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"startup-replay should produce exactly one workspace");
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the active leaf starts with exactly one tab in its strip");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -1036,12 +1131,16 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
-            // ReloadEnvironmentVariables is not a meaningful per-tab override,
-            // so the new tab routes through the model: the workspace count
-            // grows from one to two rather than staying on the classic path.
-            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"a ReloadEnvironmentVariables-only new tab must route through the model");
+        result = RunOnUIThread([&page, activeLeaf]() {
+            // ReloadEnvironmentVariables is not a meaningful per-tab override, so
+            // this is treated as a default-profile new-tab and routes through the
+            // model. BEHAVIOR CHANGE (Slice F follow-up, #54): "through the model"
+            // now means a tab in the focused leaf, not a new workspace — so the
+            // workspace count is UNCHANGED and the focused leaf's strip grew by one.
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"a ReloadEnvironmentVariables-only new tab must NOT create a new workspace");
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"a ReloadEnvironmentVariables-only new tab lands in the focused leaf's strip (1 -> 2)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -1083,11 +1182,11 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         // Push the model up to two workspaces, then verify pre-conditions.
+        // Slice F follow-up (#54): NewTab now adds a tab to the focused leaf, so
+        // use the new-workspace entry point (_createNewWorkspace) to get a second
+        // workspace to switch between.
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -1602,10 +1701,14 @@ namespace TerminalAppLocalTests
 
     // AC: "Explicit-profile new-tab observable parity." Firing a
     // NewTab action whose NewTerminalArgs names profile1 (the non-
-    // default profile) with the flag on must:
-    //  - Append a second classic tab (matches flag-off).
-    //  - Append a second model workspace whose only tab's TerminalSpec
-    //    carries profile1's GUID, NOT the zero-GUID sentinel.
+    // default profile) with the flag on must (Slice F follow-up, #54):
+    //  - NOT build a classic tab (cutover).
+    //  - NOT create a new workspace — the workspace count is unchanged.
+    //  - Append a tab to the ACTIVE workspace's focused leaf whose
+    //    TerminalSpec carries profile1's GUID, NOT the zero-GUID sentinel.
+    // Previously this pinned the buggy "creates a second workspace"
+    // behavior; the new-tab keybinding fix carries the resolved profile
+    // into the focused leaf's new tab instead.
     void WorkspaceTests::NewTab_FlagOn_ExplicitProfileByName_AppendsTab()
     {
         CascadiaSettings settings{ settingsJsonFlagOn, {} };
@@ -1614,9 +1717,14 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        auto result = RunOnUIThread([&page]() {
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on the classic tab strip is never populated (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
 
             NewTerminalArgs newTerminalArgs{};
             newTerminalArgs.Profile(L"profile1");
@@ -1626,25 +1734,29 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
+        result = RunOnUIThread([&page, activeLeaf]() {
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on explicit-profile new-tab must NOT build a classic tab (cutover)");
 
-            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"flag-on explicit-profile new-tab should create a second workspace");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on explicit-profile new-tab must NOT create a new workspace — same count");
 
-            // The most-recently-added workspace is the active one.
+            // The new tab landed in the active workspace's focused leaf.
             const auto activeId = page->_workspaceModelState->activeWorkspaceId_view();
             VERIFY_IS_TRUE(activeId.has_value());
-            const auto leaves = page->_workspaceModelState->leaves(activeId.value());
-            VERIFY_ARE_EQUAL(1u, leaves.size());
-            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
-            const auto& description = leaves[0]->tabs[0].description;
+            const auto* node = page->_workspaceModelState->pane(activeLeaf);
+            VERIFY_IS_NOT_NULL(node);
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(2u, leaf->tabs.size(),
+                             L"the focused leaf grew from one tab to two");
+
+            // The most-recently-appended tab (back of the leaf's strip)
+            // carries profile1's GUID, not the zero-GUID sentinel that
+            // default-profile dispatch uses.
+            const auto& description = leaf->tabs.back().description;
             VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(description));
             const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(description);
-
-            // The profile bytes must equal profile1's GUID, not the
-            // zero-GUID sentinel that default-profile dispatch uses.
             const ::WorkspaceModel::TerminalSpec defaultSentinel{};
             VERIFY_IS_FALSE(spec == defaultSentinel,
                             L"explicit-profile dispatch must carry the resolved profile GUID, not the zero sentinel");
@@ -1898,16 +2010,15 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Stand up a second workspace (args-carrying default NewTab still
-        // dispatches newWorkspace flag-on) so closing the first does not trip the
-        // last-workspace window-close path.
+        // Stand up a second workspace so closing the first does not trip the
+        // last-workspace window-close path. Slice F follow-up (#54): NewTab no
+        // longer creates a workspace (it adds a tab to the focused leaf), so use
+        // the legitimate new-workspace entry point (_createNewWorkspace, the
+        // chrome `+` button's path) to mint the second workspace.
         ::WorkspaceModel::WorkspaceId firstWsId{ 0 };
         auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
         auto result = RunOnUIThread([&page, &firstWsId, closeWindowRequestCount]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
@@ -2248,12 +2359,12 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        // Add a second workspace via the new-tab handler: still stay open.
+        // Add a second workspace via the new-workspace entry point: still stay
+        // open. Slice F follow-up (#54): NewTab now adds a tab to the focused leaf
+        // rather than a new workspace, so mint the second workspace with
+        // _createNewWorkspace (the chrome `+` path).
         result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
             VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
                            L"flag-on, 2 workspaces -> stay open");
@@ -3082,12 +3193,12 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Create a second workspace via a default new-tab.
+        // Create a second workspace. Slice F follow-up (#54): NewTab now adds a
+        // tab to the focused leaf, so use the new-workspace entry point
+        // (_createNewWorkspace) to get a second single-leaf workspace as the
+        // cross-workspace move destination.
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -3293,10 +3404,9 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, page->_workspaceViewModels.Size(),
                              L"startup-replay must produce exactly one sidebar view-model");
 
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            // Slice F follow-up (#54): NewTab now adds a tab to the focused leaf,
+            // so mint the second workspace via _createNewWorkspace.
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -3583,13 +3693,12 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Startup gives workspace 0; a NewTab adds workspace 1 and makes it the
-        // active one (newWorkspace's contract), selecting classic tab 1.
+        // Startup gives workspace 0; a new workspace adds workspace 1 and makes
+        // it the active one (newWorkspace's contract). Slice F follow-up (#54):
+        // mint it via _createNewWorkspace (NewTab now adds a tab to the focused
+        // leaf, not a workspace).
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -3606,7 +3715,7 @@ namespace TerminalAppLocalTests
             const auto activeBefore = page->_workspaceModelState->activeWorkspaceId_view();
             VERIFY_IS_TRUE(activeBefore.has_value());
             VERIFY_ARE_EQUAL(activeBefore.value(), workspaces[1].id,
-                             L"workspaces[1] should be active after a NewTab");
+                             L"workspaces[1] should be active after creating a second workspace");
 
             // The row 0 view-model carries workspace 0's id; activating it is the
             // sidebar click intent.
@@ -3668,11 +3777,10 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
+        // Slice F follow-up (#54): mint the second workspace via
+        // _createNewWorkspace (NewTab now adds a tab to the focused leaf).
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -3681,7 +3789,8 @@ namespace TerminalAppLocalTests
             const auto vm0 = page->_workspaceViewModels.GetAt(0);
             const auto vm1 = page->_workspaceViewModels.GetAt(1);
 
-            // After NewTab, workspace 1 is active: its row is highlighted, 0 isn't.
+            // After creating a second workspace it is active: its row is
+            // highlighted, 0 isn't.
             VERIFY_IS_FALSE(vm0.IsActive());
             VERIFY_IS_TRUE(vm1.IsActive());
 
@@ -3730,15 +3839,14 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Startup gives workspace 0; two NewTabs add workspaces 1 and 2 so the
-        // sidebar has three rows [w0, w1, w2] in declared order.
+        // Startup gives workspace 0; two new workspaces add workspaces 1 and 2 so
+        // the sidebar has three rows [w0, w1, w2] in declared order. Slice F
+        // follow-up (#54): mint them via _createNewWorkspace (NewTab now adds a
+        // tab to the focused leaf, not a workspace).
         auto result = RunOnUIThread([&page]() {
             for (int i = 0; i < 2; ++i)
             {
-                NewTerminalArgs newTerminalArgs{};
-                NewTabArgs newTabArgs{ newTerminalArgs };
-                ActionEventArgs eventArgs{ newTabArgs };
-                page->_HandleNewTab(nullptr, eventArgs);
+                page->_createNewWorkspace(std::nullopt);
             }
         });
         VERIFY_SUCCEEDED(result);
@@ -3931,12 +4039,12 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Fire a default-profile NewTab (a 2nd, activated workspace)");
+        Log::Comment(L"Create a 2nd, activated workspace");
+        // Slice F follow-up (#54): mint via _createNewWorkspace (NewTab now adds a
+        // tab to the focused leaf, not a workspace) so this still exercises the
+        // factory materialising a content for a freshly-activated workspace.
         result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -3948,7 +4056,7 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on the classic tab strip stays empty across new workspaces (cutover)");
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"flag-on new-tab created a second workspace");
+                             L"creating a second workspace grew the model to two workspaces");
 
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), page->_workspaceView->contentRegistrySizeForTest(),
                              L"the registry owns one live content per active workspace");
@@ -4001,12 +4109,11 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        Log::Comment(L"Create a 2nd workspace via a default new-tab");
+        Log::Comment(L"Create a 2nd workspace");
+        // Slice F follow-up (#54): mint via _createNewWorkspace (NewTab now adds a
+        // tab to the focused leaf, not a workspace).
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -4019,7 +4126,7 @@ namespace TerminalAppLocalTests
         result = RunOnUIThread([&page, &closingWsId, &survivingWsId, &survivingMount]() {
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(2u, workspaces.size(),
-                             L"flag-on new-tab created a second workspace");
+                             L"creating a second workspace grew the model to two workspaces");
 
             survivingWsId = workspaces[0].id;
             closingWsId = workspaces[1].id;
@@ -4231,12 +4338,13 @@ namespace TerminalAppLocalTests
             };
         });
 
-        Log::Comment(L"Create a 2nd workspace via a default new-tab (now active)");
+        Log::Comment(L"Create a 2nd workspace (now active)");
+        // Slice F follow-up (#54): mint via _createNewWorkspace (NewTab now adds a
+        // tab to the focused leaf, not a workspace) so each workspace stays a
+        // single-leaf tree and the override factory materialises one mock per
+        // workspace in creation order.
         auto result = RunOnUIThread([&page]() {
-            NewTerminalArgs newTerminalArgs{};
-            NewTabArgs newTabArgs{ newTerminalArgs };
-            ActionEventArgs eventArgs{ newTabArgs };
-            page->_HandleNewTab(nullptr, eventArgs);
+            page->_createNewWorkspace(std::nullopt);
         });
         VERIFY_SUCCEEDED(result);
 
@@ -4250,7 +4358,7 @@ namespace TerminalAppLocalTests
         result = RunOnUIThread([&]() {
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(2u, workspaces.size(),
-                             L"flag-on new-tab created a second workspace");
+                             L"creating a second workspace grew the model to two workspaces");
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),

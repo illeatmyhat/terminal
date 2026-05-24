@@ -785,6 +785,13 @@ namespace winrt::TerminalApp::implementation
         // active workspace's active leaf model id (or std::nullopt when
         // the model is empty / the active leaf isn't known yet).
         std::optional<::WorkspaceModel::PaneId> _activeLeafModelId() const;
+        // Flag-on new-tab dispatch (Slice F follow-up): create a tab in the
+        // active workspace's focused leaf via WorkspaceModel::newTab, falling
+        // back to newWorkspace ONLY when there is no active workspace/leaf
+        // (startup / empty model). Used by every flag-on new-tab intent in
+        // _HandleNewTab so the keybinding (Ctrl+Shift+T) adds a tab to the
+        // focused leaf rather than spawning a whole new workspace.
+        void _dispatchNewTabInActiveLeafOrWorkspace(const ::WorkspaceModel::TerminalSpec& spec);
         // Find the SplitPane that is the immediate parent of the active
         // leaf in the active workspace, or std::nullopt when the active
         // leaf is the workspace root (single-pane workspace). This is the

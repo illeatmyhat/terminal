@@ -635,26 +635,9 @@ namespace winrt::TerminalApp::implementation
                 // newTab emits TabAdded + ContentMounted + ActiveTabChanged; the
                 // strip VM append + content factory represent the new tab. If we
                 // have no active workspace/leaf yet (shouldn't happen post-startup
-                // — startup creates one), fall back to newWorkspace so Ctrl+T
-                // still produces a tab rather than silently no-op'ing.
-                const auto activeWsId = _workspaceModelState
-                                            ? _workspaceModelState->activeWorkspaceId_view()
-                                            : std::nullopt;
-                const auto activeLeaf = _activeLeafModelId();
-                ::WorkspaceModel::TerminalSpec spec{};
-                if (activeWsId.has_value() && activeLeaf.has_value())
-                {
-                    auto created = ::WorkspaceModel::newTab(_workspaceModelState,
-                                                            *activeWsId,
-                                                            *activeLeaf,
-                                                            ::WorkspaceModel::TabContent{ spec });
-                    _applyWorkspaceAction(std::move(created.state));
-                }
-                else
-                {
-                    auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
-                    _applyWorkspaceAction(std::move(created.state));
-                }
+                // — startup creates one), the helper falls back to newWorkspace so
+                // Ctrl+T still produces a tab rather than silently no-op'ing.
+                _dispatchNewTabInActiveLeafOrWorkspace(::WorkspaceModel::TerminalSpec{});
             }
             else
             {
@@ -675,26 +658,32 @@ namespace winrt::TerminalApp::implementation
 
             if (_workspacesFlagEnabled())
             {
-                // Phase 1 maps each classic window-level tab onto its
-                // own model workspace (one tab per leaf). A user-level
-                // "new tab" therefore dispatches newWorkspace; per-leaf
-                // multi-tab support lands in Phase 2 slices 9-10.
+                // Slice F cutover (#54 follow-up): a user-level "new tab"
+                // (Ctrl+Shift+T sends a NewTabArgs) adds a TAB to the focused
+                // leaf of the ACTIVE workspace — NOT a whole new workspace.
+                // Pre-cutover (Phase 1) each classic window-tab mapped onto its
+                // own model workspace, so this dispatched newWorkspace; the
+                // cutover makes a workspace a multi-tab pane tree, so a new tab
+                // belongs in the active leaf. Every flag-on shape below routes
+                // through _dispatchNewTabInActiveLeafOrWorkspace (newTab in the
+                // focused leaf, or newWorkspace only when no workspace/leaf is
+                // active). We NEVER dispatch newWorkspace with an active
+                // workspace, and NEVER fall through to classic _OpenNewTab
+                // flag-on (that builds a classic Tab which drops the workspace
+                // host -> blank window).
+                //
+                // The chrome `+` split-button stays newWorkspace (wired in
+                // _initializeWorkspaceShell via _createNewWorkspace) — only this
+                // keybinding/command path is the new-tab semantics.
                 ::WorkspaceModel::TerminalSpec spec{};
                 if (!_isDefaultProfileNewTab(realArgs.ContentArgs()))
                 {
-                    // Slice 6: explicit-profile dispatch. Resolve the
-                    // NewTerminalArgs through CascadiaSettings (same
-                    // resolver _OpenNewTab uses) so the model carries
-                    // the canonical profile GUID rather than a free-
-                    // form name / index. The view's TabAdded arm hands
-                    // the resolved bytes back to _OpenNewTab via
-                    // _openProfileTabForWorkspace.
-                    //
-                    // Only the profile selector is modelled in Phase 1.
-                    // Any other non-default field (commandline, starting
-                    // directory, tab title, color, color scheme, etc.)
-                    // falls back to the classic path below so the
-                    // override isn't silently dropped.
+                    // Explicit-profile dispatch. Resolve the NewTerminalArgs
+                    // through CascadiaSettings (the same resolver _OpenNewTab
+                    // uses) so the model carries the canonical profile GUID
+                    // rather than a free-form name / index. Flag-on the
+                    // ContentMounted factory (_makePaneContentForSpec) reads
+                    // spec.profile back to build the right TermControl.
                     const auto terminalArgs = realArgs.ContentArgs().try_as<NewTerminalArgs>();
                     if (terminalArgs && !_hasUnmodelledNewTabFields(terminalArgs))
                     {
@@ -702,23 +691,21 @@ namespace winrt::TerminalApp::implementation
                         {
                             const auto g = profile.Guid();
                             std::memcpy(spec.profile.data(), &g, sizeof(g));
-                            auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
-                            _applyWorkspaceAction(std::move(created.state));
-                            args.Handled(true);
-                            return;
                         }
                     }
+                    // FOLLOW-UP (tracked): unmodelled NewTerminalArgs fields
+                    // (Commandline / StartingDirectory / TabTitle / TabColor /
+                    // ColorScheme / ContentId / etc.) are DROPPED flag-on — the
+                    // TerminalSpec only models the profile GUID today. We must
+                    // NOT fall through to classic _OpenNewTab flag-on (it builds
+                    // a classic Tab that clears the workspace host -> blank
+                    // window), so we route through the helper with a best-effort
+                    // spec (the resolved profile if any, else default). Restoring
+                    // full fidelity needs a richer TerminalSpec.
                 }
-                else
-                {
-                    auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
-                    _applyWorkspaceAction(std::move(created.state));
-                    args.Handled(true);
-                    return;
-                }
-                // Fall through to classic path for the un-modelled
-                // shapes (commandline / startingDirectory / tabTitle /
-                // contentId carries).
+                _dispatchNewTabInActiveLeafOrWorkspace(spec);
+                args.Handled(true);
+                return;
             }
 
             LOG_IF_FAILED(_OpenNewTab(realArgs.ContentArgs()));
