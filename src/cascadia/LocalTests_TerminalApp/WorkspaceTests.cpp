@@ -282,6 +282,35 @@ namespace TerminalAppLocalTests
 
         TEST_METHOD_CLEANUP(MethodCleanup)
         {
+            // Big-flip Slice F-5 (#54): deterministically tear down the page that
+            // the test just built BEFORE the next test constructs its own.
+            //
+            // The default mock factory (see _initializeTerminalPageWithFlagOn)
+            // already keeps the dominant, render-engine-backed content out of
+            // these tests. But a few flag-on tests fire a NewTab that ROUTES
+            // CLASSIC (a non-Phase-1 field), and the flag-off mirrors build a
+            // classic Tab too — both materialise a real TermControl + ConPTY
+            // whose handlers / connection callbacks tear down asynchronously. If
+            // such a page leaks past the test boundary (the
+            // DesktopWindowXamlSource window content keeps it alive), one of those
+            // deferred callbacks can fire into a half-torn-down page while the
+            // NEXT test is constructing its page on the shared TAEF UI thread —
+            // the rare residual 0xC0000005.
+            //
+            // Detaching the page from the window FIRST (so nothing in the live
+            // tree references it), then pumping the UI-thread queue, forces the
+            // prior page's release + its controls' teardown to run NOW, in
+            // cleanup, rather than racing the next construction. Order matters:
+            // detach before the dispatcher drain, never drop refs while the
+            // control is still parented and rendering.
+            (void)RunOnUIThread([]() {
+                winrt::Windows::UI::Xaml::Window::Current().Content(nullptr);
+            });
+            // A second, empty dispatch flushes everything queued ahead of it (the
+            // detach-driven releases), so they complete before the next test runs.
+            (void)RunOnUIThread([]() {});
+            _windowProperties = nullptr;
+            _contentManager = nullptr;
             return true;
         }
 
@@ -306,6 +335,62 @@ namespace TerminalAppLocalTests
 
         winrt::com_ptr<winrt::TerminalApp::implementation::WindowProperties> _windowProperties;
         winrt::com_ptr<winrt::TerminalApp::implementation::ContentManager> _contentManager;
+    };
+
+    // A minimal test-only IPaneContent that stands in for a live
+    // TermControl/ConPTY-backed content. It records how many times Close()
+    // was called (the registry calls Close() exactly once, on removal —
+    // the ConPTY-teardown point) and carries a unique tag so the test can
+    // assert that a re-mount resolves the SAME instance the registry kept
+    // alive across an unmount.
+    //
+    // Big-flip Slice F-5 (#54): hoisted from a method-local struct to namespace
+    // scope so _initializeTerminalPageWithFlagOn can install it as the DEFAULT
+    // content factory for every flag-on page test (see that helper for why a
+    // real TermControl must NOT be realised flag-on in the headless TestHostApp).
+    struct MockPaneContent : public winrt::implements<MockPaneContent, winrt::TerminalApp::IPaneContent>,
+                             public winrt::TerminalApp::implementation::BasicPaneEvents
+    {
+        explicit MockPaneContent(uint64_t tag) :
+            _tag{ tag } {}
+
+        uint64_t Tag() const noexcept { return _tag; }
+        int CloseCount() const noexcept { return _closeCount; }
+
+        // Big-flip Slice B (#54): the host-attach plumbing parents this
+        // content's GetRoot() into the WorkspaceContentHost. A headless test
+        // asserts that parented element by identity, so the mock must hand back
+        // a real, stable FrameworkElement — the SAME instance every call (the
+        // registry keeps one content alive across (un)mounts, so its root must
+        // be stable too). We lazily build a bare Grid and cache it. Using a real
+        // TermControl's root in a headless attach test is unnecessary and
+        // couples the test to control geometry; this mock root keeps the attach
+        // test about the plumbing only.
+        winrt::Windows::UI::Xaml::FrameworkElement GetRoot()
+        {
+            if (!_root)
+            {
+                _root = winrt::Windows::UI::Xaml::Controls::Grid{};
+            }
+            return _root;
+        }
+        void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings&) {}
+        winrt::Windows::Foundation::Size MinimumSize() { return { 0, 0 }; }
+        winrt::hstring Title() { return L"mock"; }
+        uint64_t TaskbarState() { return 0; }
+        uint64_t TaskbarProgress() { return 0; }
+        bool ReadOnly() { return false; }
+        winrt::hstring Icon() { return {}; }
+        winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> TabColor() const noexcept { return nullptr; }
+        winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush() { return nullptr; }
+        winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(winrt::TerminalApp::BuildStartupKind) { return nullptr; }
+        void Focus(winrt::Windows::UI::Xaml::FocusState) {}
+        void Close() { ++_closeCount; }
+
+    private:
+        uint64_t _tag{ 0 };
+        int _closeCount{ 0 };
+        winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
     };
 
     // Mirror of TabTests::_initializeTerminalPage, but seeds the
@@ -357,6 +442,43 @@ namespace TerminalAppLocalTests
             if (beforeCreate)
             {
                 beforeCreate(page.get());
+            }
+            else
+            {
+                // Big-flip Slice F-5 (#54): default the flag-on content factory
+                // to a MockPaneContent. WHY THIS IS LOAD-BEARING:
+                //
+                // THE CUTOVER (606dc2208) flips the WorkspaceContentHost Visible
+                // and makes it _tabContent's sole child, so flag-on workspace
+                // content is now laid out with REAL dimensions. Pre-cutover the
+                // host was Collapsed (zero size) -> ControlCore::Initialize()
+                // early-returned at windowWidth==0, so a real TermControl built
+                // by the production factory never spun up a render engine / render
+                // thread / D3D swap chain; it was an inert shell. Post-cutover it
+                // DOES — and in the headless TestHostApp that real render engine's
+                // teardown (synchronous render-thread join in ~ControlCore ->
+                // Renderer::TriggerTeardown) faults with 0xC0000005 inside
+                // Microsoft.Terminal.Control.dll, surfacing non-deterministically
+                // (~25-40% of runs) as a crash while CONSTRUCTING the next test's
+                // TerminalPage on the shared TAEF UI thread.
+                //
+                // The BigFlip A-F suite already installs this exact mock for the
+                // same reason; the remaining flag-on tests (which assert only
+                // MODEL / _tabs / validator state, never a real control's
+                // internals) just never had it. Installing it by DEFAULT keeps
+                // those tests building MockPaneContent (a bare Grid, no render
+                // engine) so nothing real is realised or torn down. This is a
+                // PURE TEST-HARNESS fix: production is untouched (each window owns
+                // its own UI thread and pages are not reconstructed back-to-back
+                // on a shared thread, so the real teardown is well-sequenced
+                // there) and flag-off is byte-for-byte unchanged. A test that
+                // genuinely needs a real control can still pass its own
+                // beforeCreate.
+                page->_makePaneContentForSpecOverrideForTest =
+                    [](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                    static uint64_t tag = 0xC000;
+                    return winrt::make_self<MockPaneContent>(tag++).as<winrt::TerminalApp::IPaneContent>();
+                };
             }
 
             page->Create();
@@ -3625,61 +3747,6 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(page->_workspaceViewModels.GetAt(0).IsPinned());
         });
         VERIFY_SUCCEEDED(result);
-    }
-
-    namespace
-    {
-        // A minimal test-only IPaneContent that stands in for a live
-        // TermControl/ConPTY-backed content. It records how many times Close()
-        // was called (the registry calls Close() exactly once, on removal —
-        // the ConPTY-teardown point) and carries a unique tag so the test can
-        // assert that a re-mount resolves the SAME instance the registry kept
-        // alive across an unmount.
-        struct MockPaneContent : public winrt::implements<MockPaneContent, winrt::TerminalApp::IPaneContent>,
-                                 public winrt::TerminalApp::implementation::BasicPaneEvents
-        {
-            explicit MockPaneContent(uint64_t tag) :
-                _tag{ tag } {}
-
-            uint64_t Tag() const noexcept { return _tag; }
-            int CloseCount() const noexcept { return _closeCount; }
-
-            // Big-flip Slice B (#54): the host-attach plumbing parents this
-            // content's GetRoot() into the (collapsed) WorkspaceContentHost. A
-            // headless test asserts that parented element by identity, so the
-            // mock must hand back a real, stable FrameworkElement — the SAME
-            // instance every call (the registry keeps one content alive across
-            // (un)mounts, so its root must be stable too). We lazily build a
-            // bare Grid and cache it. Using a real TermControl's root in a
-            // headless attach test is unnecessary and couples the test to
-            // control geometry; this mock root keeps the attach test about the
-            // plumbing only.
-            winrt::Windows::UI::Xaml::FrameworkElement GetRoot()
-            {
-                if (!_root)
-                {
-                    _root = winrt::Windows::UI::Xaml::Controls::Grid{};
-                }
-                return _root;
-            }
-            void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings&) {}
-            winrt::Windows::Foundation::Size MinimumSize() { return { 0, 0 }; }
-            winrt::hstring Title() { return L"mock"; }
-            uint64_t TaskbarState() { return 0; }
-            uint64_t TaskbarProgress() { return 0; }
-            bool ReadOnly() { return false; }
-            winrt::hstring Icon() { return {}; }
-            winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> TabColor() const noexcept { return nullptr; }
-            winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush() { return nullptr; }
-            winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(winrt::TerminalApp::BuildStartupKind) { return nullptr; }
-            void Focus(winrt::Windows::UI::Xaml::FocusState) {}
-            void Close() { ++_closeCount; }
-
-        private:
-            uint64_t _tag{ 0 };
-            int _closeCount{ 0 };
-            winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
-        };
     }
 
     // Phase 2 Slice 3 (#47): proves the ContentRegistry lifetime contract end
