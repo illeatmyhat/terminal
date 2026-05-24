@@ -7363,6 +7363,33 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Live pane-tab title (#54): set the strip VM whose stable Id matches `tab`
+    // to `title`. The ContentMounted arm that drives this carries only a TabId
+    // (no leaf), so we resolve the VM across ALL leaf strips by id identity —
+    // each tab id is unique, so at most one VM matches. Returns the matching VM
+    // (empty when none was found) so the caller can verify the bind by identity
+    // without re-scanning. A no-op when no strip holds the tab (e.g. content
+    // mounted for a tab whose strip row was never appended, or already pruned).
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabTitleForTab(::WorkspaceModel::TabId tab, const winrt::hstring& title)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.Title(title);
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     // Big-flip Slice C (#54): flip the strip's active row to the tab at model
     // index `idx` in `leaf`, and return the TabId now made active. The strip
     // holds one VM per model tab in declared order, so `idx` indexes it

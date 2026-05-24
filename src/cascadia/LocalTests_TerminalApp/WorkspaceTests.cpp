@@ -200,6 +200,14 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipC_ActiveTabChanged_FlipsSelectionAndSwapsHostChild);
         TEST_METHOD(BigFlipC_TabRemoved_RemovesStripVm);
 
+        // Live pane-tab title (#54): the strip VM's Title tracks its mounted
+        // content's live title. On ContentMounted the VM's Title is seeded from
+        // content.Title(); a later content.TitleChanged re-pushes the new title
+        // into the VM (the running terminal's title, not the static "Tab"
+        // placeholder). Driven against the MockPaneContent's settable title +
+        // SetTitle() helper. The classic path is untouched.
+        TEST_METHOD(LivePaneTabTitle_TracksContentTitleChanged);
+
         // Big-flip Slice D (#54): the active workspace's SPLIT pane tree is
         // projected into nested XAML inside the still-Collapsed
         // WorkspaceContentHost — a split Grid (two star-sized cells along the
@@ -376,7 +384,19 @@ namespace TerminalAppLocalTests
         }
         void UpdateSettings(const winrt::Microsoft::Terminal::Settings::Model::CascadiaSettings&) {}
         winrt::Windows::Foundation::Size MinimumSize() { return { 0, 0 }; }
-        winrt::hstring Title() { return L"mock"; }
+        winrt::hstring Title() { return _title; }
+
+        // Live pane-tab title (#54): test helper to simulate a running
+        // terminal's title changing. Updates the live Title and raises
+        // TitleChanged (the BasicPaneEvents event the IPaneContent projection
+        // exposes), exactly as a real TerminalPaneContent does when the control
+        // reports a new title — so a test can verify the strip VM's Title tracks
+        // it. Default initial title stays "mock" (preserves existing tests).
+        void SetTitle(winrt::hstring title)
+        {
+            _title = std::move(title);
+            TitleChanged.raise(*this, nullptr);
+        }
         uint64_t TaskbarState() { return 0; }
         uint64_t TaskbarProgress() { return 0; }
         bool ReadOnly() { return false; }
@@ -391,6 +411,7 @@ namespace TerminalAppLocalTests
         uint64_t _tag{ 0 };
         int _closeCount{ 0 };
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
+        winrt::hstring _title{ L"mock" };
     };
 
     // Mirror of TabTests::_initializeTerminalPage, but seeds the
@@ -4420,6 +4441,83 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
                              L"the host must remain Visible (F-5 cutover) — no visible change this slice");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Live pane-tab title (#54): the strip VM's Title tracks its mounted
+    // content's live title. The factory hands out a MockPaneContent (initial
+    // Title() == "mock"); the startup tab's content mounts during Create(), so
+    // the root leaf's first (and only) strip VM should read "mock" — NOT the
+    // static "Tab" placeholder. Then we simulate the running terminal changing
+    // its title via the mock's SetTitle("Administrator: Command Prompt"), which
+    // raises TitleChanged; the VM's Title must re-push to the new value.
+    //
+    // RED before the wiring: the VM's Title is the placeholder ("Tab") and never
+    // moves off it. GREEN after: it equals the content's title at mount, and
+    // follows every TitleChanged. The classic path is untouched.
+    void WorkspaceTests::LivePaneTabTitle_TracksContentTitleChanged()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // The factory records every MockPaneContent it hands out so the test can
+        // drive the startup tab's content title after the fact.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xE000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM (the first tab)");
+
+            // The startup tab's content mounted during Create(), so exactly one
+            // mock was handed out and the VM's title was seeded from it.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"the startup tab's content must have mounted (one mock)");
+
+            const auto firstTitle = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(firstTitle.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"mock" }, *firstTitle,
+                             L"the strip VM title must be seeded from content.Title(), not the static placeholder");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Simulate the running terminal changing its title (raises TitleChanged)");
+        result = RunOnUIThread([&]() {
+            (*mocks)[0]->SetTitle(L"Administrator: Command Prompt");
+
+            const auto updated = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(updated.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"Administrator: Command Prompt" }, *updated,
+                             L"the strip VM title must follow content.TitleChanged to the new live title");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -870,6 +870,17 @@ namespace winrt::TerminalApp::implementation
         void _removePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
         void _setActivePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
 
+        // Live pane-tab title. Set the strip view-model whose stable Id matches
+        // `tab` to `title`, resolving the VM across ALL leaf strips by id (the
+        // ContentMounted arm that drives this carries only a TabId, not the
+        // leaf). The WorkspaceView's ContentMounted arm calls this with the live
+        // IPaneContent's current Title() and again from its TitleChanged
+        // subscription, so the row label tracks the running terminal's title
+        // (mirroring how the classic Tab derives its title from content.Title()).
+        // A no-op when no strip holds a VM with that id. Returns the matching VM
+        // (empty when none) so the caller can verify the bind without a re-scan.
+        winrt::TerminalApp::PaneTabViewModel _setPaneTabTitleForTab(::WorkspaceModel::TabId tab, const winrt::hstring& title);
+
         // Big-flip Slice C (#54): flip the strip's active row to the tab at
         // model index `idx` in `leaf` (ActiveTabChanged carries the leaf + the
         // new activeTabIdx). The strip collection holds one VM per model tab in

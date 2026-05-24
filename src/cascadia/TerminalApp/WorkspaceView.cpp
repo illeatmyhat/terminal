@@ -53,6 +53,65 @@ namespace winrt::TerminalApp::implementation
         const auto contentId = it->second;
         _contentByTab.erase(it);
         _contentRegistry.Remove(contentId);
+
+        // Live pane-tab title (#54): the content is gone, so revoke its
+        // TitleChanged subscription. This is paired with the registry teardown
+        // above so a content's title handler can never outlive the content it
+        // titled. (_unbindTabTitle is a no-op when the tab had no binding.)
+        _unbindTabTitle(tabId);
+    }
+
+    // Live pane-tab title (#54): bind the strip VM for `tabId` to follow the
+    // mounted content's title. We push content.Title() into the VM NOW, then
+    // subscribe to content.TitleChanged so each later change re-pushes the
+    // content's current title — mirroring the classic Tab (Tab::_GetActiveTitle
+    // / _AttachEventHandlersToContent), which reads content.Title() directly and
+    // stores a TitleChanged auto-revoker per content.
+    //
+    // Lifetime: the handler captures the page WEAKLY (it must never keep the
+    // page alive) and the TabId by value; it re-resolves the VM by id each fire
+    // (TerminalPage::_setPaneTabTitleForTab) so it never holds a strong or
+    // dangling VM ref. The auto-revoker is stored in _tabTitleRevokers keyed by
+    // tabId; _removeContentForTab revokes it on teardown and clearing the map on
+    // view destruction revokes the rest, so no handler outlives its tab/view.
+    // Re-binding an already-bound tab (a re-mount of the same id) overwrites its
+    // revoker, auto-revoking the prior subscription — never a duplicate.
+    void WorkspaceView::_bindTabTitleToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content)
+    {
+        if (!tabId.valid() || !content)
+        {
+            return;
+        }
+
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+
+        // Seed the current title immediately (the content already has its
+        // initial title at mount; TitleChanged only fires on subsequent changes).
+        page->_setPaneTabTitleForTab(tabId, content.Title());
+
+        // Subscribe; overwrite any prior revoker for this tab (auto-revokes it).
+        _tabTitleRevokers[tabId] = content.TitleChanged(
+            winrt::auto_revoke,
+            [weakPage = _owner, tabId](const winrt::TerminalApp::IPaneContent& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+                auto strongPage = weakPage.get();
+                if (!strongPage || !sender)
+                {
+                    return;
+                }
+                strongPage->_setPaneTabTitleForTab(tabId, sender.Title());
+            });
+    }
+
+    // Live pane-tab title (#54): revoke + drop the TitleChanged subscription for
+    // `tabId`. Erasing the auto-revoker fires it, detaching the handler from the
+    // content. A no-op when the tab had no live-title binding.
+    void WorkspaceView::_unbindTabTitle(::WorkspaceModel::TabId tabId)
+    {
+        _tabTitleRevokers.erase(tabId);
     }
 
     // Big-flip Slice B (#54): parent the ACTIVE workspace's mounted content
@@ -302,6 +361,12 @@ namespace winrt::TerminalApp::implementation
                 {
                     if (it->second == contentId)
                     {
+                        // Live pane-tab title (#54): this whole-workspace close
+                        // path tears down content directly (not via
+                        // _removeContentForTab), so revoke this tab's title
+                        // subscription here too — a torn-down content's title
+                        // handler must never survive the content.
+                        _unbindTabTitle(it->first);
                         it = _contentByTab.erase(it);
                     }
                     else
@@ -786,6 +851,17 @@ namespace winrt::TerminalApp::implementation
         if (live)
         {
             _contentByTab[c.tabId] = c.contentId;
+
+            // Live pane-tab title (#54): the TabAdded arm (which ran before this
+            // ContentMounted) already appended this tab's strip VM, so the VM
+            // exists now. Bind its Title to the live content: seed it from
+            // content.Title() and subscribe to TitleChanged so the row label
+            // tracks the running terminal's title (the classic tab showed e.g.
+            // "Administrator: Command Prompt"; before this the strip showed the
+            // static "Tab" placeholder). The revoker is stored per tab and
+            // revoked on content teardown / view destruction — see
+            // _bindTabTitleToContent.
+            _bindTabTitleToContent(c.tabId, live);
 
             // Big-flip Slice E (#54): record the workspace -> contents reverse
             // index so apply(WorkspaceRemoved) can tear down every content a
