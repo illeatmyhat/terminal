@@ -309,6 +309,20 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StripSlice1_ActivateIntent_DispatchesSelectTab);
         TEST_METHOD(StripSlice1_CloseIntent_DispatchesCloseTab);
 
+        // Per-pane strip Slice 2a (#54): the VISUAL re-skin of the tab-item
+        // chrome (classic MUX TabViewItem look). STRUCTURAL assertions only —
+        // never a laid-out pixel (the headless std::clamp-resize trap):
+        //  - the inner ListView carries the re-skin ItemContainerStyle, and the
+        //    IsActive-driven chrome helpers project correctly (the selected
+        //    background + selection indicator are gated by IsActive, the
+        //    foreground brush flips with IsActive);
+        //  - the selection indicator's IsActive-driven visibility TRACKS the
+        //    model: flipping which VM IsActive moves the Visible projection;
+        //  - the foreground projection differs active vs inactive.
+        TEST_METHOD(StripSlice2a_InnerListViewCarriesReskinContainerStyle);
+        TEST_METHOD(StripSlice2a_IsActiveDrivesIndicatorVisibility);
+        TEST_METHOD(StripSlice2a_IsActiveDrivesForegroundBrush);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -6477,9 +6491,13 @@ namespace TerminalAppLocalTests
             // FrameworkTemplate.LoadContent() (which would let us read the
             // realized panel's Orientation directly) is NOT in the WinRT
             // projection, and realizing the panel needs a layout pass we must
-            // avoid (the headless std::clamp-resize trap). The template's root
-            // being a horizontal StackPanel is fixed in TabStripView.xaml and
-            // confirmed by the packaged smoke run (tabs render horizontally).
+            // avoid (the headless std::clamp-resize trap). (Slice-1 review nit
+            // (b): we considered walking the ItemsPanelTemplate content to assert
+            // Orientation==Horizontal, but LoadContent() being unprojected makes
+            // that impossible headless without a realization/layout pass.) The
+            // template's root being a horizontal StackPanel is fixed in
+            // TabStripView.xaml and confirmed by the packaged smoke run (tabs
+            // render horizontally).
             const auto panelTemplate = inner.ItemsPanel();
             VERIFY_IS_NOT_NULL(panelTemplate,
                                L"the strip's inner ListView must carry an explicit ItemsPanel template "
@@ -6488,12 +6506,15 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // Per-pane strip Slice 1 (#54): selection is a PURE PROJECTION of the model.
-    // The active row is the VM with IsActive == true (the model-seeded first
-    // tab); the inner ListView's SelectedItem is NOT bound as a model-mutating
-    // source of truth — clearing it does NOT change which VM is active. We
-    // verify the active VM is the model's active tab and that mutating the
-    // ListView's SelectedItem leaves the model + IsActive untouched.
+    // Per-pane strip Slice 1 (#54), strengthened in Slice 2a: selection is a
+    // PURE PROJECTION of the model. The active row is the VM with IsActive ==
+    // true (the model-seeded first tab); the inner ListView's SelectedItem is
+    // NOT bound as a model-mutating source of truth. We add a SECOND tab and
+    // then force the ListView's SelectedItem to a CONCRETE NON-active VM — the
+    // write-back direction. If SelectedItem were two-way bound to IsActive (the
+    // anti-pattern we forbid), that would flip the active tab / move the
+    // IsActive-driven chrome. We assert the model's active tab is UNCHANGED and
+    // that NO VM's IsActive moved to the clicked row (the chrome did not move).
     void WorkspaceTests::StripSlice1_ActiveVmIsReflected_SelectionIsPureProjection()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -6524,10 +6545,23 @@ namespace TerminalAppLocalTests
             };
         });
 
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
         ::WorkspaceModel::PaneId leaf0{ 0 };
         auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
             leaf0 = _rootLeafId(page->_workspaceModelState, 0);
             VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a SECOND tab so the strip has a concrete non-active VM to click on");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+            // The first tab stays active after adding a second (model invariant).
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
         });
         VERIFY_SUCCEEDED(result);
 
@@ -6555,21 +6589,58 @@ namespace TerminalAppLocalTests
             const auto inner = strip.TabsListView();
             VERIFY_IS_NOT_NULL(inner);
 
-            // Pure projection: the ListView's SelectedItem is NOT a source of
-            // truth. Force it to null; the model's active tab and the active VM
-            // (IsActive) are unchanged — the model never observes ListView
-            // selection. (If SelectedItem were bound two-way, this would flip
-            // IsActive / mutate the model — the anti-pattern we forbid.)
-            inner.SelectedItem(nullptr);
+            const auto items = inner.ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items);
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size());
+
+            // Find a CONCRETE non-active VM (the row a user would click that is
+            // NOT the model's active tab) and its IsActive baseline.
+            winrt::TerminalApp::PaneTabViewModel nonActiveVm{ nullptr };
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                if (!items.GetAt(i).IsActive())
+                {
+                    nonActiveVm = items.GetAt(i);
+                    break;
+                }
+            }
+            VERIFY_IS_NOT_NULL(nonActiveVm, L"there must be a non-active row to drive the write-back test");
+            VERIFY_IS_FALSE(nonActiveVm.IsActive());
+
+            // Pure projection — the WRITE-BACK direction. Force the ListView's
+            // SelectedItem to the concrete non-active VM (simulating the
+            // optimistic click-selection a default single-select ListView would
+            // apply). The model's active tab MUST be unchanged, the non-active
+            // VM's IsActive MUST stay false (its chrome did not move), and the
+            // active VM MUST still be the model's active tab. If SelectedItem
+            // were two-way bound to IsActive — the anti-pattern we forbid — this
+            // would have flipped IsActive to the clicked row and mutated the
+            // model behind the diff.
+            inner.SelectedItem(nonActiveVm);
 
             const auto& workspaces2 = page->_workspaceModelState->workspaces_view();
             const auto* leaf2 = std::get_if<::WorkspaceModel::LeafPane>(&workspaces2[0].root);
             VERIFY_IS_NOT_NULL(leaf2);
             VERIFY_ARE_EQUAL(modelActiveId, leaf2->tabs[leaf2->activeTabIdx].id.v,
-                             L"clearing the ListView SelectedItem must NOT change the model's active tab");
+                             L"selecting a non-active row in the ListView must NOT change the model's active tab");
+            VERIFY_IS_FALSE(nonActiveVm.IsActive(),
+                            L"selecting a non-active row must NOT flip its IsActive (the chrome must not move)");
             const auto activeVmAfter = page->_activePaneTabIdForTest(leaf0);
             VERIFY_IS_TRUE(activeVmAfter.has_value());
             VERIFY_ARE_EQUAL(modelActiveId, *activeVmAfter,
+                             L"selecting a non-active row must NOT change the active VM (pure projection)");
+
+            // Also the clear-to-null direction (original Slice-1 coverage):
+            // dropping selection likewise leaves the model + chrome untouched.
+            inner.SelectedItem(nullptr);
+            const auto& workspaces3 = page->_workspaceModelState->workspaces_view();
+            const auto* leaf3 = std::get_if<::WorkspaceModel::LeafPane>(&workspaces3[0].root);
+            VERIFY_IS_NOT_NULL(leaf3);
+            VERIFY_ARE_EQUAL(modelActiveId, leaf3->tabs[leaf3->activeTabIdx].id.v,
+                             L"clearing the ListView SelectedItem must NOT change the model's active tab");
+            const auto activeVmCleared = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeVmCleared.has_value());
+            VERIFY_ARE_EQUAL(modelActiveId, *activeVmCleared,
                              L"clearing the ListView SelectedItem must NOT change the active VM (pure projection)");
         });
         VERIFY_SUCCEEDED(result);
@@ -6749,6 +6820,228 @@ namespace TerminalAppLocalTests
                              L"RequestClose must dispatch closeTab so the leaf drops to one tab");
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
                              L"the strip must re-project to one row after the close");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // ============================================================
+    // Per-pane strip Slice 2a (#54): the VISUAL re-skin (tab-item chrome).
+    // STRUCTURAL ONLY — never assert laid-out pixels (the headless
+    // std::clamp/layout limits). We assert the chrome is present + that the
+    // SELECTED look is IsActive-driven (a pure projection of the model), NOT the
+    // ListView's click-selection.
+    // ============================================================
+
+    // The inner ListView carries the re-skin ItemContainerStyle (the classic
+    // TabViewItem chrome — tab shape, per-state backgrounds, separator, bottom
+    // border, neutralized default selection visual). We assert the style is
+    // applied and targets ListViewItem. We do NOT realize/lay out a container
+    // (the std::clamp-resize trap); the style's presence + target type is the
+    // headless-safe structural witness that the chrome is wired.
+    void WorkspaceTests::StripSlice2a_InnerListViewCarriesReskinContainerStyle()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5600 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+            const auto inner = strip.TabsListView();
+            VERIFY_IS_NOT_NULL(inner);
+
+            // The re-skin chrome is applied via the ItemContainerStyle (the
+            // ported TabViewItem template lives there). Slice 1 had NO custom
+            // container style (default ListViewItem look); Slice 2a sets one.
+            const auto containerStyle = inner.ItemContainerStyle();
+            VERIFY_IS_NOT_NULL(containerStyle,
+                               L"the strip's inner ListView must carry the re-skin ItemContainerStyle (the tab-item chrome)");
+            VERIFY_ARE_EQUAL(winrt::xaml_typename<winrt::Windows::UI::Xaml::Controls::ListViewItem>(),
+                             containerStyle.TargetType(),
+                             L"the re-skin container style must target ListViewItem");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // The selection indicator + selected background are gated by IsActive (the
+    // ActiveToVisibility helper the item template x:Binds OneWay). We assert the
+    // helper maps the MODEL-driven IsActive to Visibility, and that flipping
+    // which VM is active (via the model, RequestActivate) MOVES the Visible
+    // projection to the newly-active row and away from the old one. This is the
+    // pure-projection contract for the dominant visual (the indicator) without a
+    // layout pass.
+    void WorkspaceTests::StripSlice2a_IsActiveDrivesIndicatorVisibility()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5700 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        // The helper is a pure projection of IsActive — verify the mapping
+        // independent of any container (Visible iff active).
+        VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                         winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(true),
+                         L"ActiveToVisibility(true) must be Visible (selected chrome shown)");
+        VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                         winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(false),
+                         L"ActiveToVisibility(false) must be Collapsed (no selected chrome)");
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a second tab so the strip has an active + a non-active row");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto strip = _leafTabStripView(_findLeafContainer(page->_workspacePaneTreeRootChildForTest(), leaf0));
+            VERIFY_IS_NOT_NULL(strip);
+            const auto items = strip.TabsListView().ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items);
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size());
+
+            // Exactly one row is active; its indicator projects Visible, the
+            // other's Collapsed — the IsActive-driven indicator visibility.
+            winrt::TerminalApp::PaneTabViewModel activeVm{ nullptr };
+            winrt::TerminalApp::PaneTabViewModel otherVm{ nullptr };
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                const auto vm = items.GetAt(i);
+                if (vm.IsActive())
+                {
+                    activeVm = vm;
+                }
+                else
+                {
+                    otherVm = vm;
+                }
+            }
+            VERIFY_IS_NOT_NULL(activeVm, L"exactly one row must be active");
+            VERIFY_IS_NOT_NULL(otherVm, L"exactly one row must be non-active");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                             winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(activeVm.IsActive()),
+                             L"the active row's indicator must project Visible");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
+                             L"the non-active row's indicator must project Collapsed");
+
+            // Flip the active tab through the model (RequestActivate -> dispatch
+            // selectTab -> diff flips IsActive). The Visible projection MUST
+            // move to the newly-active row and away from the old one — the
+            // indicator follows the MODEL, not a click-selection.
+            otherVm.RequestActivate();
+            VERIFY_IS_TRUE(otherVm.IsActive(),
+                           L"the newly-activated row must now be active (model diff flipped IsActive)");
+            VERIFY_IS_FALSE(activeVm.IsActive(),
+                            L"the previously-active row must now be inactive");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                             winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
+                             L"the indicator's Visible projection must move to the newly-active row");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(activeVm.IsActive()),
+                             L"the indicator's Visible projection must leave the old row");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // The row label foreground is an IsActive-driven projection (the
+    // ActiveToForeground helper the item template x:Binds OneWay): the selected
+    // foreground brush when active, the rest foreground when not. We assert the
+    // helper returns a non-null Brush for both states and that the two differ —
+    // the selected/rest foreground delta of the classic TabViewItem look. (No
+    // layout / realization; the helper is a pure function of IsActive.)
+    void WorkspaceTests::StripSlice2a_IsActiveDrivesForegroundBrush()
+    {
+        // ActiveToForeground resolves an app theme brush (and, on the
+        // resource-absent path, constructs a SolidColorBrush) — XAML object
+        // work that must run on the UI thread, so drive it through
+        // RunOnUIThread.
+        auto result = RunOnUIThread([&]() {
+            const auto activeBrush = winrt::TerminalApp::PaneTabViewModel::ActiveToForeground(true);
+            const auto restBrush = winrt::TerminalApp::PaneTabViewModel::ActiveToForeground(false);
+
+            VERIFY_IS_NOT_NULL(activeBrush, L"ActiveToForeground(true) must return a brush (selected foreground)");
+            VERIFY_IS_NOT_NULL(restBrush, L"ActiveToForeground(false) must return a brush (rest foreground)");
+
+            // The selected and rest foregrounds must differ — the classic look
+            // uses a stronger (primary) foreground for the selected tab and a
+            // softer (secondary) one for the rest tabs. Comparing identity is
+            // sufficient and headless-safe (no rendered color sampling): the
+            // helper resolves a DIFFERENT app brush per state (or,
+            // resource-absent, a different-alpha fallback), so the two
+            // references are not equal.
+            VERIFY_IS_FALSE(activeBrush == restBrush,
+                            L"the selected and rest foreground brushes must differ (IsActive-driven foreground)");
         });
         VERIFY_SUCCEEDED(result);
     }

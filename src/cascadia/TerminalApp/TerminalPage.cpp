@@ -7419,7 +7419,11 @@ namespace winrt::TerminalApp::implementation
     // holds one VM per model tab in declared order, so `idx` indexes it
     // directly; we resolve the target VM's stable Id, then flip IsActive across
     // the leaf's rows by id identity (so the active highlight is single and
-    // correct). The ListView's SelectedItem follows IsActive via its binding.
+    // correct). The strip chrome is a PURE PROJECTION of IsActive: the
+    // selected-tab background + selection indicator + foreground all x:Bind to
+    // PaneTabViewModel.IsActive (OneWay). The ListView's own SelectedItem is NOT
+    // bound to IsActive and is not a source of truth — it never drives the
+    // chrome and never writes back to the model (Slice 2a, #54).
     // Returns an invalid TabId when the leaf has no strip or `idx` is out of
     // range, so the caller skips the host swap rather than guessing.
     ::WorkspaceModel::TabId TerminalPage::_activatePaneTabByIndex(::WorkspaceModel::PaneId leaf, std::size_t idx)

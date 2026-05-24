@@ -4,24 +4,28 @@
 -->
 
 <!--
-    Big-flip per-pane strip Slice 1 (#54): the per-leaf tab strip, extracted
-    from the inline TerminalPage.xaml `PaneTabStrip`. The plain row template is
-    copied VERBATIM (Grid + Title TextBlock + close Button, with the existing
-    PaneTabViewModel RequestActivate/RequestClose x:Bind intents). The
-    ItemsPanel (horizontal StackPanel), the ScrollViewer.* settings, and
-    SelectionMode="Single" — which the old programmatic per-leaf clone OMITTED,
-    stacking tabs vertically — now live here so every projected leaf gets them.
+    Big-flip per-pane strip Slice 2a (#54): the VISUAL re-skin of the per-leaf
+    tab strip. Each row is re-skinned to LOOK like a classic MUX TabViewItem —
+    rounded top corners, per-state backgrounds, the selected-tab bottom
+    selection indicator, the TabView foreground/border/padding/height — adapted
+    from the WinUI 2.8 TabViewItem ControlTemplate + its TabViewItem* theme
+    brushes (packages\Microsoft.UI.Xaml.2.8.4 Generic.xaml +
+    dev/TabView/TabView_themeresources.xaml).
 
-    Selection is a PURE PROJECTION of the model: the row highlight derives from
-    PaneTabViewModel.IsActive (the FontWeight binding); the ListView's own
-    SelectedItem is deliberately NOT bound as a source of truth, so a click can
-    never mutate the model behind the diff. A tap raises RequestActivate; the
-    close Button raises RequestClose; the page dispatches the model action and
-    the resulting diff re-projects the strip.
+    CRITICAL — selection is a PURE PROJECTION of the model. The SELECTED chrome
+    (selected background + selection indicator + selected foreground/weight) is
+    driven ENTIRELY by PaneTabViewModel.IsActive (OneWay), NOT by the ListView's
+    click-selection / ListViewItem.IsSelected. A user click raises
+    RequestActivate -> the page dispatches the model action -> the diff flips
+    IsActive -> the chrome re-projects. The DEFAULT ListViewItem selection
+    visual is NEUTRALIZED in the ItemContainerStyle (its Selected* states paint
+    nothing) so the ONLY "selected" look is the IsActive-driven one in the item
+    template. The container's CommonStates (PointerOver / Pressed) carry no
+    model meaning and so MAY use the container pointer states.
 
-    NO visual chrome change this slice — this is the same plain item template,
-    just relocated. Full TabView chrome (tab shapes, selection bar, hover-reveal
-    close, "+" button) is a LATER slice.
+    OUT OF SCOPE this slice (a later 2b): the "+" new-tab button, hover-reveal
+    of the close button (it stays always-visible here), keyboard navigation,
+    overflow. Activation/close wiring and the model are unchanged.
 -->
 <UserControl x:Class="TerminalApp.TabStripView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
@@ -31,8 +35,197 @@
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
              mc:Ignorable="d">
 
+    <UserControl.Resources>
+        <!--
+            ====================================================================
+            TRANSITIONAL COPY of the MUX TabViewItem* theme brushes — RECONCILE
+            BEFORE UPSTREAM PR.
+            ====================================================================
+            The TabViewItem* / TabViewSelectedItem* keys are defined only inside
+            WinUI's dev/TabView/TabView_themeresources.xaml, scoped to the
+            TabView control's resources — they are NOT exposed at app level. To
+            re-skin a ListViewItem with the classic look we re-declare exactly
+            the subset we use here, mapping each key to the SAME base WinUI
+            common brush the upstream source maps it to (those base brushes
+            *are* app-level via XamlControlsResources in App.xaml). Values copied
+            verbatim from microsoft-ui-xaml release/2.8
+            dev/TabView/TabView_themeresources.xaml. The per-mode sizing
+            constants below it are likewise copied from that same file. This
+            duplication is intentional + isolated per the locked decision that
+            transitional duplication is acceptable IF obvious + isolated; fold
+            it back into a shared dictionary before the upstream PR.
+        -->
+        <ResourceDictionary>
+            <ResourceDictionary.ThemeDictionaries>
+                <ResourceDictionary x:Key="Default">
+                    <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SolidBackgroundFillColorTertiaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
+                    <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
+                    <StaticResource x:Key="PaneTabBorderBrush" ResourceKey="CardStrokeColorDefault" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="Light">
+                    <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SolidBackgroundFillColorTertiaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
+                    <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
+                    <StaticResource x:Key="PaneTabBorderBrush" ResourceKey="CardStrokeColorDefault" />
+                </ResourceDictionary>
+                <ResourceDictionary x:Key="HighContrast">
+                    <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="SystemColorButtonFaceColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="SystemColorHighlightColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="SystemColorHighlightColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SystemColorWindowColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="SystemColorWindowTextColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="SystemColorHighlightColorBrush" />
+                    <StaticResource x:Key="PaneTabSeparator" ResourceKey="SystemColorWindowTextColorBrush" />
+                    <SolidColorBrush x:Key="PaneTabBorderBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+                </ResourceDictionary>
+            </ResourceDictionary.ThemeDictionaries>
+
+            <!--  Sizing constants — copied verbatim from TabView_themeresources.xaml.  -->
+            <x:Double x:Key="PaneTabItemMinHeight">32</x:Double>
+            <x:Double x:Key="PaneTabItemHeaderFontSize">12</x:Double>
+            <Thickness x:Key="PaneTabItemHeaderPadding">8,3,4,3</Thickness>
+
+            <!--
+                Rest-state ListViewItem container style. This is where the
+                classic TabViewItem chrome lives: the rounded-top tab shape, the
+                rest / pointer-over / pressed backgrounds, the bottom border
+                line, the inter-tab separator, and — critically — the
+                NEUTRALIZED default selection visuals. The SELECTED look itself
+                is NOT here; it is driven from IsActive in the item template (see
+                below), so a ListView click never paints a tab selected before
+                the model round-trips.
+
+                Adapted from the WinUI 2.8 TabViewItem ControlTemplate (Generic
+                .xaml). The selected-state Path/TabGeometry of the original needs
+                the TabView's TemplateSettings (unavailable on a bare
+                ListViewItem); we substitute a rounded-top Border for the
+                selected background, driven by IsActive in the template.
+            -->
+            <Style x:Key="PaneTabItemContainerStyle"
+                   TargetType="ListViewItem">
+                <Setter Property="FontSize" Value="{StaticResource PaneTabItemHeaderFontSize}" />
+                <Setter Property="Foreground" Value="{ThemeResource PaneTabHeaderForeground}" />
+                <Setter Property="Background" Value="Transparent" />
+                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                <Setter Property="VerticalContentAlignment" Value="Stretch" />
+                <Setter Property="MinHeight" Value="{StaticResource PaneTabItemMinHeight}" />
+                <Setter Property="MinWidth" Value="0" />
+                <Setter Property="Padding" Value="0" />
+                <Setter Property="Margin" Value="0" />
+                <Setter Property="UseSystemFocusVisuals" Value="False" />
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="ListViewItem">
+                            <Grid x:Name="LayoutRoot"
+                                  MinHeight="{TemplateBinding MinHeight}">
+                                <VisualStateManager.VisualStateGroups>
+                                    <!--
+                                        CommonStates — pointer visuals ONLY. These
+                                        carry NO model meaning, so it is correct to
+                                        drive them from the container's pointer
+                                        state. The selected look is NOT here.
+                                    -->
+                                    <VisualStateGroup x:Name="CommonStates">
+                                        <VisualState x:Name="Normal" />
+                                        <VisualState x:Name="PointerOver">
+                                            <VisualState.Setters>
+                                                <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPointerOver}" />
+                                                <Setter Target="TabSeparator.Opacity" Value="0" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                        <VisualState x:Name="Pressed">
+                                            <VisualState.Setters>
+                                                <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPressed}" />
+                                                <Setter Target="TabSeparator.Opacity" Value="0" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                        <!--
+                                            NEUTRALIZED default selection visuals.
+                                            ListView single-select would otherwise
+                                            paint its own accent highlight on these
+                                            states and compete with the
+                                            IsActive-driven chrome. We make them
+                                            paint NOTHING (same as Normal/PointerOver)
+                                            so the ONLY "selected" look is the
+                                            model-owned one in the item template.
+                                        -->
+                                        <VisualState x:Name="Selected" />
+                                        <VisualState x:Name="PointerOverSelected">
+                                            <VisualState.Setters>
+                                                <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPointerOver}" />
+                                                <Setter Target="TabSeparator.Opacity" Value="0" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                        <VisualState x:Name="PressedSelected">
+                                            <VisualState.Setters>
+                                                <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPressed}" />
+                                                <Setter Target="TabSeparator.Opacity" Value="0" />
+                                            </VisualState.Setters>
+                                        </VisualState>
+                                    </VisualStateGroup>
+                                </VisualStateManager.VisualStateGroups>
+
+                                <!--
+                                    Bottom border line under non-selected tabs — the
+                                    TabViewItem's BottomBorderLine. Stays under every
+                                    tab; the selected tab's own rounded background
+                                    (in the template) sits on top of it.
+                                -->
+                                <Border x:Name="BottomBorderLine"
+                                        Height="1"
+                                        VerticalAlignment="Bottom"
+                                        BorderBrush="{ThemeResource PaneTabBorderBrush}"
+                                        BorderThickness="1" />
+
+                                <!--
+                                    Pointer-over / pressed background. Rounded top
+                                    corners (ControlCornerRadius) to match the tab
+                                    shape. Transparent at rest; the CommonStates
+                                    setters above fill it on hover / press.
+                                -->
+                                <Border x:Name="PointerBackground"
+                                        Margin="0,1,0,0"
+                                        Background="Transparent"
+                                        CornerRadius="{ThemeResource ControlCornerRadius}" />
+
+                                <!--  The item content (the IsActive-driven tab chrome + label + close).  -->
+                                <ContentPresenter x:Name="ContentPresenter"
+                                                  Padding="0"
+                                                  HorizontalContentAlignment="Stretch"
+                                                  VerticalContentAlignment="Stretch" />
+
+                                <!--
+                                    Inter-tab separator — the thin divider on the
+                                    right edge of each tab (TabViewItem.TabSeparator),
+                                    faded out on hover/press by the CommonStates
+                                    setters above.
+                                -->
+                                <Border x:Name="TabSeparator"
+                                        Width="1"
+                                        Margin="0,8,0,8"
+                                        HorizontalAlignment="Right"
+                                        BorderBrush="{ThemeResource PaneTabSeparator}"
+                                        BorderThickness="1" />
+                            </Grid>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+        </ResourceDictionary>
+    </UserControl.Resources>
+
     <ListView x:Name="TabsList"
               Background="{ThemeResource TabViewBackground}"
+              ItemContainerStyle="{StaticResource PaneTabItemContainerStyle}"
               ScrollViewer.HorizontalScrollBarVisibility="Auto"
               ScrollViewer.HorizontalScrollMode="Auto"
               ScrollViewer.VerticalScrollBarVisibility="Disabled"
@@ -45,30 +238,69 @@
         </ListView.ItemsPanel>
         <ListView.ItemTemplate>
             <DataTemplate x:DataType="local:PaneTabViewModel">
-                <Grid ColumnSpacing="6"
-                      Padding="8,4,4,4"
+                <!--
+                    Per-tab chrome. The SELECTED look (selected background +
+                    selection indicator + selected foreground/weight) is driven
+                    ENTIRELY by IsActive (OneWay) via the converter-free x:Bind
+                    helpers on PaneTabViewModel — a pure projection of the model,
+                    never the ListView's click-selection. A tap raises
+                    RequestActivate.
+                -->
+                <Grid MinHeight="{StaticResource PaneTabItemMinHeight}"
                       Tapped="{x:Bind RequestActivate}">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <TextBlock Grid.Column="0"
-                               VerticalAlignment="Center"
-                               FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
-                               Text="{x:Bind Title, Mode=OneWay}"
-                               TextTrimming="CharacterEllipsis" />
-                    <Button Grid.Column="1"
-                            Width="20"
-                            Height="20"
-                            Padding="0"
-                            VerticalAlignment="Center"
-                            Background="Transparent"
-                            BorderThickness="0"
-                            Click="{x:Bind RequestClose}">
-                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                  FontSize="10"
-                                  Glyph="&#xE711;" />
-                    </Button>
+                    <!--
+                        Selected background — the rounded-top tab fill shown only
+                        when this VM IsActive. Substitutes the TabViewItem's
+                        SelectedBackgroundPath (whose TabGeometry needs the
+                        TabView TemplateSettings we don't have on a ListViewItem).
+                    -->
+                    <Border x:Name="SelectedBackground"
+                            Margin="0,1,0,0"
+                            Background="{ThemeResource PaneTabHeaderBackgroundSelected}"
+                            CornerRadius="{ThemeResource ControlCornerRadius}"
+                            Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
+
+                    <Grid Padding="{StaticResource PaneTabItemHeaderPadding}"
+                          ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Grid.Column="0"
+                                   VerticalAlignment="Center"
+                                   FontSize="{StaticResource PaneTabItemHeaderFontSize}"
+                                   FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
+                                   Foreground="{x:Bind local:PaneTabViewModel.ActiveToForeground(IsActive), Mode=OneWay}"
+                                   Text="{x:Bind Title, Mode=OneWay}"
+                                   TextTrimming="CharacterEllipsis" />
+                        <Button Grid.Column="1"
+                                Width="20"
+                                Height="20"
+                                Padding="0"
+                                VerticalAlignment="Center"
+                                Background="Transparent"
+                                BorderThickness="0"
+                                Click="{x:Bind RequestClose}">
+                            <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                      FontSize="10"
+                                      Glyph="&#xE711;" />
+                        </Button>
+                    </Grid>
+
+                    <!--
+                        Selection indicator — the accent bar pinned to the bottom
+                        of the SELECTED tab. Shown only when IsActive (the
+                        dominant "this tab is active" cue). x:Name'd so headless
+                        TAEF can assert its presence + IsActive-driven visibility
+                        without a layout pass.
+                    -->
+                    <Border x:Name="SelectionIndicator"
+                            Height="2"
+                            Margin="6,0,6,0"
+                            VerticalAlignment="Bottom"
+                            Background="{ThemeResource SystemControlHighlightAccentBrush}"
+                            CornerRadius="1,1,0,0"
+                            Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
                 </Grid>
             </DataTemplate>
         </ListView.ItemTemplate>

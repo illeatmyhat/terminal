@@ -30,6 +30,15 @@ namespace TerminalApp
         // raises PropertyChanged.
         static Windows.UI.Text.FontWeight ActiveToFontWeight(Boolean isActive);
 
+        // Slice 2a (#54) tab-chrome projection helpers — all driven by IsActive
+        // (OneWay), so the SELECTED look is a pure projection of the model, NOT
+        // the ListView's click-selection. ActiveToVisibility gates the
+        // selected-tab background + selection indicator (Visible when active);
+        // ActiveToForeground returns the TabViewItem selected/rest foreground
+        // brush (mirrors WorkspaceViewModel.ActiveToRowBrush).
+        static Windows.UI.Xaml.Visibility ActiveToVisibility(Boolean isActive);
+        static Windows.UI.Xaml.Media.Brush ActiveToForeground(Boolean isActive);
+
         // sender = the VM (carries Id so the page resolves the tab); args =
         // null (the intent carries no payload beyond Id).
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> ActivateRequested;

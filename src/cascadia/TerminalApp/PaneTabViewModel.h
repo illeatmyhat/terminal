@@ -36,6 +36,24 @@ namespace winrt::TerminalApp::implementation
                             : winrt::Windows::UI::Text::FontWeights::Normal();
         }
 
+        // Slice 2a (#54): tab-chrome projection helpers, ALL keyed off IsActive
+        // (OneWay) so the SELECTED look is a pure projection of the model — never
+        // the ListView's click-selection. Re-evaluated by x:Bind whenever
+        // IsActive raises PropertyChanged.
+        //
+        // ActiveToVisibility gates the selected-tab rounded background + the
+        // bottom selection indicator: Visible when active, Collapsed otherwise.
+        static winrt::Windows::UI::Xaml::Visibility ActiveToVisibility(bool isActive)
+        {
+            return isActive ? winrt::Windows::UI::Xaml::Visibility::Visible
+                            : winrt::Windows::UI::Xaml::Visibility::Collapsed;
+        }
+
+        // The row label's foreground: the TabViewItem selected/rest foreground
+        // brush, looked up from app resources (mirrors
+        // WorkspaceViewModel::ActiveToRowBrush). Defined out-of-line in the .cpp.
+        static winrt::Windows::UI::Xaml::Media::Brush ActiveToForeground(bool isActive);
+
         // Intent signals (Big-flip Slice C, #54). These only raise events; they
         // never mutate this VM's state and never touch the WorkspaceModel. The
         // page subscribes and dispatches the model action (selectTab / closeTab),
