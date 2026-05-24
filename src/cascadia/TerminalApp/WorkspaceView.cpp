@@ -131,6 +131,64 @@ namespace winrt::TerminalApp::implementation
         _hostContentId = contentId;
     }
 
+    // Big-flip Slice F-0 (#54): re-populate every projected leaf's per-leaf
+    // content host with that leaf's content. The page owns the leaf->tab
+    // projection (_leafContentTabs picks each leaf's active row, or its first row
+    // when none is active yet); we own tab->content (_contentByTab + the
+    // registry). For each (leaf, tab) we Find() the live IPaneContent and parent
+    // its GetRoot() into the leaf's host. A leaf whose tab has no bound/owned
+    // content (a tab not yet ContentMounted, or a torn-down id) is skipped — its
+    // host stays empty until that content mounts. INVISIBLE: the tree lives in
+    // the Collapsed host.
+    void WorkspaceView::_reattachLeafContents()
+    {
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+
+        for (const auto& [leaf, tab] : page->_leafContentTabs())
+        {
+            if (!tab.valid())
+            {
+                continue;
+            }
+            const auto it = _contentByTab.find(tab);
+            if (it == _contentByTab.end())
+            {
+                continue;
+            }
+            const auto content = _contentRegistry.Find(it->second);
+            if (!content)
+            {
+                continue;
+            }
+            const auto root = content.GetRoot();
+            if (!root)
+            {
+                continue;
+            }
+            page->_attachContentToLeafHost(leaf, root);
+        }
+    }
+
+    // Big-flip Slice F-0 (#54): rebuild the projected pane tree and immediately
+    // re-attach each surviving leaf's active-tab content into its fresh host. A
+    // rebuild discards the old per-leaf hosts and the content parented into them,
+    // so the re-attach must follow every rebuild — pairing them here keeps every
+    // arm that re-derives the tree from leaving empty leaf hosts behind.
+    void WorkspaceView::_rebuildAndReattachLeafContents()
+    {
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_rebuildActiveWorkspacePaneTree();
+        _reattachLeafContents();
+    }
+
     // -------------------------------------------------------------------
     // Each apply() overload corresponds to one WorkspaceChange arm. Arms
     // that a migrated Phase 1 action can actually emit carry real logic;
@@ -281,7 +339,11 @@ namespace winrt::TerminalApp::implementation
         // Big-flip Slice D (#54): the projected pane tree is per-active-workspace,
         // so re-derive it for the newly-active workspace's `root`. INVISIBLE
         // (host Collapsed); the classic tab/pane tree stays the visible display.
-        page->_rebuildActiveWorkspacePaneTree();
+        // Big-flip Slice F-0 (#54): re-attach each leaf's active-tab content into
+        // its fresh per-leaf host after the rebuild (the rebuild discarded the
+        // old hosts), so a switch back to a SPLIT workspace re-populates every
+        // leaf's cell, not just the single shared host above.
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& c)
@@ -325,7 +387,12 @@ namespace winrt::TerminalApp::implementation
         // is already bound to — so the row flows in via the binding without a
         // further rebuild. INVISIBLE (host Collapsed); purely additive to the
         // classic split above.
-        page->_rebuildActiveWorkspacePaneTree();
+        // Big-flip Slice F-0 (#54): re-attach each leaf's content into its fresh
+        // per-leaf host after the rebuild. The new sibling's content arrives via
+        // its own ContentMounted (which also re-attaches), but the EXISTING
+        // leaf's content must be re-parented into ITS fresh host now — the
+        // rebuild moved it from the single root container into a split cell.
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCreated& /*c*/)
@@ -345,10 +412,10 @@ namespace winrt::TerminalApp::implementation
         // again after the sibling is created, and the per-leaf strip helper
         // creates the collection on first use, so the final projection is
         // correct regardless of which arm rebuilds. INVISIBLE (host Collapsed).
-        if (auto page = _page())
-        {
-            page->_rebuildActiveWorkspacePaneTree();
-        }
+        // Big-flip Slice F-0 (#54): re-attach each surviving leaf's content into
+        // its fresh per-leaf host after the rebuild (the rebuild discards the old
+        // hosts + their parented content).
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitPaneCollapsed& /*c*/)
@@ -362,10 +429,10 @@ namespace winrt::TerminalApp::implementation
         // collapsed-away leaf's strip collection is left in place — leaf-strip
         // GC is a later concern — but its container is no longer in the tree.
         // INVISIBLE (host Collapsed).
-        if (auto page = _page())
-        {
-            page->_rebuildActiveWorkspacePaneTree();
-        }
+        // Big-flip Slice F-0 (#54): re-attach each surviving leaf's content into
+        // its fresh per-leaf host after the rebuild (the rebuild discards the old
+        // hosts + their parented content).
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::SplitRatioChanged& /*c*/)
@@ -378,10 +445,10 @@ namespace winrt::TerminalApp::implementation
         // keeps the one source of truth (the model `root`) authoritative; F can
         // optimise to an in-place ColumnDefinition/RowDefinition star update if
         // needed. INVISIBLE (host Collapsed).
-        if (auto page = _page())
-        {
-            page->_rebuildActiveWorkspacePaneTree();
-        }
+        // Big-flip Slice F-0 (#54): re-attach each surviving leaf's content into
+        // its fresh per-leaf host after the rebuild (the rebuild discards the old
+        // hosts + their parented content).
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabAdded& c)
@@ -430,7 +497,12 @@ namespace winrt::TerminalApp::implementation
         // unchanged); harmless if a split arm already rebuilt this turn (the
         // rebuild is idempotent and re-uses the same collections). INVISIBLE
         // (host Collapsed).
-        page->_rebuildActiveWorkspacePaneTree();
+        // Big-flip Slice F-0 (#54): re-attach each leaf's active-tab content into
+        // its fresh per-leaf host after the rebuild. For this tab's OWN content
+        // the binding may not exist yet (its ContentMounted fires later this turn
+        // and re-attaches then); this call re-populates the OTHER leaves' hosts
+        // the rebuild just discarded.
+        _rebuildAndReattachLeafContents();
 
         if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(c.description))
         {
@@ -579,6 +651,15 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         _showTabContentInHost(active);
+
+        // Big-flip Slice F-0 (#54): _activatePaneTabByIndex flipped this leaf's
+        // active strip row to `active`, so re-attach each leaf's active-tab
+        // content into its per-leaf host — this leaf's host now shows the
+        // newly-active tab's content, and the other leaves' hosts are re-affirmed
+        // (idempotent). The single shared host swap above (Slice C) is retained;
+        // the per-leaf attach is what makes a SPLIT leaf's tab switch show in its
+        // own cell. INVISIBLE (host Collapsed).
+        _reattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& c)
@@ -655,6 +736,19 @@ namespace winrt::TerminalApp::implementation
             // correct. ActiveWorkspaceChanged re-attaches on a later switch.
             // This is purely additive: it does NOT touch the classic display.
             _showActiveWorkspaceContentInHost(c.owningWorkspace);
+
+            // Big-flip Slice F-0 (#54): ALSO parent this freshly-mounted
+            // content into its OWN leaf's per-leaf content host, so a SPLIT
+            // workspace renders each leaf's terminal in its own cell. The
+            // TabAdded arm (which ran before this ContentMounted) rebuilt the
+            // tree, created this leaf's host, and appended its strip VM; the
+            // tab->content binding was just recorded above; so re-attaching every
+            // leaf's content now places this content into its leaf's host via the
+            // first-row fallback (the startup / split-sibling first tab is not
+            // yet active — that IsActive seed is F-2 — but the mounted content IS
+            // that leaf's content). INVISIBLE: the hosts live in the Collapsed
+            // WorkspaceContentHost.
+            _reattachLeafContents();
         }
         (void)live;
     }

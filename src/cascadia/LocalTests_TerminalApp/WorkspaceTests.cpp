@@ -212,6 +212,18 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipD_SplitRatio_SetsStarSizes);
         TEST_METHOD(BigFlipD_Collapse_LiftsSurvivor);
 
+        // Big-flip Slice F-0 (#54): each projected leaf gets its OWN content
+        // host, and the active leaf's content GetRoot() is attached into THAT
+        // leaf's host. A single-leaf workspace attaches its content into the
+        // root leaf's host; a SPLIT workspace gives EACH leaf its own distinct
+        // content root in its own host (the capability the single shared host
+        // could not represent). Asserted by element identity; the host + tree
+        // stay Collapsed (ZERO visible change this slice). A flag-off mirror
+        // confirms none of this structure realizes when the flag is off.
+        TEST_METHOD(BigFlipF0_SingleLeaf_ContentInLeafHost);
+        TEST_METHOD(BigFlipF0_Split_EachLeafHostHoldsOwnContent);
+        TEST_METHOD(BigFlipF0_FlagOff_NoLeafHosts);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -3705,17 +3717,22 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, leaf->tabs.size());
             VERIFY_IS_TRUE(leaf->tabs[0].mount.has_value());
             const auto activeMount = *leaf->tabs[0].mount;
+            const auto leafId = leaf->id;
 
-            // GREEN: the host's sole child is the active workspace's content
-            // GetRoot(), by identity, and hostContentIdForTest agrees on the id.
-            const auto hostChild = page->_workspaceHostChildForTest();
-            VERIFY_IS_NOT_NULL(hostChild,
-                               L"the WorkspaceContentHost must hold the active workspace's content root");
-
+            // GREEN (Big-flip Slice F-0, #54): the active workspace's content
+            // GetRoot() is now parented into the root leaf's PER-LEAF content
+            // host (the single shared host became the outer wrapper around the
+            // pane tree; content lives in the per-leaf hosts so a split can show
+            // each leaf in its own cell). Assert by identity against the leaf's
+            // host child. hostContentIdForTest still records which content the
+            // active-workspace attach resolved.
             const auto expectedRoot = (*mocks)[0]->GetRoot();
             VERIFY_IS_NOT_NULL(expectedRoot);
-            VERIFY_IS_TRUE(hostChild == expectedRoot,
-                           L"the host's child must be the active workspace content's GetRoot() (by identity)");
+            const auto leafChild = page->_leafHostChildForTest(leafId);
+            VERIFY_IS_NOT_NULL(leafChild,
+                               L"the root leaf's per-leaf host must hold the active workspace's content root");
+            VERIFY_IS_TRUE(leafChild == expectedRoot,
+                           L"the root leaf's host child must be the content's GetRoot() (by identity)");
 
             const auto hostId = page->_workspaceView->hostContentIdForTest();
             VERIFY_IS_TRUE(hostId.has_value(),
@@ -3801,6 +3818,8 @@ namespace TerminalAppLocalTests
         // Capture ws0/ws1 ids + the root each workspace's content resolves to.
         ::WorkspaceModel::WorkspaceId ws0{ 0 };
         ::WorkspaceModel::WorkspaceId ws1{ 0 };
+        ::WorkspaceModel::PaneId ws0Leaf{ 0 };
+        ::WorkspaceModel::PaneId ws1Leaf{ 0 };
         winrt::Windows::UI::Xaml::FrameworkElement ws0Root{ nullptr };
         winrt::Windows::UI::Xaml::FrameworkElement ws1Root{ nullptr };
         result = RunOnUIThread([&]() {
@@ -3814,6 +3833,16 @@ namespace TerminalAppLocalTests
 
             ws0 = workspaces[0].id;
             ws1 = workspaces[1].id;
+            // Each workspace's root is a single leaf at this point; read its id
+            // off the variant (the _rootLeafId helper is defined later in the
+            // file, so resolve inline here).
+            const auto* l0 = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            const auto* l1 = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[1].root);
+            VERIFY_IS_NOT_NULL(l0);
+            VERIFY_IS_NOT_NULL(l1);
+            ws0Leaf = l0->id;
+            ws1Leaf = l1->id;
+            VERIFY_IS_TRUE(ws0Leaf.valid() && ws1Leaf.valid());
 
             // The two mocks were created in workspace-creation order: index 0
             // is ws0's content (startup), index 1 is ws1's (the new-tab).
@@ -3823,10 +3852,14 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(ws1Root);
             VERIFY_IS_TRUE(ws0Root != ws1Root);
 
-            // After creating ws1 it is active, so the host backs ws1's content.
-            const auto hostChild = page->_workspaceHostChildForTest();
-            VERIFY_IS_TRUE(hostChild == ws1Root,
-                           L"after creating ws1, the host backs ws1's content root");
+            // Big-flip Slice F-0 (#54): after creating ws1 it is active, so the
+            // projected tree is ws1's and ws1's root leaf host backs ws1's
+            // content. Only the active workspace's leaves have projected hosts
+            // (a switch rebuilds the tree for the new active workspace), so
+            // ws0's leaf host is absent while ws1 is active.
+            const auto ws1LeafChild = page->_leafHostChildForTest(ws1Leaf);
+            VERIFY_IS_TRUE(ws1LeafChild == ws1Root,
+                           L"after creating ws1, ws1's root leaf host backs ws1's content root");
             const auto hostId = page->_workspaceView->hostContentIdForTest();
             VERIFY_IS_TRUE(hostId.has_value());
         });
@@ -3840,14 +3873,18 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        // GREEN: the host's child flipped to ws0's content root; the classic
-        // display followed the selected tab (still two tabs, ws0's now selected).
+        // GREEN (Big-flip Slice F-0, #54): switching to ws0 rebuilt the tree for
+        // ws0 and re-attached ws0's content into ws0's root leaf host; the
+        // classic display followed the selected tab (still two tabs, ws0's now
+        // selected).
         result = RunOnUIThread([&]() {
-            const auto hostChild = page->_workspaceHostChildForTest();
-            VERIFY_IS_TRUE(hostChild == ws0Root,
-                           L"switching active to ws0 must swap the host's child to ws0's content root");
-            VERIFY_IS_TRUE(hostChild != ws1Root,
-                           L"the host must no longer show ws1's content after the switch");
+            const auto ws0LeafChild = page->_leafHostChildForTest(ws0Leaf);
+            VERIFY_IS_TRUE(ws0LeafChild == ws0Root,
+                           L"switching active to ws0 must attach ws0's content into ws0's root leaf host");
+            // ws1's leaf host is no longer in the projected (ws0) tree, so its
+            // host is absent — ws1's content is detached from the active tree.
+            VERIFY_IS_NULL(page->_leafHostChildForTest(ws1Leaf),
+                           L"ws1's leaf host must be gone from the active (ws0) tree after the switch");
 
             // The host stays Collapsed; no visible change.
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
@@ -4069,12 +4106,15 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(secondTabId.v, *activeId,
                              L"the active strip row must be the newly-active (2nd) tab");
 
-            // The host child swapped to the 2nd tab's content GetRoot (mock 1).
-            const auto hostChild = page->_workspaceHostChildForTest();
+            // Big-flip Slice F-0 (#54): the leaf's per-leaf host child swapped to
+            // the 2nd tab's content GetRoot (mock 1) — the per-leaf content host
+            // now backs the active tab's content (the shared host became the
+            // outer wrapper).
+            const auto leafChild = page->_leafHostChildForTest(leaf0);
             const auto secondRoot = (*mocks)[1]->GetRoot();
             VERIFY_IS_NOT_NULL(secondRoot);
-            VERIFY_IS_TRUE(hostChild == secondRoot,
-                           L"the host child must be the newly-active tab's content root");
+            VERIFY_IS_TRUE(leafChild == secondRoot,
+                           L"the leaf host child must be the newly-active tab's content root");
 
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              page->_workspaceContentHost.Visibility(),
@@ -4098,11 +4138,12 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(firstTabId.v, *activeId,
                              L"selecting the first tab flips the active strip row back to it");
 
-            // The host child swapped to the first tab's content GetRoot (mock 0).
-            const auto hostChild = page->_workspaceHostChildForTest();
+            // Big-flip Slice F-0 (#54): the leaf's per-leaf host child swapped
+            // back to the first tab's content GetRoot (mock 0).
+            const auto leafChild = page->_leafHostChildForTest(leaf0);
             const auto firstRoot = (*mocks)[0]->GetRoot();
-            VERIFY_IS_TRUE(hostChild == firstRoot,
-                           L"the host child must swap back to the first tab's content root");
+            VERIFY_IS_TRUE(leafChild == firstRoot,
+                           L"the leaf host child must swap back to the first tab's content root");
 
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              page->_workspaceContentHost.Visibility(),
@@ -4612,6 +4653,221 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              page->_workspaceContentHost.Visibility(),
                              L"host stays Collapsed across the collapse");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-0 (#54): a single-leaf workspace's content GetRoot() is
+    // parented into the root leaf's OWN per-leaf content host (inside the
+    // projected pane tree), not loosely into the single shared host — the shared
+    // host is now the outer wrapper. We assert by element identity against the
+    // leaf's host child, and that the host + tree stay Collapsed (ZERO visible
+    // change). The mock content's GetRoot() is the stable Grid we attach.
+    //
+    // RED before F-0 populates the leaf cell: _projectLeafContainer left the
+    // leaf's star row EMPTY, so _leafHostChildForTest is always null.
+    // GREEN after: the root leaf's host child == the content's GetRoot().
+    void WorkspaceTests::BigFlipF0_SingleLeaf_ContentInLeafHost()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF000 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        auto result = RunOnUIThread([&]() {
+            const auto leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            // Exactly one content materialised at startup; it is the root leaf's.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"startup materialised one content");
+            const auto expectedRoot = (*mocks)[0]->GetRoot();
+            VERIFY_IS_NOT_NULL(expectedRoot);
+
+            // GREEN: the root leaf's per-leaf host holds that content root.
+            const auto leafChild = page->_leafHostChildForTest(leaf0);
+            VERIFY_IS_NOT_NULL(leafChild,
+                               L"the root leaf's content host must hold the startup content");
+            VERIFY_IS_TRUE(leafChild == expectedRoot,
+                           L"the leaf host child must be the content's GetRoot() (by identity)");
+
+            // The content root lives in the LEAF host, not loosely in the shared
+            // host (which is now the outer wrapper).
+            VERIFY_IS_TRUE(page->_workspaceHostChildForTest() != expectedRoot,
+                           L"the content root must live in the leaf host, not the shared host");
+
+            // INVISIBLE: host + tree stay Collapsed, classic Tab unchanged.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must stay Collapsed — no visible change");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-0 (#54): THE KEY NEW CAPABILITY. A SPLIT workspace gives
+    // EACH leaf its OWN per-leaf content host, and EACH host holds that leaf's
+    // OWN distinct content root — the thing the single shared host could never
+    // represent (it can hold only one element). We split the root leaf via the
+    // model (the same path BigFlipD drives), then assert each of the two leaves'
+    // hosts holds a distinct content root, by identity. Host + tree Collapsed.
+    //
+    // RED before F-0: the leaf cells are empty, so both _leafHostChildForTest
+    // calls return null. GREEN after: two non-null, DISTINCT content roots, one
+    // per leaf.
+    void WorkspaceTests::BigFlipF0_Split_EachLeafHostHoldsOwnContent()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::PaneId rightLeaf{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf via the model (vertical, ratio 0.5)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            rightLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // Two contents materialised — one per leaf.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"a split materialised a second content for the sibling leaf");
+
+            // GREEN: each leaf's per-leaf host holds a non-null content root.
+            const auto leftChild = page->_leafHostChildForTest(leaf0);
+            const auto rightChild = page->_leafHostChildForTest(rightLeaf);
+            VERIFY_IS_NOT_NULL(leftChild, L"the original leaf's host must hold its content");
+            VERIFY_IS_NOT_NULL(rightChild, L"the new sibling leaf's host must hold ITS OWN content");
+
+            // The KEY assertion: the two leaf hosts hold DISTINCT content roots
+            // (each leaf renders its own terminal in its own cell). This is what
+            // the single shared host could not represent.
+            VERIFY_IS_TRUE(leftChild != rightChild,
+                           L"each split leaf host must hold a DISTINCT content root");
+
+            // Identity check against the two materialised mocks (order: index 0 =
+            // the original leaf's startup content, index 1 = the split sibling's).
+            const auto root0 = (*mocks)[0]->GetRoot();
+            const auto root1 = (*mocks)[1]->GetRoot();
+            VERIFY_IS_TRUE(leftChild == root0,
+                           L"the original leaf host holds the original (startup) content root");
+            VERIFY_IS_TRUE(rightChild == root1,
+                           L"the sibling leaf host holds the split sibling's content root");
+
+            // INVISIBLE + classic intact: one classic Tab, host Collapsed.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"the split must not create a 2nd classic Tab");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the split");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-0 (#54): flag-off mirror. None of the per-leaf content
+    // host machinery realizes when the flag is off — the workspace shell is
+    // never initialized, so _paneContentHosts is empty and there are no projected
+    // leaves. The classic single-tab UI renders exactly as upstream.
+    void WorkspaceTests::BigFlipF0_FlagOff_NoLeafHosts()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // Flag-off: the shell + model + view stay dormant, so no per-leaf
+            // host (or any projection) was ever created. _leafHostChildForTest
+            // returns null for any id (the map is empty).
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off must leave the workspace model dormant");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off must NOT instantiate WorkspaceView");
+            VERIFY_IS_NULL(page->_leafHostChildForTest(::WorkspaceModel::PaneId{ 0 }),
+                           L"flag-off must realize NO per-leaf content hosts");
+            VERIFY_IS_TRUE(page->_leafContentTabs().empty(),
+                           L"flag-off must project NO leaves");
+
+            // Classic single-tab UI is upstream-identical.
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"flag-off startup renders the classic single-tab UI");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -6705,26 +6705,47 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        const auto root = content.GetRoot();
-        if (!root)
-        {
-            return;
-        }
-
-        // The classic swap (_UpdatedSelectedTab) clears _tabContent's children,
-        // which removes the host. Re-append it (after the classic content) so
-        // the host is back in the tree before we parent content into it. Being
-        // Collapsed, its position after the classic content does not occlude.
+        // Big-flip Slice F-0 (#54): the single shared WorkspaceContentHost is now
+        // the OUTER WRAPPER around the projected pane tree — content no longer
+        // lands here directly (a single element can't represent a split). The
+        // per-leaf attach (_attachContentToLeafHost), driven by the same arms,
+        // parents each leaf's content into its own per-leaf host INSIDE the
+        // WorkspacePaneTreeRoot. This helper now only maintains the host's
+        // plumbing: re-append the host into _tabContent (the classic
+        // _UpdatedSelectedTab swap clears _tabContent's children, dropping the
+        // host) and ensure its declared child WorkspacePaneTreeRoot is present,
+        // so the projected tree (and its per-leaf hosts) is always reachable
+        // behind the still-Collapsed host. `content` being non-null is the
+        // caller's signal that the active workspace has content to display; the
+        // arms record _hostContentId alongside this call.
         uint32_t hostIndex = 0;
         if (!_tabContent.Children().IndexOf(_workspaceContentHost, hostIndex))
         {
             _tabContent.Children().Append(_workspaceContentHost);
         }
 
-        // Clear first to release any prior parent claim on `root`, then parent
-        // it as the host's sole child.
-        _workspaceContentHost.Children().Clear();
-        _workspaceContentHost.Children().Append(root);
+        // The classic swap's _tabContent.Children().Clear() does NOT clear the
+        // host's OWN children, so WorkspacePaneTreeRoot normally stays put; this
+        // is a defensive re-attach in case a code path emptied the host. The
+        // pane-tree root is the host's sole structural child; the per-leaf hosts
+        // (and their content) live within it.
+        if (_workspacePaneTreeRoot)
+        {
+            uint32_t treeIndex = 0;
+            if (!_workspaceContentHost.Children().IndexOf(_workspacePaneTreeRoot, treeIndex))
+            {
+                // Detach the tree root from any prior parent before re-parenting.
+                if (const auto priorParent = _workspacePaneTreeRoot.Parent().try_as<Controls::Panel>())
+                {
+                    uint32_t idx = 0;
+                    if (priorParent.Children().IndexOf(_workspacePaneTreeRoot, idx))
+                    {
+                        priorParent.Children().RemoveAt(idx);
+                    }
+                }
+                _workspaceContentHost.Children().Append(_workspacePaneTreeRoot);
+            }
+        }
     }
 
     winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_workspaceHostChildForTest() const
@@ -7228,6 +7249,25 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
+        // Big-flip Slice F-0 (#54): the rebuild discards the old projected tree
+        // and its per-leaf content hosts, so drop the host map first. We DETACH
+        // each old host's content child BEFORE discarding the host, so every
+        // content root is left parent-free — the subsequent re-attach
+        // (_reattachLeafContents) can then re-parent it into its fresh host
+        // without hitting the "element is already the child of another element"
+        // throw (a FrameworkElement has a single parent). The re-projection below
+        // re-registers a fresh host for every leaf still in the tree (a
+        // collapsed-away leaf's host is therefore pruned), and the re-attach
+        // re-populates them.
+        for (auto& [leaf, host] : _paneContentHosts)
+        {
+            if (host)
+            {
+                host.Children().Clear();
+            }
+        }
+        _paneContentHosts.clear();
+
         const auto activeWsId = _workspaceModelState->activeWorkspaceId_view();
         if (!activeWsId.has_value())
         {
@@ -7380,10 +7420,15 @@ namespace winrt::TerminalApp::implementation
     // Build a leaf container for `leaf`: a Grid tagged with the leaf's id holding
     // a per-leaf strip ListView whose ItemsSource is that leaf's REUSED Slice-C
     // strip collection (so the split-sibling leaves' strips — which Slice C
-    // skipped — are now projected). The leaf's live content host attach is a
-    // Slice F concern (only one content host exists today; per-leaf content
-    // reparenting lands with the multi-content attach F owns), so this slice
-    // builds the strip surface only.
+    // skipped — are now projected), AND (Big-flip Slice F-0, #54) a per-leaf
+    // content host Grid in the star row that the leaf's live content GetRoot() is
+    // parented into. The single shared _workspaceContentHost is the OUTER wrapper
+    // (it holds the WorkspacePaneTreeRoot); these per-leaf hosts live INSIDE the
+    // projected tree so a SPLIT workspace can render each leaf's terminal in its
+    // own cell — the single shared host cannot represent a split. The host is
+    // recorded in _paneContentHosts by PaneId; a rebuild discards the old tree,
+    // so _rebuildActiveWorkspacePaneTree clears the map first and the rebuild
+    // re-registers each surviving leaf's fresh host here.
     winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_projectLeafContainer(::WorkspaceModel::PaneId leaf)
     {
         Controls::Grid container{};
@@ -7407,7 +7452,123 @@ namespace winrt::TerminalApp::implementation
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);
 
+        // Big-flip Slice F-0 (#54): the per-leaf content host fills the star
+        // row. The leaf's active-tab content GetRoot() is parented in here by
+        // _attachContentToLeafHost, driven by the WorkspaceView arms. Record it
+        // by PaneId so the arms (and a rebuild's re-attach) can find this exact
+        // host. A rebuild created this fresh container, so overwrite any prior
+        // entry for the leaf (the old host belongs to the discarded tree).
+        Controls::Grid leafContentHost{};
+        leafContentHost.HorizontalAlignment(HorizontalAlignment::Stretch);
+        leafContentHost.VerticalAlignment(VerticalAlignment::Stretch);
+        Controls::Grid::SetRow(leafContentHost, 1);
+        container.Children().Append(leafContentHost);
+        _paneContentHosts[leaf] = leafContentHost;
+
         return container;
+    }
+
+    // Big-flip Slice F-0 (#54): parent `contentRoot` into `leaf`'s per-leaf
+    // content host as its SOLE child. A FrameworkElement has a single parent, so
+    // detach the root from any other tracked leaf host first, then clear this
+    // host and append — re-attaching the same or a different root across a
+    // rebuild / switch is always safe. A no-op when the leaf has no realized host
+    // (flag-off / pre-shell / a leaf not in the current tree) or the root is
+    // null. INVISIBLE: the host lives inside the still-Collapsed
+    // _workspaceContentHost.
+    void TerminalPage::_attachContentToLeafHost(::WorkspaceModel::PaneId leaf, const winrt::Windows::UI::Xaml::FrameworkElement& contentRoot)
+    {
+        const auto it = _paneContentHosts.find(leaf);
+        if (it == _paneContentHosts.end() || !it->second || !contentRoot)
+        {
+            return;
+        }
+
+        auto& host = it->second;
+
+        // Already this leaf host's child — nothing to do (idempotent re-attach).
+        // Compare as the same projected element by going through FrameworkElement
+        // so the identity check is on the underlying object, not the interface.
+        if (host.Children().Size() == 1 &&
+            host.Children().GetAt(0).try_as<winrt::Windows::UI::Xaml::FrameworkElement>() == contentRoot)
+        {
+            return;
+        }
+
+        // A FrameworkElement has a single parent; appending one that still has a
+        // parent throws ("element is already the child of another element"). The
+        // content root may currently be parented in a DIFFERENT tracked leaf host
+        // (e.g. an ActiveTabChanged that moves a content between cells). Scan the
+        // tracked hosts and detach it from any that holds it. (A rebuild already
+        // cleared the discarded hosts' children, so the cross-rebuild case is
+        // handled there; this covers the within-tree move.) We rely on tracked
+        // hosts rather than FrameworkElement.Parent() because the logical Parent
+        // is not reliably set for programmatically-parented, un-laid-out grids.
+        for (auto& [otherLeaf, otherHost] : _paneContentHosts)
+        {
+            if (!otherHost)
+            {
+                continue;
+            }
+            uint32_t idx = 0;
+            if (otherHost.Children().IndexOf(contentRoot, idx))
+            {
+                otherHost.Children().RemoveAt(idx);
+            }
+        }
+        host.Children().Clear();
+        host.Children().Append(contentRoot);
+    }
+
+    // Big-flip Slice F-0 (#54): enumerate (leaf, tab-to-show) for every leaf with
+    // a realized content host. The tab-to-show is the leaf's ACTIVE strip VM
+    // (IsActive()) when one exists, else its FIRST strip row — so a startup /
+    // split-sibling leaf whose single tab has not yet been flipped active (the
+    // first-tab IsActive seed is F-2) still gets its one content attached. A leaf
+    // with a host but an empty strip is skipped. The WorkspaceView resolves each
+    // TabId to its live content and drives _attachContentToLeafHost per leaf —
+    // the page owns leaf->tab, the view owns tab->content.
+    std::vector<std::pair<::WorkspaceModel::PaneId, ::WorkspaceModel::TabId>> TerminalPage::_leafContentTabs() const
+    {
+        std::vector<std::pair<::WorkspaceModel::PaneId, ::WorkspaceModel::TabId>> result;
+        for (const auto& [leaf, host] : _paneContentHosts)
+        {
+            const auto stripIt = _paneTabStrips.find(leaf);
+            if (stripIt == _paneTabStrips.end() || stripIt->second.Size() == 0)
+            {
+                continue;
+            }
+            const auto& strip = stripIt->second;
+
+            // Prefer the active row; fall back to the first row when no row is
+            // active yet (the startup / split-sibling first tab, before F-2's
+            // active seed). One-tab-per-leaf in F-0, so the fallback is exact.
+            ::WorkspaceModel::TabId chosen{};
+            for (const auto& vm : strip)
+            {
+                if (vm.IsActive())
+                {
+                    chosen = ::WorkspaceModel::TabId{ vm.Id() };
+                    break;
+                }
+            }
+            if (!chosen.valid())
+            {
+                chosen = ::WorkspaceModel::TabId{ strip.GetAt(0).Id() };
+            }
+            result.emplace_back(leaf, chosen);
+        }
+        return result;
+    }
+
+    winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_leafHostChildForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneContentHosts.find(leaf);
+        if (it == _paneContentHosts.end() || !it->second || it->second.Children().Size() == 0)
+        {
+            return nullptr;
+        }
+        return it->second.Children().GetAt(0).try_as<winrt::Windows::UI::Xaml::FrameworkElement>();
     }
 
     winrt::Windows::UI::Xaml::FrameworkElement TerminalPage::_workspacePaneTreeRootChildForTest() const

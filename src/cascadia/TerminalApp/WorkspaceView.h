@@ -145,6 +145,30 @@ namespace winrt::TerminalApp::implementation
         // Collapsed).
         void _showTabContentInHost(::WorkspaceModel::TabId tabId);
 
+        // Big-flip Slice F-0 (#54): for EVERY projected leaf, parent that leaf's
+        // ACTIVE tab's live content GetRoot() into the leaf's per-leaf content
+        // host — so a SPLIT workspace renders each leaf's terminal in its own
+        // cell. The page enumerates (leaf, active-tab) via _leavesWithActiveTab()
+        // (it owns leaf->active-tab); this resolves each active TabId to its live
+        // IPaneContent via _contentByTab + the registry (the view owns
+        // tab->content) and drives the page's _attachContentToLeafHost per leaf.
+        // A leaf whose active tab has no bound/owned content (a not-yet-mounted
+        // tab, or a torn-down id) is skipped — its host stays empty until its
+        // ContentMounted arrives. Driven by apply(ContentMounted),
+        // apply(ActiveTabChanged), and after a pane-tree rebuild (the fresh tree
+        // has empty leaf hosts that must be re-populated). INVISIBLE: the whole
+        // tree lives inside the still-Collapsed WorkspaceContentHost.
+        void _reattachLeafContents();
+
+        // Big-flip Slice F-0 (#54): rebuild the active workspace's projected pane
+        // tree (page->_rebuildActiveWorkspacePaneTree) AND immediately re-attach
+        // each surviving leaf's active-tab content into its fresh host. A rebuild
+        // discards the old per-leaf hosts (and their parented content), so the
+        // two MUST be paired: every arm that re-derives the tree calls this
+        // instead of the bare rebuild, so the projection never ends a turn with
+        // empty leaf hosts. A no-op when the page is gone.
+        void _rebuildAndReattachLeafContents();
+
         // The ContentId currently attached into the WorkspaceContentHost (the
         // backing content of the host's sole child), or std::nullopt when
         // nothing has been attached. Exposed read-only via hostContentIdForTest.

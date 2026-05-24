@@ -890,6 +890,18 @@ namespace winrt::TerminalApp::implementation
         // leaf's collection — invisible this slice (host Collapsed).
         std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>> _paneTabStrips;
 
+        // Big-flip Slice F-0 (#54): the per-leaf content host Grids, keyed by the
+        // leaf's PaneId. _projectLeafContainer creates one host per leaf in the
+        // projected pane tree and records it here; the WorkspaceView arms resolve
+        // each leaf's active-tab content and parent its GetRoot() into the
+        // matching host (via _attachContentToLeafHost), so a SPLIT workspace
+        // renders each leaf's terminal in its OWN cell. A rebuild re-creates the
+        // hosts (the old tree is discarded), so this map is REPLACED — not
+        // appended — on each rebuild; stale entries for leaves no longer in the
+        // tree are pruned there. Lives inside the Collapsed _workspaceContentHost,
+        // so the hosts are invisible this slice.
+        std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::UI::Xaml::Controls::Grid> _paneContentHosts;
+
         // Big-flip Slice C (#54): the realized flag-on strip ListView (the
         // x:Load="False" PaneTabStrip inside the WorkspaceContentHost), resolved
         // via FindName in _initializeWorkspaceShell. nullptr when the flag is off
@@ -931,8 +943,44 @@ namespace winrt::TerminalApp::implementation
 
         // Build a leaf container for `leaf`: a Grid (tagged with the leaf's id)
         // holding a per-leaf strip ListView bound to that leaf's reused Slice-C
-        // strip collection. Slice F adds the leaf's content host beneath it.
+        // strip collection, and (Big-flip Slice F-0, #54) a per-leaf content
+        // host Grid in the star row that the leaf's live content GetRoot() is
+        // parented into. The content host is recorded in _paneContentHosts by
+        // PaneId so a fresh rebuild re-registers each leaf's host.
         winrt::Windows::UI::Xaml::FrameworkElement _projectLeafContainer(::WorkspaceModel::PaneId leaf);
+
+        // Big-flip Slice F-0 (#54): parent `contentRoot` into the per-leaf
+        // content host for `leaf` as its SOLE child. This is the per-leaf
+        // analogue of _attachContentToWorkspaceHost: the single shared host is
+        // the OUTER wrapper (it holds the WorkspacePaneTreeRoot), and the
+        // projected pane tree now carries one content host PER LEAF inside its
+        // leaf containers, so a SPLIT workspace renders each leaf's terminal in
+        // its own cell (the single shared host cannot represent a split). Clears
+        // the leaf host first so re-parenting a root that still has a prior
+        // parent is always safe (a FrameworkElement has a single parent). A
+        // no-op when the leaf has no realized host (e.g. flag-off / pre-shell /
+        // a not-yet-projected leaf) or the root is null. INVISIBLE: the whole
+        // tree lives inside the still-Collapsed _workspaceContentHost.
+        void _attachContentToLeafHost(::WorkspaceModel::PaneId leaf, const winrt::Windows::UI::Xaml::FrameworkElement& contentRoot);
+
+        // Big-flip Slice F-0 (#54): the (leaf, tab-to-show) pairs for every leaf
+        // that currently has a projected content host, so the WorkspaceView can
+        // resolve each leaf's content (via _contentByTab + the registry) and
+        // drive _attachContentToLeafHost per leaf. The tab-to-show is the leaf's
+        // ACTIVE strip VM (IsActive()) when one exists, else the leaf's FIRST
+        // strip row — so a startup / split-sibling leaf whose single tab has not
+        // yet been flipped active (the first-tab IsActive seed is F-2) still
+        // gets its one content attached. A leaf with a host but an empty strip is
+        // omitted (nothing to attach). The page owns the leaf->tab projection;
+        // the view owns tab->content — this seam keeps each on its own side.
+        [[nodiscard]] std::vector<std::pair<::WorkspaceModel::PaneId, ::WorkspaceModel::TabId>> _leafContentTabs() const;
+
+        // Test-only observer (Big-flip Slice F-0, #54): the FrameworkElement
+        // currently parented as `leaf`'s per-leaf content host's sole child, or
+        // nullptr when the leaf has no host / no content attached. Lets a page
+        // test assert that EACH split leaf's host holds its OWN distinct content
+        // root by identity, without driving any laid-out geometry.
+        [[nodiscard]] winrt::Windows::UI::Xaml::FrameworkElement _leafHostChildForTest(::WorkspaceModel::PaneId leaf) const;
 
         // Test-only observer (Big-flip Slice D, #54): the single projected child
         // of WorkspacePaneTreeRoot — the active workspace's projected pane-tree
