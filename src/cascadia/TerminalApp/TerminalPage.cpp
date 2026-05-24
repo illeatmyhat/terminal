@@ -7068,11 +7068,19 @@ namespace winrt::TerminalApp::implementation
     // Append one strip view-model for a tab projected into `leaf`, in declared
     // order (TabAdded arrives in diff Phase 1). The view-model carries its
     // stable TabId.v as Id, so activation / removal resolve by id identity. New
-    // rows start inactive; the ActiveTabChanged arm flips IsActive. This creates
-    // NO classic Tab — the strip VM is the SOLE representation of an additional
-    // leaf tab (the classic Tab for a new workspace's first tab is created by
-    // the TabAdded arm before it calls here). INVISIBLE this slice (host
-    // Collapsed).
+    // rows start inactive, EXCEPT when this tab is the leaf's model-active tab
+    // (Big-flip Slice F-2, #54): in that case IsActive is seeded true at
+    // append time, because ActiveTabChanged for tab index 0 is suppressed by
+    // the diff engine when the new workspace's first tab is added (index 0 was
+    // already the active index; no change to emit). The query resolves the
+    // leaf's model PaneNode -> LeafPane -> activeTabIdx -> tabs[idx].id and
+    // compares it to `tab` by id — not by positional "is it the first row". The
+    // existing ActiveTabChanged handling for later switches remains intact and
+    // must NOT double-activate (it calls _setActivePaneTabVm, which clears all
+    // others). This creates NO classic Tab — the strip VM is the SOLE
+    // representation of an additional leaf tab (the classic Tab for a new
+    // workspace's first tab is created by the TabAdded arm before it calls
+    // here). INVISIBLE this slice (host Collapsed).
     void TerminalPage::_appendPaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab, const std::string& title)
     {
         if (!leaf.valid() || !tab.valid())
@@ -7093,10 +7101,30 @@ namespace winrt::TerminalApp::implementation
             }
         }
 
+        // Big-flip Slice F-2 (#54): seed IsActive from the model. Query the
+        // leaf's PaneNode, cast to LeafPane, and check whether the tab at
+        // activeTabIdx matches `tab`. This is the model-authoritative answer —
+        // not "is it the first row appended" — so it stays correct if append
+        // order ever changes.
+        bool isActive = false;
+        if (_workspaceModelState)
+        {
+            if (const auto* node = _workspaceModelState->pane(leaf))
+            {
+                if (const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node))
+                {
+                    if (!leafPane->tabs.empty() && leafPane->activeTabIdx < leafPane->tabs.size())
+                    {
+                        isActive = (leafPane->tabs[leafPane->activeTabIdx].id == tab);
+                    }
+                }
+            }
+        }
+
         winrt::TerminalApp::PaneTabViewModel vm{};
         vm.Id(tab.v);
         vm.Title(winrt::hstring{ til::u8u16(title.empty() ? std::string{ "Tab" } : title) });
-        vm.IsActive(false);
+        vm.IsActive(isActive);
 
         // Subscribe to the row's intent signals (Big-flip Slice C, #54). The VM
         // never touches the model; it raises these and the page dispatches the
@@ -7286,6 +7314,38 @@ namespace winrt::TerminalApp::implementation
         {
             _workspacePaneTreeRoot.Children().Clear();
             return;
+        }
+
+        // Big-flip Slice F-2 (#54): prune stale _paneTabStrips entries for
+        // PaneIds that no longer exist ANYWHERE in the model. Dead entries
+        // accumulate after a SplitPaneCollapsed (the collapsed-away leaf's
+        // strip collection was left in place by Slice D pending this GC). We
+        // scan ALL workspaces' leaves (not just the active workspace) because
+        // inactive workspaces retain their leaf strips so a workspace switch
+        // can immediately resolve their active tab. Pruning by model-global
+        // existence is the correct boundary: a PaneId is dead only when it has
+        // been removed from the pane tree entirely (collapsed away), not merely
+        // when its workspace is inactive.
+        {
+            std::unordered_set<::WorkspaceModel::PaneId> liveSet;
+            for (const auto& anyWs : _workspaceModelState->workspaces_view())
+            {
+                for (const auto* lp : _workspaceModelState->leaves(anyWs.id))
+                {
+                    liveSet.insert(lp->id);
+                }
+            }
+            for (auto it = _paneTabStrips.begin(); it != _paneTabStrips.end();)
+            {
+                if (liveSet.find(it->first) == liveSet.end())
+                {
+                    it = _paneTabStrips.erase(it);
+                }
+                else
+                {
+                    ++it;
+                }
+            }
         }
 
         // Resolve the root pane's id, then project from it. Both LeafPane and

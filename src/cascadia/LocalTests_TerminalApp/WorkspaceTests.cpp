@@ -240,6 +240,17 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipF1_HorizontalSplit_DragReprojectsRows);
         TEST_METHOD(BigFlipF1_FlagOff_NoSeparator);
 
+        // Big-flip Slice F-2 (#54): first-tab IsActive seed + leaf-strip GC.
+        //  - After startup (a new workspace / leaf), the leaf's strip VM for
+        //    the first (active) tab has IsActive == true. The model's
+        //    activeTabIdx seeds the state so no ActiveTabChanged is needed.
+        //  - After a split-then-collapse, the dead leaf's entry is pruned from
+        //    _paneTabStrips; the map size equals the live leaf count.
+        //  - Flag-off mirror: model is dormant, no strip map entries exist.
+        TEST_METHOD(BigFlipF2_FirstTab_IsActiveSeeded);
+        TEST_METHOD(BigFlipF2_Collapse_PrunesDeadLeafFromStrip);
+        TEST_METHOD(BigFlipF2_FlagOff_NoStripEntries);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -5251,6 +5262,228 @@ namespace TerminalAppLocalTests
 
             VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
                              L"flag-off startup renders the classic single-tab UI");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-2 (#54): after startup the root leaf's first (and only)
+    // strip VM has IsActive == true WITHOUT any ActiveTabChanged event. The seed
+    // comes from querying the model's LeafPane::activeTabIdx at append time in
+    // _appendPaneTabVm: tabs[activeTabIdx].id == the appended tab => IsActive.
+    //
+    // RED before F-2: _appendPaneTabVm hardcoded IsActive(false); the leaf's
+    // only VM was inactive at startup (the diff engine suppresses
+    // ActiveTabChanged for index 0 since no index change occurred).
+    // GREEN after: the startup VM reports IsActive == true.
+    void WorkspaceTests::BigFlipF2_FirstTab_IsActiveSeeded()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF200 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceModelState != nullptr,
+                           L"model must be alive after flag-on startup");
+
+            const auto leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid(), L"root leaf must be valid");
+
+            // The leaf has exactly one strip VM.
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM");
+
+            // GREEN: that one VM is the active one — seeded from the model's
+            // activeTabIdx without any ActiveTabChanged event.
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value(),
+                           L"the startup strip VM must be the active row (IsActive seeded)");
+
+            // The seeded active tab id must match the model's active tab for
+            // this leaf (tabs[activeTabIdx].id).
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            VERIFY_IS_NOT_NULL(node);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs.empty());
+            const auto modelActiveId = leafPane->tabs[leafPane->activeTabIdx].id;
+            VERIFY_ARE_EQUAL(modelActiveId.v, *activeId,
+                             L"seeded active id must equal the model's activeTabIdx entry");
+
+            // Invariant: only ONE row active (there is exactly one VM, and it
+            // IS active — no over-activation). We know the strip has one entry;
+            // _activePaneTabIdForTest already confirmed that one is active.
+            // For a multi-tab leaf the invariant would be: sum of IsActive==1.
+            // With a one-tab strip, finding the active id is sufficient.
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"exactly one VM in the single-tab startup strip");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed (INVISIBLE this slice)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-2 (#54): after a split-then-collapse, the dead leaf's
+    // entry is pruned from _paneTabStrips during the rebuild triggered by
+    // SplitPaneCollapsed. Before the GC the map contained TWO entries (leaf0 +
+    // rightLeaf); after the collapse and rebuild it must contain ONE (leaf0 only).
+    //
+    // RED before F-2: the dead leaf's collection was left in the map indefinitely
+    // (Slice D left this as "harmless, GC later").
+    // GREEN after: _rebuildActiveWorkspacePaneTree prunes the dead key.
+    void WorkspaceTests::BigFlipF2_Collapse_PrunesDeadLeafFromStrip()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF201 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{};
+        ::WorkspaceModel::PaneId rightLeaf{};
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf (vertical)");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            rightLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            // Precondition: two strip entries exist after the split.
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"precondition: original leaf has one strip VM");
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(rightLeaf),
+                             L"precondition: sibling leaf has one strip VM");
+            VERIFY_ARE_EQUAL(2u, static_cast<uint32_t>(page->_paneTabStrips.size()),
+                             L"precondition: _paneTabStrips has two entries after split");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Close the sibling leaf (closePane) — split collapses");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::closePane(page->_workspaceModelState, rightLeaf);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // GREEN: the dead leaf's strip entry was pruned.
+            VERIFY_ARE_EQUAL(1u, static_cast<uint32_t>(page->_paneTabStrips.size()),
+                             L"after collapse _paneTabStrips must have exactly one entry (the survivor)");
+
+            // The surviving leaf's strip is intact.
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the survivor's strip still has its one VM");
+
+            // The dead leaf's strip entry is gone.
+            VERIFY_ARE_EQUAL(0u, page->_paneTabStripSizeForTest(rightLeaf),
+                             L"the collapsed leaf's strip entry must be pruned (returns 0 for missing key)");
+
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_workspaceContentHost.Visibility(),
+                             L"host stays Collapsed across the collapse");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Big-flip Slice F-2 (#54): flag-off mirror. When the workspaces flag is
+    // off, the model is dormant and _paneTabStrips is never populated. The map
+    // size is zero and _paneTabStripSizeForTest returns 0 for any PaneId.
+    void WorkspaceTests::BigFlipF2_FlagOff_NoStripEntries()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off must leave the workspace model dormant");
+
+            // No strip entries — the model never fired TabAdded through the
+            // workspace path, so _paneTabStrips was never written.
+            VERIFY_ARE_EQUAL(0u, static_cast<uint32_t>(page->_paneTabStrips.size()),
+                             L"flag-off: _paneTabStrips must be empty");
+
+            // Any PaneId lookup returns 0 (missing key).
+            VERIFY_ARE_EQUAL(0u, page->_paneTabStripSizeForTest(::WorkspaceModel::PaneId{ 1 }),
+                             L"flag-off: strip size for any leaf is 0 (no entry)");
+
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+                             L"flag-off startup renders the classic single-tab UI unchanged");
         });
         VERIFY_SUCCEEDED(result);
     }
