@@ -169,6 +169,15 @@ namespace winrt::TerminalApp::implementation
         // empty leaf hosts. A no-op when the page is gone.
         void _rebuildAndReattachLeafContents();
 
+        // Big-flip Slice F-5 (#54): focus the active workspace's active-leaf
+        // active-tab terminal via IPaneContent.Focus(Programmatic). The
+        // model-driven replacement for the focus tracking the classic
+        // _SelectTab -> _UpdatedSelectedTab path performed before the cutover.
+        // Driven by apply(ActiveWorkspaceChanged) and apply(ActiveTabChanged).
+        // A no-op when the page is gone, the active leaf is unknown, or the
+        // content is not yet mounted.
+        void _focusActiveLeafContent();
+
         // The ContentId currently attached into the WorkspaceContentHost (the
         // backing content of the host's sole child), or std::nullopt when
         // nothing has been attached. Exposed read-only via hostContentIdForTest.

@@ -6172,6 +6172,30 @@ namespace winrt::TerminalApp::implementation
         // Each WorkspaceChange is self-describing — the view resolves no
         // model state of its own, so there is no held state to seed here.
         ::WorkspaceModel::applyChanges(*_workspaceView, std::span<const ::WorkspaceModel::WorkspaceChange>{ changes });
+
+        // Big-flip Slice F-5 (#54): THE model-driven window close. Pre-cutover,
+        // closing the last classic tab fired CloseWindowRequested through the
+        // classic _RemoveTab cascade (apply(WorkspaceRemoved) -> _RemoveTab ->
+        // last-tab => raise). Flag-on, no classic Tab is built (apply(TabAdded)
+        // gates out _OpenNewTab), so _workspaceClassicTabs is empty and _RemoveTab
+        // never runs — that cascade can no longer fire the close. We re-raise it
+        // here off the MODEL: when an action empties the workspace list (closing
+        // the last workspace, OR closing the last tab which cascades in the model
+        // to remove the workspace — see WorkspaceActions.h cascade rules),
+        // _windowShouldStayOpen() flips false and we raise CloseWindowRequested
+        // exactly once.
+        //
+        // This fires at most once per action and ONLY when the model is now empty
+        // — the very first action is newWorkspace (non-empty), so startup never
+        // spuriously closes; an action that leaves a workspace standing leaves the
+        // predicate true and raises nothing. Flag-OFF, _applyWorkspaceAction is
+        // never called (the flag-on dispatch is the only caller), so this is
+        // inert flag-off — the classic _RemoveTab close path is byte-for-byte
+        // upstream.
+        if (_workspacesFlagEnabled() && !_windowShouldStayOpen())
+        {
+            CloseWindowRequested.raise(*this, nullptr);
+        }
     }
 
     // Mirrors the classic _HandleNewTab(args==nullptr) branch:
@@ -6736,6 +6760,36 @@ namespace winrt::TerminalApp::implementation
         // It stays inside the Collapsed host, so this changes nothing visible
         // this slice — the classic Pane tree remains the displayed split.
         _workspacePaneTreeRoot = FindName(L"WorkspacePaneTreeRoot").try_as<Controls::Grid>();
+
+        // Big-flip Slice F-5 (#54): THE CUTOVER. Flip the projected pane-tree
+        // host VISIBLE and make it the SOLE child of _tabContent — the model's
+        // pane tree (per-leaf strips + content hosts) is now what the user sees,
+        // not the classic Tab. Flag-on, the classic _OpenNewTab path no longer
+        // runs (apply(TabAdded)/apply(LeafPaneCreated) gate it out), so no
+        // classic Tab is ever built and the classic _UpdatedSelectedTab swap
+        // (which clears _tabContent's children) never fires. We therefore clear
+        // _tabContent ONCE here and append only the host, establishing the
+        // single-render invariant for the life of the page. Rollback is flipping
+        // the flag off: this whole method is unreachable then, the host stays
+        // x:Load="False" / Collapsed, and the classic display is byte-for-byte
+        // upstream.
+        if (_workspaceContentHost && _tabContent)
+        {
+            _workspaceContentHost.Visibility(Visibility::Visible);
+
+            // Detach the host from any prior parent, then make it _tabContent's
+            // sole child. The host is the only thing _tabContent renders flag-on.
+            if (const auto priorParent = _workspaceContentHost.Parent().try_as<Controls::Panel>())
+            {
+                uint32_t idx = 0;
+                if (priorParent.Children().IndexOf(_workspaceContentHost, idx))
+                {
+                    priorParent.Children().RemoveAt(idx);
+                }
+            }
+            _tabContent.Children().Clear();
+            _tabContent.Children().Append(_workspaceContentHost);
+        }
     }
 
     // Big-flip Slice B (#54): parent `content`'s GetRoot() into the collapsed

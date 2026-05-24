@@ -189,6 +189,49 @@ namespace winrt::TerminalApp::implementation
         _reattachLeafContents();
     }
 
+    // Big-flip Slice F-5 (#54): focus the active workspace's active-leaf
+    // active-tab terminal. The page owns leaf->active-tab (it returns the active
+    // leaf's id and that leaf's active tab via _leafContentTabs()); the view
+    // owns tab->content (_contentByTab + the registry). We resolve the active
+    // leaf's active TabId, Find() its live IPaneContent, and call
+    // Focus(Programmatic) so the keyboard lands in the right terminal — the
+    // model-driven replacement for the focus tracking the classic _SelectTab ->
+    // _UpdatedSelectedTab path used to perform. A no-op when the page is gone,
+    // the active leaf is unknown, or the content is not (yet) mounted.
+    void WorkspaceView::_focusActiveLeafContent()
+    {
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        const auto activeLeaf = page->_activeLeafModelId();
+        if (!activeLeaf.has_value())
+        {
+            return;
+        }
+        // _leafContentTabs() yields (leaf, active-or-first tab) for every
+        // projected leaf; pick the entry for the active leaf.
+        for (const auto& [leaf, tab] : page->_leafContentTabs())
+        {
+            if (leaf != *activeLeaf || !tab.valid())
+            {
+                continue;
+            }
+            const auto it = _contentByTab.find(tab);
+            if (it == _contentByTab.end())
+            {
+                return;
+            }
+            const auto content = _contentRegistry.Find(it->second);
+            if (content)
+            {
+                content.Focus(winrt::Windows::UI::Xaml::FocusState::Programmatic);
+            }
+            return;
+        }
+    }
+
     // -------------------------------------------------------------------
     // Each apply() overload corresponds to one WorkspaceChange arm. Arms
     // that a migrated Phase 1 action can actually emit carry real logic;
@@ -303,47 +346,50 @@ namespace winrt::TerminalApp::implementation
         // highlight updated.
         page->_setActiveWorkspaceVm(*c.id);
 
-        const auto resolved = _resolveClassicTabIndex(*c.id);
-        if (!resolved.has_value())
+        // Big-flip Slice F-5 (#54): THE CUTOVER. Flag-on, the classic Tab is no
+        // longer built (apply(TabAdded) gates out _OpenNewTab), so there is no
+        // classic tab to select — and `_tabs` is empty, which would make
+        // _SelectTab's `std::clamp(idx, 0u, _tabs.Size()-1)` underflow to
+        // UINT_MAX and the following `_tabs.GetAt(idx)` throw. We therefore
+        // route the visible swap through the projected pane tree below and skip
+        // _SelectTab entirely. Flag-OFF this branch is unreachable (the flag-on
+        // model path never runs flag-off), so the classic resolve+_SelectTab
+        // path below is preserved byte-for-byte for the flag-off mirror.
+        if (!page->_workspacesFlagEnabled())
         {
+            const auto resolved = _resolveClassicTabIndex(*c.id);
+            if (!resolved.has_value())
+            {
+                return;
+            }
+            const auto idx = *resolved;
+
+            // _SelectTab is responsible for both _tabView.SelectedItem mutation
+            // and the focus-tracking downstream (see the _UpdatedSelectedTab /
+            // _SetFocusedTab branches in its implementation). This is the same
+            // entry point clicks on a TabViewItem already use on the flag-off
+            // path.
+            //
+            // Skip when the target tab is already selected.
+            if (page->_GetFocusedTabIndex() != idx)
+            {
+                page->_SelectTab(idx);
+            }
             return;
         }
-        const auto idx = *resolved;
 
-        // _SelectTab is responsible for both _tabView.SelectedItem mutation
-        // and the focus-tracking downstream (see the _UpdatedSelectedTab /
-        // _SetFocusedTab branches in its implementation). This is the same
-        // entry point clicks on a TabViewItem already use on the flag-off
-        // path.
-        //
-        // Skip when the target tab is already selected. The new-workspace
-        // case fires TabAdded immediately before this ActiveWorkspaceChanged;
-        // the classic _OpenNewTab inside TabAdded already selected the new
-        // tab via _tabView.SelectedItem(newItem). Re-entering _SelectTab here
-        // would post a redundant _SetFocusedTab dispatcher hop.
-        if (page->_GetFocusedTabIndex() != idx)
-        {
-            page->_SelectTab(idx);
-        }
-
-        // Big-flip Slice B (#54): AFTER the classic _SelectTab swap above (which
-        // we intentionally leave intact — it still owns the visible display),
-        // swap the (collapsed) WorkspaceContentHost's child to the newly-active
-        // workspace's content. _SelectTab -> _UpdatedSelectedTab cleared
-        // _tabContent's children (including the host); the attach helper
-        // re-appends the host before parenting, so the plumbing is restored.
-        // The user sees no change: the host is Collapsed and the classic
-        // content is what _tabContent now displays.
+        // Big-flip Slice F-5 (#54): the visible swap is now the projected pane
+        // tree. Re-derive the active workspace's tree (per-leaf strips + content
+        // hosts) and re-attach each leaf's active-tab content into its fresh
+        // host. The host is Visible (F-5) and is _tabContent's sole child, so
+        // this IS what the user sees — no classic _SelectTab swap.
         _showActiveWorkspaceContentInHost(*c.id);
-
-        // Big-flip Slice D (#54): the projected pane tree is per-active-workspace,
-        // so re-derive it for the newly-active workspace's `root`. INVISIBLE
-        // (host Collapsed); the classic tab/pane tree stays the visible display.
-        // Big-flip Slice F-0 (#54): re-attach each leaf's active-tab content into
-        // its fresh per-leaf host after the rebuild (the rebuild discarded the
-        // old hosts), so a switch back to a SPLIT workspace re-populates every
-        // leaf's cell, not just the single shared host above.
         _rebuildAndReattachLeafContents();
+
+        // Big-flip Slice F-5 (#54): focus lands in the newly-active workspace's
+        // active leaf's active-tab terminal — the model-driven analogue of the
+        // focus tracking _SelectTab -> _UpdatedSelectedTab used to do.
+        _focusActiveLeafContent();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::LeafPaneCreated& c)
@@ -374,10 +420,16 @@ namespace winrt::TerminalApp::implementation
         // leaf with a parent is always nested under a SplitPane, so no
         // node-kind re-resolution is needed.
         //
-        // This drives the CLASSIC _SplitPane — the VISIBLE split this slice. We
-        // LEAVE it intact: the classic Pane tree is what the user sees until
-        // Slice F flips the host visible.
-        page->_splitFocusedPaneForWorkspace(c.parent->axis, c.parent->ratio);
+        // Big-flip Slice F-5 (#54): THE CUTOVER. The projected pane tree (rebuilt
+        // below) now renders the split — each leaf in its own visible cell with
+        // the F-1 custom divider. So we no longer drive the classic _SplitPane.
+        // Flag-OFF this classic split is preserved (the model arms aren't driven
+        // flag-off; this gate is the explicit cutover boundary and keeps the
+        // classic path reachable for rollback).
+        if (!page->_workspacesFlagEnabled())
+        {
+            page->_splitFocusedPaneForWorkspace(c.parent->axis, c.parent->ratio);
+        }
 
         // Big-flip Slice D (#54): now that the new sibling leaf exists in the
         // model, rebuild the (Collapsed) projected pane tree so the sibling's
@@ -503,6 +555,25 @@ namespace winrt::TerminalApp::implementation
         // and re-attaches then); this call re-populates the OTHER leaves' hosts
         // the rebuild just discarded.
         _rebuildAndReattachLeafContents();
+
+        // Big-flip Slice F-5 (#54): THE CUTOVER. Flag-on, the per-leaf strip VM
+        // (appended above) + the projected pane tree + the ContentMounted
+        // factory's live content fully REPRESENT this tab — so we no longer
+        // build the classic window-level Tab. The whole classic-tab branching
+        // below (which calls _openDefaultTabForWorkspace / _openProfileTabForWorkspace
+        // -> _OpenNewTab) is therefore skipped flag-on. Consequence:
+        // _workspaceClassicTabs stays empty flag-on (no classic Tab is ever
+        // registered), and `_tabs` stays empty, so there is structurally exactly
+        // one ConPTY per leaf-tab (the factory's). Flag-OFF this branch runs
+        // unchanged — but note the flag-off path never reaches the model arms at
+        // all; this gate is the explicit cutover boundary for the (theoretical)
+        // model-on-flag-off case and keeps the classic code reachable for
+        // rollback (flip the flag off => apply arms aren't driven flag-off, and
+        // were the model ever driven flag-off this restores the classic Tab).
+        if (page->_workspacesFlagEnabled())
+        {
+            return;
+        }
 
         if (!std::holds_alternative<::WorkspaceModel::TerminalSpec>(c.description))
         {
@@ -658,8 +729,13 @@ namespace winrt::TerminalApp::implementation
         // newly-active tab's content, and the other leaves' hosts are re-affirmed
         // (idempotent). The single shared host swap above (Slice C) is retained;
         // the per-leaf attach is what makes a SPLIT leaf's tab switch show in its
-        // own cell. INVISIBLE (host Collapsed).
+        // own cell.
         _reattachLeafContents();
+
+        // Big-flip Slice F-5 (#54): the host is now Visible, so the newly-active
+        // tab's content is on screen — focus it so the keyboard follows the
+        // selection. A no-op flag-off (this arm only runs via the model path).
+        _focusActiveLeafContent();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ContentMounted& c)

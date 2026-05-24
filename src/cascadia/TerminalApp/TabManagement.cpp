@@ -263,6 +263,25 @@ namespace winrt::TerminalApp::implementation
     // - Handle changes in tab layout.
     void TerminalPage::_UpdateTabView()
     {
+        // Big-flip Slice F-5 (#54): THE CUTOVER. Flag-on, the classic window tab
+        // strip is retired — the per-leaf MVVM strips inside the projected pane
+        // tree are the tab UI now, and `_tabs` is always empty flag-on. Force the
+        // strip Collapsed and its row to zero height so it occupies no space.
+        // Flag-OFF this whole branch is skipped and the upstream visibility logic
+        // below runs byte-for-byte.
+        if (_workspacesFlagEnabled())
+        {
+            if (_tabView)
+            {
+                _tabView.Visibility(Visibility::Collapsed);
+            }
+            if (_tabRow)
+            {
+                _tabRow.Height(0);
+            }
+            return;
+        }
+
         // The tab row should only be visible if:
         // - we're not in focus mode
         // - we're not in full screen, or the user has enabled fullscreen tabs
@@ -578,6 +597,17 @@ namespace winrt::TerminalApp::implementation
     // - Sets focus to the tab to the right or left the currently selected tab.
     void TerminalPage::_SelectNextTab(const bool bMoveRight, const Windows::Foundation::IReference<Microsoft::Terminal::Settings::Model::TabSwitcherMode>& customTabSwitcherMode)
     {
+        // Big-flip Slice F-5 (#54): flag-on the classic tab strip is retired and
+        // `_tabs` is empty, so next/prev-tab over the classic strip has nothing
+        // to cycle — and the wraparound math below (`% tabCount`) would divide by
+        // zero. No-op flag-on (per-leaf tab cycling within the projected strip is
+        // a later concern). Flag-off this is byte-for-byte upstream (`_tabs` is
+        // non-empty).
+        if (_workspacesFlagEnabled())
+        {
+            return;
+        }
+
         const auto index{ _GetFocusedTabIndex().value_or(0) };
         const auto tabSwitchMode = customTabSwitcherMode ? customTabSwitcherMode.Value() : _settings.GlobalSettings().TabSwitcherMode();
         if (tabSwitchMode == TabSwitcherMode::Disabled)
@@ -615,6 +645,19 @@ namespace winrt::TerminalApp::implementation
     // true iff we were able to select that tab index, false otherwise
     bool TerminalPage::_SelectTab(uint32_t tabIndex)
     {
+        // Big-flip Slice F-5 (#54): flag-on the classic tab strip is retired and
+        // `_tabs` is empty, so there is no classic tab to select. The
+        // ActiveWorkspaceChanged arm already skips _SelectTab flag-on; this guard
+        // makes any OTHER flag-on caller (e.g. the _HandleSwitchToTab fallthrough
+        // for an out-of-range index) a safe no-op instead of a crash —
+        // `_tabs.Size() - 1` would underflow to UINT_MAX and `_tabs.GetAt` would
+        // throw. Flag-off, `_tabs` is non-empty whenever this is legitimately
+        // called, so this never trips (byte-for-byte upstream).
+        if (_tabs.Size() == 0)
+        {
+            return false;
+        }
+
         // GH#9369 - if the argument is out of range, then clamp to the number
         // of available tabs. Previously, we'd just silently do nothing if the
         // value was greater than the number of tabs.

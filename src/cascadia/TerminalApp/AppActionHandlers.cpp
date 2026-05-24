@@ -621,9 +621,40 @@ namespace winrt::TerminalApp::implementation
         {
             if (_workspacesFlagEnabled())
             {
+                // Big-flip Slice F-5 (#54, folds F-3): Ctrl+T (the keybinding-
+                // less new-tab path) now adds a TAB to the focused leaf of the
+                // ACTIVE workspace — the natural "new tab" semantics now that the
+                // per-leaf MVVM strip is the visible tab UI. Pre-cutover this
+                // dispatched newWorkspace (one classic window-tab == one
+                // workspace); the cutover makes a workspace a multi-tab pane tree,
+                // so a new tab belongs in the active leaf, not a whole new
+                // workspace. The chrome `+` split-button stays newWorkspace
+                // (wired in _initializeWorkspaceShell via _createNewWorkspace) —
+                // only this Ctrl+T path changes.
+                //
+                // newTab emits TabAdded + ContentMounted + ActiveTabChanged; the
+                // strip VM append + content factory represent the new tab. If we
+                // have no active workspace/leaf yet (shouldn't happen post-startup
+                // — startup creates one), fall back to newWorkspace so Ctrl+T
+                // still produces a tab rather than silently no-op'ing.
+                const auto activeWsId = _workspaceModelState
+                                            ? _workspaceModelState->activeWorkspaceId_view()
+                                            : std::nullopt;
+                const auto activeLeaf = _activeLeafModelId();
                 ::WorkspaceModel::TerminalSpec spec{};
-                auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
-                _applyWorkspaceAction(std::move(created.state));
+                if (activeWsId.has_value() && activeLeaf.has_value())
+                {
+                    auto created = ::WorkspaceModel::newTab(_workspaceModelState,
+                                                            *activeWsId,
+                                                            *activeLeaf,
+                                                            ::WorkspaceModel::TabContent{ spec });
+                    _applyWorkspaceAction(std::move(created.state));
+                }
+                else
+                {
+                    auto created = ::WorkspaceModel::newWorkspace(_workspaceModelState, std::string{}, ::WorkspaceModel::TabContent{ spec });
+                    _applyWorkspaceAction(std::move(created.state));
+                }
             }
             else
             {

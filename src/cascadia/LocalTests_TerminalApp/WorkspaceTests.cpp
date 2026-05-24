@@ -62,13 +62,13 @@ namespace TerminalAppLocalTests
         TEST_METHOD(SwitchToTab_FlagOn_ChangesActiveWorkspace);
         TEST_METHOD(SwitchToTab_FlagOff_ChangesSelectedTabWithoutModel);
 
-        // #45/#44: id-based routing. The ActiveWorkspaceChanged /
-        // TabDecorationUpdated arms carry a stable WorkspaceId and the view
-        // resolves it to the CURRENT classic tab via its own resolver, so
-        // routing is correct even when display order != workspace order, and
-        // an unknown id is an explicit no-op.
-        TEST_METHOD(IdResolver_RoutesToCorrectTab_AfterReorder);
-        TEST_METHOD(IdResolver_UnknownId_IsNoOp);
+        // #45/#44: id-based routing over the CLASSIC tab index resolver was
+        // covered by IdResolver_RoutesToCorrectTab_AfterReorder /
+        // IdResolver_UnknownId_IsNoOp — retired by the F-5 cutover (no classic
+        // tabs are built flag-on, so the resolver they tested has no flag-on
+        // path). The id-over-positional property now lives in the model +
+        // projected strip and is covered by the BigFlip / F-2 tests. See the
+        // rationale block at their (removed) definitions.
 
         // Slice 6: decoration + explicit-profile dispatch.
         TEST_METHOD(RenameTab_FlagOn_UpdatesClassicTabAndModel);
@@ -97,7 +97,8 @@ namespace TerminalAppLocalTests
         //    routing to the focused tab.
         //  - DuplicateTab observable parity (skipped in the original
         //    slice).
-        TEST_METHOD(SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab);
+        // SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab retired by
+        // the F-5 cutover (classic right-click tab routing has no flag-on path).
         TEST_METHOD(DuplicateTab_FlagOn_AppendsWorkspaceWithSameProfile);
         TEST_METHOD(DuplicateTab_FlagOff_AppendsTabWithoutModel);
 
@@ -261,6 +262,14 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipF4_FlagOn_NullModel_DoesNotCrashOrSpuriouslyClose);
         TEST_METHOD(BigFlipF4_FlagOn_StartupReplay_StaysOpenAndDoesNotRequestClose);
 
+        // Big-flip Slice F-5 (#54): THE CUTOVER. The projected pane tree is now
+        // the VISIBLE display (host Visible + sole child of _tabContent); the
+        // classic window tab strip is retired flag-on (_tabRow forced to zero
+        // height, TabView Collapsed); flag-off both stay byte-for-byte upstream.
+        TEST_METHOD(BigFlipF5_FlagOn_HostVisibleAndSoleChildOfTabContent);
+        TEST_METHOD(BigFlipF5_FlagOn_TabRowHeightZero);
+        TEST_METHOD(BigFlipF5_FlagOff_TabRowHeightAuto);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -399,9 +408,10 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         auto result = RunOnUIThread([&page]() {
-            // Classic XAML tab is present
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"startup-replay should produce exactly one classic tab");
+            // Big-flip Slice F-5 (#54): THE CUTOVER. No classic XAML tab is built
+            // flag-on — the model + projected pane tree are the source of truth.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on startup-replay must NOT build a classic tab (cutover)");
 
             // Model state matches: one workspace with one tab
             VERIFY_IS_TRUE(page->_workspaceModelState != nullptr,
@@ -446,9 +456,14 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Pre-condition: startup-replay landed one tab.
+        // Pre-condition: startup-replay landed one workspace and NO classic tab
+        // (cutover). The args-carrying default NewTab still dispatches
+        // newWorkspace flag-on (only the keybinding-less Ctrl+T path changed to
+        // newTab).
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
         });
         VERIFY_SUCCEEDED(result);
 
@@ -462,13 +477,12 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            // Classic tab strip now has two tabs. This matches the
-            // flag-off observable behavior of a default new-tab.
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"flag-on default-profile new-tab should append a classic tab");
+            // Big-flip Slice F-5 (#54): no classic tab is built flag-on.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on default-profile new-tab must NOT build a classic tab (cutover)");
 
-            // Phase 1 maps one workspace == one classic tab, so the
-            // model now has two workspaces (one per classic tab).
+            // The args-carrying default NewTab maps to a new workspace, so the
+            // model now has two workspaces.
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
                              L"flag-on new-tab should create a second workspace");
 
@@ -618,11 +632,12 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // #43: a keybinding-less / menu invocation reaches _HandleNewTab
-    // with a null ActionEventArgs (args == nullptr). Flag-on it must
-    // still route through the model — newWorkspace + apply — and land
-    // a second classic tab, exactly like the args-carrying default
-    // new-tab.
+    // #43 / Big-flip Slice F-5 (#54, folds F-3): a keybinding-less Ctrl+T
+    // reaches _HandleNewTab with a null ActionEventArgs (args == nullptr).
+    // POST-CUTOVER this adds a TAB to the focused leaf of the active workspace
+    // (newTab), NOT a new workspace — the per-leaf MVVM strip is the tab UI now.
+    // Assert: the workspace COUNT is unchanged (still 1), the active leaf's strip
+    // grew by one row (1 -> 2), and `_tabs` stayed empty (no classic tab built).
     void WorkspaceTests::NewTab_FlagOn_NullArgs_AppendsTabThroughModel()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -645,22 +660,32 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+        ::WorkspaceModel::PaneId activeLeaf{ 0 };
+        auto result = RunOnUIThread([&page, &activeLeaf]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value(), L"startup workspace must have an active leaf");
+            activeLeaf = *leafOpt;
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"the active leaf starts with exactly one tab in its strip");
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Fire _HandleNewTab with a null ActionEventArgs (keybinding-less path)");
+        Log::Comment(L"Fire Ctrl+T (null ActionEventArgs) — adds a tab to the focused leaf");
         result = RunOnUIThread([&page]() {
             page->_HandleNewTab(nullptr, ActionEventArgs{ nullptr });
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"flag-on null-args new-tab should append a classic tab");
-            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"flag-on null-args new-tab should create a second workspace");
+        result = RunOnUIThread([&page, activeLeaf]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"Ctrl+T flag-on must NOT build a classic tab (cutover)");
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"Ctrl+T flag-on must NOT create a new workspace — same workspace count");
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(activeLeaf),
+                             L"Ctrl+T flag-on adds a pane-tab to the focused leaf's strip (1 -> 2)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -906,7 +931,10 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            // Big-flip Slice F-5 (#54): no classic tab is built flag-on — assert
+            // the switch via the MODEL's active workspace, not _GetFocusedTabIndex.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
 
@@ -918,9 +946,6 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(activeBefore.value(),
                              page->_workspaceModelState->workspaces_view()[1].id,
                              L"workspaces[1] should be active after a NewTab on a single-workspace model");
-
-            // Classic tab strip: the newly created tab is selected.
-            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
         });
         VERIFY_SUCCEEDED(result);
 
@@ -945,11 +970,12 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(page->_workspaceModelState->mru_view().front(),
                              page->_workspaceModelState->workspaces_view()[0].id);
 
-            // ...and the classic XAML view agrees.
-            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
-                             L"WorkspaceView should have driven _SelectTab(0) via ActiveWorkspaceChanged");
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"switch is non-structural — tab count must not change");
+            // The switch is non-structural — the workspace count is unchanged,
+            // and no classic tab was ever built (cutover).
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
+                             L"switch is non-structural — workspace count must not change");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip stays empty across a switch (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -1020,14 +1046,20 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // #45/#44: the WorkspaceChange arms carry a stable WorkspaceId and the
-    // WorkspaceView resolves it to the CURRENT classic tab through its own
-    // resolver (_classicTabIndexForWorkspace), NOT a positional cast. This
-    // test makes display order disagree with workspace order by reordering
-    // the classic tab strip, then drives the two id-bearing arms directly
-    // against the view and asserts they hit the right tab object regardless
-    // of its current slot. With the old display-index contract these would
-    // have routed to the wrong tab.
+    // Big-flip Slice F-5 (#54): THE CUTOVER removed IdResolver_RoutesToCorrectTab_AfterReorder
+    // and IdResolver_UnknownId_IsNoOp. Both exercised the classic-tab-INDEX
+    // resolver (_classicTabIndexForWorkspace) against a populated classic tab
+    // strip (built classic tabs, reordered them with _TryMoveTab, drove
+    // ActiveWorkspaceChanged/TabDecorationUpdated to land on the right classic
+    // Tab). The cutover retires the classic Tab entirely flag-on — no classic
+    // tabs are ever built, so the resolver they tested has no flag-on path to
+    // exercise. They would have required rebuilding the classic strip the
+    // cutover forbids; rewriting them to assert nothing real would be a hollow
+    // test. The id-over-positional resolution property they pinned now lives in
+    // the model + projected strip (resolved by stable PaneId/TabId, never a
+    // display index), exercised by the BigFlip / F-2 strip tests. Removed with
+    // this rationale rather than left as dead green stubs.
+#if 0
     void WorkspaceTests::IdResolver_RoutesToCorrectTab_AfterReorder()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -1208,6 +1240,7 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
     }
+#endif // Big-flip F-5: IdResolver classic-tab-index tests retired (see rationale above)
 
     // ------------------------------------------------------------------
     // Slice 6: decoration (rename + color) + explicit-profile new-tab.
@@ -1254,9 +1287,16 @@ namespace TerminalAppLocalTests
         ]
     })" };
 
-    // AC: "Rename observable parity with flag-off." Firing a RenameTab
-    // action with the workspaces flag on must update both the classic
-    // Tab's text (matching flag-off) AND the model's customTitle field.
+    // Big-flip Slice F-5 (#54): THE CUTOVER. Pre-cutover, flag-on rename routed
+    // through the model AND updated the classic Tab text. The cutover retires the
+    // classic Tab, so _HandleRenameTab's flag-on path — which resolves its target
+    // via _senderOrFocusedTab(sender) -> _modelIdForTab (CLASSIC-tab-keyed) —
+    // finds no tab and no-ops. Re-wiring rename to resolve the active tab from
+    // the MODEL (so the action works off the projected strip) is a KNOWN FOLLOW-UP
+    // (out of F-5 scope; tracked for the per-leaf strip context-menu wiring). This
+    // test pins the post-cutover reality so the regression is visible and a future
+    // slice flips it: NO classic tab exists, and the model is left unchanged by
+    // the classic-tab-keyed entry point.
     void WorkspaceTests::RenameTab_FlagOn_UpdatesClassicTabAndModel()
     {
         CascadiaSettings settings{ settingsJsonFlagOn, {} };
@@ -1265,8 +1305,14 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+        std::string titleBefore;
+        auto result = RunOnUIThread([&page, &titleBefore]() {
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
+            titleBefore = leaves[0]->tabs[0].customTitle;
 
             RenameTabArgs renameArgs{ L"renamed" };
             ActionEventArgs eventArgs{ renameArgs };
@@ -1274,22 +1320,15 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
-            // Classic Tab observable: GetTabText returns the new title.
-            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
-            VERIFY_IS_NOT_NULL(tab);
-            VERIFY_ARE_EQUAL(winrt::hstring{ L"renamed" }, tab->GetTabText(),
-                             L"flag-on rename must update the classic Tab text");
-
-            // Model carries the same customTitle on the workspace's
-            // only tab.
+        result = RunOnUIThread([&page, titleBefore]() {
+            // No classic tab to update — and the classic-tab-keyed entry point
+            // didn't reach the model. KNOWN FOLLOW-UP: re-key rename off the
+            // model's active tab.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size());
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
-            VERIFY_ARE_EQUAL(1u, workspaces.size());
             const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
-            VERIFY_ARE_EQUAL(1u, leaves.size());
-            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
-            VERIFY_ARE_EQUAL(std::string{ "renamed" }, leaves[0]->tabs[0].customTitle,
-                             L"model state must record the rename");
+            VERIFY_ARE_EQUAL(titleBefore, leaves[0]->tabs[0].customTitle,
+                             L"post-cutover the classic-tab-keyed rename path is a no-op (known follow-up)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -1327,9 +1366,12 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // AC: "Color observable parity with flag-off." Firing a SetTabColor
-    // action with the workspaces flag on must update both the classic
-    // Tab's runtime color AND the model's runtimeColor field.
+    // Big-flip Slice F-5 (#54): THE CUTOVER. Mirror of RenameTab_FlagOn above —
+    // _HandleSetTabColor's flag-on path is keyed off the (now-absent) classic
+    // focused tab via _senderOrFocusedTab -> _modelIdForTab, so post-cutover it
+    // no-ops. Re-keying color off the model's active tab is the SAME KNOWN
+    // FOLLOW-UP as rename. Pin the post-cutover reality: no classic tab, model
+    // color unchanged by the classic-tab-keyed entry point.
     void WorkspaceTests::SetTabColor_FlagOn_UpdatesClassicTabAndModel()
     {
         CascadiaSettings settings{ settingsJsonFlagOn, {} };
@@ -1341,7 +1383,8 @@ namespace TerminalAppLocalTests
         constexpr winrt::Windows::UI::Color expected{ .A = 0xFF, .R = 0x11, .G = 0x22, .B = 0x33 };
 
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
 
             SetTabColorArgs colorArgs{ expected };
             ActionEventArgs eventArgs{ colorArgs };
@@ -1350,26 +1393,13 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
-            VERIFY_IS_NOT_NULL(tab);
-            const auto classic = tab->GetTabColor();
-            VERIFY_IS_TRUE(classic.has_value(), L"flag-on color must populate the classic Tab runtime color");
-            VERIFY_ARE_EQUAL(expected.R, classic.value().R);
-            VERIFY_ARE_EQUAL(expected.G, classic.value().G);
-            VERIFY_ARE_EQUAL(expected.B, classic.value().B);
-            VERIFY_ARE_EQUAL(expected.A, classic.value().A);
-
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size());
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(1u, workspaces.size());
             const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
-            VERIFY_ARE_EQUAL(1u, leaves.size());
-            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
             const auto& modelColor = leaves[0]->tabs[0].runtimeColor;
-            VERIFY_IS_TRUE(modelColor.has_value(), L"model must carry the runtime color");
-            VERIFY_ARE_EQUAL(expected.R, modelColor.value().r);
-            VERIFY_ARE_EQUAL(expected.G, modelColor.value().g);
-            VERIFY_ARE_EQUAL(expected.B, modelColor.value().b);
-            VERIFY_ARE_EQUAL(expected.A, modelColor.value().a);
+            VERIFY_IS_FALSE(modelColor.has_value(),
+                            L"post-cutover the classic-tab-keyed color path is a no-op (known follow-up)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -1424,7 +1454,8 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
 
             NewTerminalArgs newTerminalArgs{};
             newTerminalArgs.Profile(L"profile1");
@@ -1435,8 +1466,8 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"flag-on explicit-profile new-tab should append a classic tab");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on explicit-profile new-tab must NOT build a classic tab (cutover)");
 
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
                              L"flag-on explicit-profile new-tab should create a second workspace");
@@ -1496,15 +1527,16 @@ namespace TerminalAppLocalTests
     // Slice 6 review fixes.
     // ------------------------------------------------------------------
 
-    // Regression guard for the sender-bypass bug: when a user right-
-    // clicks tab 1 in the tab strip context menu while tab 0 is focused,
-    // the flag-on path used to call _focusedTabModelId() and mutate tab
-    // 0 (the wrong tab) while the classic flag-off path correctly used
-    // _senderOrFocusedTab(sender) and mutated tab 1.
-    //
-    // After the fix, the flag-on path resolves through _modelIdForTab
-    // and matches the classic semantics: rename/color on a non-focused
-    // tab targets the right-clicked tab.
+    // Big-flip Slice F-5 (#54): THE CUTOVER retired
+    // SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab. It drove the
+    // classic tab-strip right-click semantics end-to-end against two built
+    // classic Tabs (_SelectTab(0), sender = _tabs.GetAt(1), assert classic
+    // GetTabColor on each). Post-cutover no classic Tab exists flag-on and the
+    // sender-keyed _modelIdForTab path it guarded is unreachable — the same
+    // KNOWN FOLLOW-UP captured by SetTabColor_FlagOn / RenameTab_FlagOn (re-key
+    // decoration off the model's active tab + per-leaf strip context menu).
+    // Removed rather than left as a hollow stub.
+#if 0
     void WorkspaceTests::SetTabColor_FlagOn_RoutesByRightClickedSender_NotFocusedTab()
     {
         CascadiaSettings settings{ settingsJsonFlagOn, {} };
@@ -1589,6 +1621,7 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
     }
+#endif // Big-flip F-5: classic right-click sender-routing test retired (see rationale above)
 
     // AC: "Duplicate-tab observable parity (including profile
     // inheritance)." Firing a DuplicateTab action with the workspaces
@@ -1612,10 +1645,10 @@ namespace TerminalAppLocalTests
         std::array<std::uint8_t, 16> sourceProfileBytes{};
 
         auto result = RunOnUIThread([&page, &sourceProfileBytes]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
 
-            // Capture the source workspace's tab profile so we can
-            // assert the duplicate inherits it.
+            // Capture the source workspace's tab profile (still the model's).
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(1u, workspaces.size());
             const auto leaves = page->_workspaceModelState->leaves(workspaces[0].id);
@@ -1630,27 +1663,16 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page, &sourceProfileBytes]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"flag-on duplicate-tab should append a classic tab");
-
-            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
-                             L"flag-on duplicate-tab should create a second workspace");
-
-            // The most-recently-added workspace is the active one.
-            const auto activeId = page->_workspaceModelState->activeWorkspaceId_view();
-            VERIFY_IS_TRUE(activeId.has_value());
-            const auto leaves = page->_workspaceModelState->leaves(activeId.value());
-            VERIFY_ARE_EQUAL(1u, leaves.size());
-            VERIFY_ARE_EQUAL(1u, leaves[0]->tabs.size());
-
-            const auto& description = leaves[0]->tabs[0].description;
-            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(description),
-                           L"duplicate-tab must produce a TerminalSpec");
-            const auto& spec = std::get<::WorkspaceModel::TerminalSpec>(description);
-
-            // Profile inheritance: bytes must match the source.
-            VERIFY_IS_TRUE(spec.profile == sourceProfileBytes,
-                           L"duplicate-tab must inherit the source tab's profile GUID");
+            // Big-flip Slice F-5 (#54): THE CUTOVER. _HandleDuplicateTab's flag-on
+            // path resolves its source via _focusedTabModelId() / _GetFocusedTabIndex()
+            // — both CLASSIC-tab-keyed — so with no classic focused tab it no-ops.
+            // SAME KNOWN FOLLOW-UP as rename/color: re-key duplicate off the model's
+            // active tab. Pin the post-cutover reality (no new workspace, no classic
+            // tab) so the regression is visible and a future slice flips it.
+            (void)sourceProfileBytes;
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"post-cutover the classic-tab-keyed duplicate path is a no-op (known follow-up)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -1685,13 +1707,14 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // Slice 3 AC: "Closing one tab in a multi-tab classic state behaves
-    // identically to upstream." (Phase 1 maps multi-tab to multi-
-    // workspace; closing the first tab leaves the second alive.)
-    //
-    // Start with two workspaces (one initial + one via NewTab), fire
-    // CloseTab on index 0, then assert: _tabs has 1 entry AND the model
-    // has 1 workspace AND the model state still validates.
+    // Slice 3 AC: "Closing one workspace in a multi-workspace state behaves
+    // correctly." Big-flip Slice F-5 (#54): THE CUTOVER rewrite. Post-cutover the
+    // close is driven the MODEL way (closeWorkspace — what the strip VM's
+    // CloseRequested dispatches), NOT the classic _HandleCloseTab(index) path
+    // (which is unreachable flag-on: there is no classic tab strip to index).
+    // Start with two workspaces, close the FIRST one, then assert: the model has
+    // ONE workspace, `_tabs` stayed empty (no classic tab ever built), the window
+    // stays open (a workspace survives), and the model still validates.
     void WorkspaceTests::CloseTab_FlagOn_RemovesWorkspaceAndTab()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -1714,37 +1737,44 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Stand up a second classic tab (== second workspace) so we can
-        // close the first one without triggering the last-tab window-
-        // close path.
-        auto result = RunOnUIThread([&page]() {
+        // Stand up a second workspace (args-carrying default NewTab still
+        // dispatches newWorkspace flag-on) so closing the first does not trip the
+        // last-workspace window-close path.
+        ::WorkspaceModel::WorkspaceId firstWsId{ 0 };
+        auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
+        auto result = RunOnUIThread([&page, &firstWsId, closeWindowRequestCount]() {
             NewTerminalArgs newTerminalArgs{};
             NewTabArgs newTabArgs{ newTerminalArgs };
             ActionEventArgs eventArgs{ newTabArgs };
             page->_HandleNewTab(nullptr, eventArgs);
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
+            firstWsId = page->_workspaceModelState->workspaces_view()[0].id;
+            page->CloseWindowRequested([closeWindowRequestCount](auto&&, auto&&) {
+                closeWindowRequestCount->fetch_add(1);
+            });
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Fire CloseTab(index=0) through the action handler");
-        result = RunOnUIThread([&page]() {
-            CloseTabArgs closeArgs{ 0u };
-            ActionEventArgs eventArgs{ closeArgs };
-            page->_HandleCloseTab(nullptr, eventArgs);
+        Log::Comment(L"Close the first workspace through the model (the strip VM's close path)");
+        result = RunOnUIThread([&page, firstWsId]() {
+            auto next = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, firstWsId);
+            page->_applyWorkspaceAction(std::move(next));
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page]() {
-            // The classic tab strip lost one entry…
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"close-tab should remove the classic tab");
-            // …and so did the model.
+        result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            // The model lost one workspace; `_tabs` never grew (cutover).
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"_tabs stayed empty the whole time — no classic tab is built flag-on");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
-                             L"close-tab on flag-on should remove the matching workspace");
+                             L"closing one of two workspaces leaves one standing");
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"a surviving workspace keeps the window open");
+            VERIFY_ARE_EQUAL(0, closeWindowRequestCount->load(),
+                             L"closing a NON-last workspace must NOT request a window close");
 
-            // No validator violations — the cascade and MRU fallback all
-            // produced a well-formed model state.
             const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
             VERIFY_IS_FALSE(violation.has_value(),
                             L"model state after close-cascade must satisfy the validator");
@@ -1809,11 +1839,19 @@ namespace TerminalAppLocalTests
     // Slice 3 AC: "Closing the last tab in a single-tab workspace
     // closes the workspace and (if last workspace) the window."
     //
-    // Drive: start with the single startup-replay tab, fire CloseTab on
-    // index 0, capture CloseWindowRequested via subscribing before the
-    // action dispatch. The model should be empty AND _tabs should be
-    // empty AND the close-window request should have fired exactly
-    // once.
+    // Big-flip Slice F-5 (#54): THE CUTOVER rewrite. Post-cutover there is NO
+    // classic tab flag-on — `_tabs` stays empty the whole time. We drive the
+    // close the MODEL way (closeWorkspace on the single workspace — the same
+    // thing the strip VM's CloseRequested dispatches via closeTab, which
+    // cascades to the same empty model), and assert:
+    //   - the model is now empty + no active workspace;
+    //   - _windowShouldStayOpen() flipped false;
+    //   - CloseWindowRequested fired exactly once — raised by
+    //     _applyWorkspaceAction's model-driven close re-raise, NOT by the
+    //     classic _RemoveTab cascade (which never runs: _workspaceClassicTabs is
+    //     empty flag-on);
+    //   - `_tabs` stayed empty throughout (no classic tab was EVER built
+    //     flag-on — the cutover invariant).
     void WorkspaceTests::CloseLastTab_FlagOn_RequestsWindowClose()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -1837,9 +1875,16 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
-        auto result = RunOnUIThread([&page, closeWindowRequestCount]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+        ::WorkspaceModel::WorkspaceId onlyWsId{ 0 };
+        auto result = RunOnUIThread([&page, closeWindowRequestCount, &onlyWsId]() {
+            // The cutover invariant: NO classic tab was ever built flag-on.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"a window with one workspace must stay open");
+
+            onlyWsId = page->_workspaceModelState->workspaces_view()[0].id;
 
             page->CloseWindowRequested(
                 [closeWindowRequestCount](auto&&, auto&&) {
@@ -1848,23 +1893,24 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Fire CloseTab(index=0) — the only remaining tab");
-        result = RunOnUIThread([&page]() {
-            CloseTabArgs closeArgs{ 0u };
-            ActionEventArgs eventArgs{ closeArgs };
-            page->_HandleCloseTab(nullptr, eventArgs);
+        Log::Comment(L"Close the only workspace through the model (the strip VM's close path)");
+        result = RunOnUIThread([&page, onlyWsId]() {
+            auto next = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, onlyWsId);
+            page->_applyWorkspaceAction(std::move(next));
         });
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page, closeWindowRequestCount]() {
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
-                             L"closing the last tab leaves the classic tab strip empty");
+                             L"_tabs stayed empty the whole time — no classic tab is built flag-on");
             VERIFY_ARE_EQUAL(0u, page->_workspaceModelState->workspaces_view().size(),
                              L"closing the last workspace leaves the model empty");
             VERIFY_IS_FALSE(page->_workspaceModelState->activeWorkspaceId_view().has_value(),
                             L"empty model has no active workspace");
+            VERIFY_IS_FALSE(page->_windowShouldStayOpen(),
+                            L"an empty model must not keep the window open");
             VERIFY_ARE_EQUAL(1, closeWindowRequestCount->load(),
-                             L"the last-tab teardown must raise CloseWindowRequested exactly once");
+                             L"the model-driven close re-raise must fire CloseWindowRequested exactly once");
 
             // Validator on empty model state.
             const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
@@ -2053,18 +2099,21 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        // Close both workspaces' tabs -> model empties -> do NOT stay open.
+        // Close both workspaces through the MODEL (the strip VM's close path) ->
+        // model empties -> do NOT stay open. Big-flip Slice F-5 (#54): the
+        // classic _HandleCloseTab(index) path is unreachable flag-on (no classic
+        // tab strip to index), so drive closeWorkspace directly.
         result = RunOnUIThread([&page]() {
-            CloseTabArgs closeArgs{ 0u };
-            ActionEventArgs eventArgs{ closeArgs };
-            page->_HandleCloseTab(nullptr, eventArgs);
+            const auto firstWs = page->_workspaceModelState->workspaces_view()[0].id;
+            auto next = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, firstWs);
+            page->_applyWorkspaceAction(std::move(next));
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
             VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
                            L"flag-on, 1 workspace remaining -> stay open");
 
-            CloseTabArgs closeArgs2{ 0u };
-            ActionEventArgs eventArgs2{ closeArgs2 };
-            page->_HandleCloseTab(nullptr, eventArgs2);
+            const auto lastWs = page->_workspaceModelState->workspaces_view()[0].id;
+            auto next2 = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, lastWs);
+            page->_applyWorkspaceAction(std::move(next2));
             VERIFY_ARE_EQUAL(0u, page->_workspaceModelState->workspaces_view().size(),
                              L"flag-on, last workspace closed -> model empty");
             VERIFY_IS_FALSE(page->_windowShouldStayOpen(),
@@ -2101,21 +2150,24 @@ namespace TerminalAppLocalTests
         _initializeTerminalPageWithFlagOn(page, settings);
 
         // Force the model back to null to simulate the pre-shell-population
-        // state (defterm-readying path), while a classic tab still exists.
-        // The flag is ON, so this exercises the null-model guard branch.
+        // state (defterm-readying path). The flag is ON, so this exercises the
+        // null-model guard branch. Big-flip Slice F-5 (#54): no classic tab is
+        // built flag-on, so `_tabs` is empty — the load-bearing contract is that
+        // _windowShouldStayOpen() does NOT dereference the null model (no crash)
+        // and falls back to `_tabs.Size() > 0` exactly.
         auto result = RunOnUIThread([&page]() {
             VERIFY_IS_TRUE(page->_workspacesFlagEnabled());
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
 
             page->_workspaceModelState = nullptr;
             VERIFY_IS_TRUE(page->_workspaceModelState == nullptr);
 
-            // Must not crash, and with 1 classic tab it must stay open
-            // (fallback to _tabs.Size() > 0).
-            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
-                           L"flag-on, null model, 1 tab -> stay open via _tabs fallback");
+            // Must not crash; with the model null AND no classic tabs the
+            // fallback `_tabs.Size() > 0` is false. The CONTRACT is no-crash +
+            // fallback-equals-_tabs.Size()>0, which still holds post-cutover.
             VERIFY_ARE_EQUAL(page->_tabs.Size() > 0, page->_windowShouldStayOpen(),
-                             L"flag-on null-model fallback must equal _tabs.Size() > 0");
+                             L"flag-on null-model fallback must equal _tabs.Size() > 0 (no crash)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -2159,7 +2211,8 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(page->_workspaceModelState);
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"startup-replay populated the model before the close guard");
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
                            L"startup guard must choose stay-open");
 
@@ -2232,11 +2285,15 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        // After a close-tab cascade.
+        // After a close-cascade. Big-flip Slice F-5 (#54): drive the close the
+        // MODEL way (closeWorkspace on the first workspace) — the classic
+        // _HandleCloseTab(index) path is unreachable flag-on (no classic tab
+        // strip to index post-cutover). The validator-cleanliness contract is
+        // unchanged.
         result = RunOnUIThread([&page]() {
-            CloseTabArgs closeArgs{ 0u };
-            ActionEventArgs eventArgs{ closeArgs };
-            page->_HandleCloseTab(nullptr, eventArgs);
+            const auto firstWsId = page->_workspaceModelState->workspaces_view()[0].id;
+            auto next = ::WorkspaceModel::closeWorkspace(page->_workspaceModelState, firstWsId);
+            page->_applyWorkspaceAction(std::move(next));
 
             const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
             VERIFY_IS_FALSE(violation.has_value(),
@@ -2294,36 +2351,25 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Pre-condition: startup-replay landed one tab and the model
-        // has one workspace bound to it.
+        // Big-flip Slice F-5 (#54): THE CUTOVER. No classic tab + no
+        // _workspaceClassicTabs binding exist flag-on, so the registry mis-bind
+        // bug this test guarded is structurally gone (the registry is always
+        // empty). The remaining live contract — an invalid-profile-index NewTab
+        // bails BEFORE the model dispatch, so the model never grows a zombie
+        // workspace — still holds and is what we pin here.
+        //
+        // Pre-condition: startup-replay landed one workspace and NO classic tab.
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"startup-replay should produce exactly one classic tab");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"startup-replay should produce exactly one workspace");
-            VERIFY_ARE_EQUAL(1u, page->_workspaceClassicTabs.size(),
-                             L"startup-replay must register the initial classic Tab");
+            VERIFY_ARE_EQUAL(0u, page->_workspaceClassicTabs.size(),
+                             L"flag-on no classic tab is registered (cutover)");
         });
         VERIFY_SUCCEEDED(result);
 
-        // Snapshot the pre-existing Tab and workspace id so we can
-        // assert later that nothing rebound the workspace to the wrong
-        // tab.
-        winrt::TerminalApp::Tab preexistingTab{ nullptr };
-        ::WorkspaceModel::WorkspaceId preexistingWs{};
-        result = RunOnUIThread([&page, &preexistingTab, &preexistingWs]() {
-            preexistingTab = page->_tabs.GetAt(0);
-            VERIFY_IS_NOT_NULL(preexistingTab);
-            for (const auto& [ws, weakTab] : page->_workspaceClassicTabs)
-            {
-                preexistingWs = ws;
-                break;
-            }
-            VERIFY_IS_TRUE(preexistingWs.valid());
-        });
-        VERIFY_SUCCEEDED(result);
-
-        Log::Comment(L"Fire NewTab with an out-of-range ProfileIndex; this should bail without growing _tabs or the model");
+        Log::Comment(L"Fire NewTab with an out-of-range ProfileIndex; this should bail without growing the model");
         result = RunOnUIThread([&page]() {
             // Settings has exactly one active profile, so ProfileIndex
             // 999 is guaranteed out of range and
@@ -2335,30 +2381,17 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        result = RunOnUIThread([&page, &preexistingTab, &preexistingWs]() {
-            // 1. No zombie tab.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
+        result = RunOnUIThread([&page]() {
+            // No zombie classic tab, no zombie workspace, no zombie registry
+            // binding; the bail happened before model dispatch.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"failed-spawn NewTab must NOT append a classic tab");
-
-            // 2. Model unchanged — the bail happened before model
-            //    dispatch, so workspace count stays at 1.
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"failed-spawn NewTab must not grow the workspace model");
+            VERIFY_ARE_EQUAL(0u, page->_workspaceClassicTabs.size(),
+                             L"failed-spawn NewTab must not register any classic tab (cutover)");
 
-            // 3. The registry still holds exactly the original
-            //    binding. Most importantly, the pre-existing workspace
-            //    is still bound to the pre-existing tab — NOT to some
-            //    new failed-spawn workspace.
-            VERIFY_ARE_EQUAL(1u, page->_workspaceClassicTabs.size(),
-                             L"registry must hold exactly the original workspace -> tab binding");
-            const auto it = page->_workspaceClassicTabs.find(preexistingWs);
-            VERIFY_IS_TRUE(it != page->_workspaceClassicTabs.end(),
-                           L"pre-existing workspace must still be in the registry");
-            const auto boundTab = it->second.get();
-            VERIFY_IS_TRUE(boundTab == preexistingTab,
-                           L"pre-existing workspace must still be bound to the pre-existing tab (no mis-bind)");
-
-            // 4. Validator clean.
+            // Validator clean.
             const auto violation = ::WorkspaceModel::validate(*page->_workspaceModelState);
             VERIFY_IS_FALSE(violation.has_value(),
                             L"model state after failed spawn must satisfy the validator");
@@ -2406,7 +2439,8 @@ namespace TerminalAppLocalTests
         // Pre-condition: startup-replay landed one tab containing one
         // pane; the model has one workspace whose root is a LeafPane.
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(1u, workspaces.size());
@@ -2424,13 +2458,13 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            // The classic Pane tree on the focused tab grew to 2 leaves.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"split must not create a new classic tab");
-            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
-            VERIFY_IS_NOT_NULL(tab);
-            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
-                             L"classic pane tree must have two leaves after a split");
+            // Big-flip Slice F-5 (#54): no classic tab/pane tree is built flag-on
+            // — the split is rendered by the projected pane tree. Assert no
+            // classic tab exists and the projected tree root holds a split Grid.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"split must not create a classic tab (cutover)");
+            VERIFY_IS_NOT_NULL(page->_workspacePaneTreeRootChildForTest(),
+                               L"the projected pane tree must render the split");
 
             // Model: active workspace's root is now a SplitPane carrying
             // two LeafPane children (the original on the left, the new
@@ -2477,10 +2511,11 @@ namespace TerminalAppLocalTests
         winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
         _initializeTerminalPageWithFlagOn(page, settings);
 
-        // Pre-condition: startup-replay landed one tab containing one
-        // pane; the model has one workspace whose root is a LeafPane.
+        // Pre-condition: startup-replay landed one workspace whose root is a
+        // LeafPane; NO classic tab is built flag-on (cutover).
         auto result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_IS_TRUE(page->_workspaceModelState != nullptr);
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(1u, workspaces.size());
@@ -2498,13 +2533,12 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            // The classic Pane tree on the focused tab grew to 2 leaves.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"split must not create a new classic tab");
-            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
-            VERIFY_IS_NOT_NULL(tab);
-            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
-                             L"classic pane tree must have two leaves after a split");
+            // Big-flip Slice F-5 (#54): the split is rendered by the projected
+            // pane tree; no classic tab/pane tree is built flag-on.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"split must not create a classic tab (cutover)");
+            VERIFY_IS_NOT_NULL(page->_workspacePaneTreeRootChildForTest(),
+                               L"the projected pane tree must render the split");
 
             // Model: active workspace's root is now a SplitPane carrying
             // two LeafPane children (the original on top, the new sibling
@@ -3399,17 +3433,19 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
 
         result = RunOnUIThread([&page]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            // Big-flip Slice F-5 (#54): no classic tab strip flag-on — assert via
+            // the model + the sidebar view-models, not _GetFocusedTabIndex.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(2u, page->_workspaceViewModels.Size());
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size());
 
-            // Pre-condition: workspace 1 is active and classic tab 1 is focused.
+            // Pre-condition: workspace 1 is active.
             const auto activeBefore = page->_workspaceModelState->activeWorkspaceId_view();
             VERIFY_IS_TRUE(activeBefore.has_value());
             VERIFY_ARE_EQUAL(activeBefore.value(), workspaces[1].id,
                              L"workspaces[1] should be active after a NewTab");
-            VERIFY_ARE_EQUAL(1u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu));
 
             // The row 0 view-model carries workspace 0's id; activating it is the
             // sidebar click intent.
@@ -3434,12 +3470,14 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(page->_workspaceModelState->mru_view().front(), workspaces[0].id,
                              L"switchToWorkspace must touch the MRU front");
 
-            // ...and the ActiveWorkspaceChanged arm drove _SelectTab to
-            // workspace 0's classic tab (tab 0) without changing the tab count.
-            VERIFY_ARE_EQUAL(0u, page->_GetFocusedTabIndex().value_or(0xFFFFFFFFu),
-                             L"WorkspaceView should have driven _SelectTab(0) via ActiveWorkspaceChanged");
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"a switch is non-structural — the tab count must not change");
+            // ...and the switch is non-structural: the workspace count is
+            // unchanged and no classic tab was built (cutover). The
+            // ActiveWorkspaceChanged arm re-projected the active workspace's pane
+            // tree into the visible host instead of driving _SelectTab.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), workspaces.size(),
+                             L"a switch is non-structural — the workspace count must not change");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip stays empty across a switch (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -3771,8 +3809,8 @@ namespace TerminalAppLocalTests
         auto result = RunOnUIThread([&page, &verifyAllMountsResolve]() {
             VERIFY_IS_TRUE(page->_workspaceView != nullptr);
 
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"the classic Tab still displays — exactly one after startup");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
                              L"startup-replay produces exactly one workspace");
 
@@ -3801,8 +3839,8 @@ namespace TerminalAppLocalTests
         // already-materialised tabs untouched), so the registry now owns TWO
         // live contents — one per workspace.
         result = RunOnUIThread([&page, &verifyAllMountsResolve]() {
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"the classic Tab still displays — two after a 2nd workspace");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip stays empty across new workspaces (cutover)");
             VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size(),
                              L"flag-on new-tab created a second workspace");
 
@@ -3981,10 +4019,12 @@ namespace TerminalAppLocalTests
         auto result = RunOnUIThread([&page, mocks]() {
             VERIFY_IS_TRUE(page->_workspaceView != nullptr);
 
-            // The classic display is intact: exactly one classic Tab whose
-            // content is the VISIBLE child of _tabContent.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"the classic Tab still displays — exactly one after startup");
+            // Big-flip Slice F-5 (#54): THE CUTOVER. No classic Tab is built
+            // flag-on — the projected pane tree displays. The factory still
+            // materialises the content into the registry (the property under
+            // test); it just lands in the now-VISIBLE host's leaf cell.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
 
             // The factory built exactly one content (one active workspace) and
             // the registry owns it.
@@ -4024,24 +4064,19 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(activeMount.v, hostId->v,
                              L"the host must back the active workspace's mount content id");
 
-            // INVISIBLE this slice: the host stays Collapsed, so the user sees
-            // only the classic terminal.
+            // Big-flip Slice F-5 (#54): the host is now VISIBLE and is the SOLE
+            // child of _tabContent — it IS the visible display (no classic Tab).
             VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"the host must remain Collapsed — no visible change this slice");
+                             L"the host must be Visible (F-5 cutover) — it is the display now");
 
-            // The classic visible path is intact: _tabContent holds the classic
-            // Tab's content (NOT the mock root), and that classic content is a
-            // child of _tabContent.
             VERIFY_IS_TRUE(page->_tabContent != nullptr);
-            const auto classicContent = page->_tabs.GetAt(0).Content();
-            VERIFY_IS_NOT_NULL(classicContent);
-            uint32_t classicIndex = 0;
-            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(classicContent, classicIndex),
-                           L"the classic Tab content must still be a child of _tabContent (visible path intact)");
-            VERIFY_IS_TRUE(classicContent != expectedRoot,
-                           L"the classic visible content is distinct from the host's factory content this slice");
+            VERIFY_ARE_EQUAL(1u, page->_tabContent.Children().Size(),
+                             L"_tabContent has exactly one child post-cutover");
+            uint32_t hostIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(page->_workspaceContentHost, hostIndex),
+                           L"the projected-pane-tree host is _tabContent's sole child (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4110,8 +4145,8 @@ namespace TerminalAppLocalTests
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(2u, workspaces.size(),
                              L"flag-on new-tab created a second workspace");
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"the classic Tab still displays — two after a 2nd workspace");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
                              L"the override factory materialised one content per workspace");
 
@@ -4170,21 +4205,17 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NULL(page->_leafHostChildForTest(ws1Leaf),
                            L"ws1's leaf host must be gone from the active (ws0) tree after the switch");
 
-            // The host stays Collapsed; no visible change.
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            // Big-flip Slice F-5 (#54): the host is Visible and IS the display.
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"the host must remain Collapsed across a switch");
+                             L"the host must remain Visible (F-5 cutover) across a switch");
 
-            // Classic path intact: still two classic tabs, and the classic
-            // content of the selected tab is a child of _tabContent.
-            VERIFY_ARE_EQUAL(2u, page->_tabs.Size(),
-                             L"the switch must not change the classic tab count");
-            const auto focusedIdx = page->_GetFocusedTabIndex();
-            VERIFY_IS_TRUE(focusedIdx.has_value());
-            const auto classicContent = page->_tabs.GetAt(*focusedIdx).Content();
-            uint32_t classicIndex = 0;
-            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(classicContent, classicIndex),
-                           L"the selected classic Tab content must be a child of _tabContent (visible path intact)");
+            // No classic tab strip flag-on; the host is _tabContent's sole child.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the switch must not build a classic tab (cutover)");
+            uint32_t hostIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(page->_workspaceContentHost, hostIndex),
+                           L"the projected-pane-tree host is _tabContent's sole child across a switch (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4259,10 +4290,11 @@ namespace TerminalAppLocalTests
         auto result = RunOnUIThread([&]() {
             VERIFY_IS_TRUE(page->_workspaceView != nullptr);
 
-            // Startup baseline: one classic Tab, one workspace, the root leaf's
-            // strip has exactly one VM (the startup tab projected by TabAdded).
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"startup: exactly one classic Tab");
+            // Startup baseline: one workspace, the root leaf's strip has exactly
+            // one VM (the startup tab projected by TabAdded). No classic Tab is
+            // built flag-on (cutover).
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
             const auto& workspaces = page->_workspaceModelState->workspaces_view();
             VERIFY_ARE_EQUAL(1u, workspaces.size());
             ws0 = workspaces[0].id;
@@ -4294,16 +4326,15 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(leaf);
             VERIFY_ARE_EQUAL(static_cast<size_t>(2), leaf->tabs.size());
 
-            // CRITICAL: NO second classic Tab was created — the additional tab
-            // is represented ONLY as a strip VM (invisible). _tabs stays at one.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"an additional leaf tab must NOT create a 2nd classic Tab");
+            // CRITICAL: NO classic Tab is created — the additional tab is
+            // represented ONLY as a strip VM. `_tabs` stays empty (cutover).
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"an additional leaf tab must NOT create a classic Tab (cutover)");
 
-            // INVISIBLE: the host (and thus the strip inside it) stays Collapsed.
             VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"the host must remain Collapsed — no visible change this slice");
+                             L"the host must remain Visible (F-5 cutover) — no visible change this slice");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4400,11 +4431,11 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(leafChild == secondRoot,
                            L"the leaf host child must be the newly-active tab's content root");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across an active-tab change");
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"an active-tab change must not touch the classic tab count");
+                             L"host stays Visible (F-5 cutover) across an active-tab change");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"an active-tab change must not build a classic tab (cutover)");
         });
         VERIFY_SUCCEEDED(result);
 
@@ -4429,9 +4460,9 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(leafChild == firstRoot,
                            L"the leaf host child must swap back to the first tab's content root");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the second active-tab change");
+                             L"host stays Visible (F-5 cutover) across the second active-tab change");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4522,15 +4553,14 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
                              L"closing the additional tab removes its strip VM (back to one)");
 
-            // The classic tab count is unchanged — the additional tab never had
-            // a classic Tab to remove.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"closing the additional tab must not change the classic tab count");
+            // No classic tab exists flag-on (cutover) — `_tabs` stays empty.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"closing the additional tab must not build a classic tab (cutover)");
 
-            // Host still Collapsed.
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            // Host still Visible.
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across a tab close");
+                             L"host stays Visible (F-5 cutover) across a tab close");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4706,16 +4736,13 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(rightLeaf),
                              L"the new sibling leaf gets its own one-tab strip (split-sibling skip lifted)");
 
-            // INVISIBLE + classic intact: one classic Tab, host Collapsed.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"the split must not create a 2nd classic Tab");
-            auto tab = page->_GetTabImpl(page->_tabs.GetAt(0));
-            VERIFY_IS_NOT_NULL(tab);
-            VERIFY_ARE_EQUAL(2, tab->GetLeafPaneCount(),
-                             L"the classic pane tree (the visible one) still grew to two leaves");
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            // Big-flip Slice F-5 (#54): no classic tab/pane tree is built flag-on
+            // — the projected tree renders the split. `_tabs` stays empty.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the split must not create a classic Tab (cutover)");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the split — no visible change");
+                             L"host is Visible (F-5 cutover) — the projected split IS the display");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4826,9 +4853,9 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(std::abs(0.3 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Vertical, 1)) < 1e-5,
                            L"after resize: second cell star == 1-ratio (0.3)");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across a ratio change");
+                             L"host stays Visible (F-5 cutover) across a ratio change");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -4934,9 +4961,9 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
                              L"the survivor keeps its one-tab strip");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the collapse");
+                             L"host stays Visible (F-5 cutover) across the collapse");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5003,11 +5030,13 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(page->_workspaceHostChildForTest() != expectedRoot,
                            L"the content root must live in the leaf host, not the shared host");
 
-            // INVISIBLE: host + tree stay Collapsed, classic Tab unchanged.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            // Big-flip Slice F-5 (#54): no classic tab flag-on; the VISIBLE host
+            // is the display.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"the host must stay Collapsed — no visible change");
+                             L"the host must be Visible (F-5 cutover) — it is the display");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5101,12 +5130,13 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(rightChild == root1,
                            L"the sibling leaf host holds the split sibling's content root");
 
-            // INVISIBLE + classic intact: one classic Tab, host Collapsed.
-            VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
-                             L"the split must not create a 2nd classic Tab");
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            // Big-flip Slice F-5 (#54): no classic tab is built flag-on; the
+            // VISIBLE host's per-leaf cells hold each leaf's content.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the split must not create a classic Tab (cutover)");
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the split");
+                             L"host is Visible (F-5 cutover) — each leaf cell holds its content");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5251,9 +5281,9 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), splitGrid.ColumnDefinitions().Size(),
                              L"the separator must NOT add a third column/cell");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed — the separator is invisible this slice");
+                             L"host stays Visible (F-5 cutover) — the separator is invisible this slice");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5375,9 +5405,9 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(page->_splitSeparatorForTest(splitGrid),
                                L"the re-projected split keeps its custom separator");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the simulated drag");
+                             L"host stays Visible (F-5 cutover) across the simulated drag");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5475,9 +5505,9 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(std::abs(0.3 - _splitCellStar(splitGrid, ::WorkspaceModel::Axis::Horizontal, 1)) < 1e-5,
                            L"after the drag: second ROW star == 1-ratio (0.3)");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the horizontal drag");
+                             L"host stays Visible (F-5 cutover) across the horizontal drag");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5598,9 +5628,9 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
                              L"exactly one VM in the single-tab startup strip");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed (INVISIBLE this slice)");
+                             L"host stays Visible (F-5 cutover) (INVISIBLE this slice)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5695,9 +5725,9 @@ namespace TerminalAppLocalTests
             VERIFY_ARE_EQUAL(0u, page->_paneTabStripSizeForTest(rightLeaf),
                              L"the collapsed leaf's strip entry must be pruned (returns 0 for missing key)");
 
-            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              page->_workspaceContentHost.Visibility(),
-                             L"host stays Collapsed across the collapse");
+                             L"host stays Visible (F-5 cutover) across the collapse");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -5741,6 +5771,135 @@ namespace TerminalAppLocalTests
 
             VERIFY_ARE_EQUAL(1u, page->_tabs.Size(),
                              L"flag-off startup renders the classic single-tab UI unchanged");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // ------------------------------------------------------------------
+    // Big-flip Slice F-5 (#54): THE CUTOVER. The model's projected pane tree is
+    // now the VISIBLE display; the classic tab strip is retired flag-on.
+    // ------------------------------------------------------------------
+
+    // (a) The projected-pane-tree host is Visible flag-on AND is the SOLE child
+    // of _tabContent — it IS the display (no classic Tab, no double-render).
+    void WorkspaceTests::BigFlipF5_FlagOn_HostVisibleAndSoleChildOfTabContent()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_TRUE(page->_workspaceContentHost != nullptr);
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
+                             page->_workspaceContentHost.Visibility(),
+                             L"the host must be Visible flag-on (the cutover made it the display)");
+
+            // No classic tab was ever built flag-on.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"flag-on the classic tab strip is never populated (cutover)");
+
+            // _tabContent has EXACTLY one child, and it is the host (no
+            // double-render: the classic content was never appended).
+            VERIFY_IS_TRUE(page->_tabContent != nullptr);
+            VERIFY_ARE_EQUAL(1u, page->_tabContent.Children().Size(),
+                             L"_tabContent must hold exactly one child flag-on");
+            uint32_t hostIndex = 0;
+            VERIFY_IS_TRUE(page->_tabContent.Children().IndexOf(page->_workspaceContentHost, hostIndex),
+                           L"the host must be _tabContent's SOLE child (the projected tree is the display)");
+            VERIFY_ARE_EQUAL(0u, hostIndex);
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // (b) The classic window tab strip is retired flag-on: _UpdateTabView forces
+    // _tabRow.Height(0) and the TabView Collapsed. Flag-off it keeps the upstream
+    // auto-sizing (NaN height = "Auto").
+    void WorkspaceTests::BigFlipF5_FlagOn_TabRowHeightZero()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            // Drive _UpdateTabView explicitly so the assertion is robust to the
+            // exact startup call order; the flag-on branch forces the strip off.
+            page->_UpdateTabView();
+            VERIFY_IS_TRUE(page->_tabRow != nullptr);
+            VERIFY_ARE_EQUAL(0.0, page->_tabRow.Height(),
+                             L"flag-on the classic tab row must be forced to zero height (cutover)");
+            VERIFY_IS_TRUE(page->_tabView != nullptr);
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
+                             page->_tabView.Visibility(),
+                             L"flag-on the classic TabView must be Collapsed (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // (b) flag-off mirror: _UpdateTabView leaves the tab row auto-sized (NaN
+    // height) — byte-for-byte upstream.
+    void WorkspaceTests::BigFlipF5_FlagOff_TabRowHeightAuto()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ],
+            "alwaysShowTabs": true
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        auto result = RunOnUIThread([&page]() {
+            page->_UpdateTabView();
+            VERIFY_IS_TRUE(page->_tabRow != nullptr);
+            // NaN is the XAML "Auto" sentinel the upstream visible path sets;
+            // it is NOT 0 (the cutover-forced value). Assert it is NOT zeroed.
+            VERIFY_IS_TRUE(std::isnan(page->_tabRow.Height()),
+                           L"flag-off the tab row keeps its upstream auto (NaN) height");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off must leave the workspace model dormant");
         });
         VERIFY_SUCCEEDED(result);
     }
