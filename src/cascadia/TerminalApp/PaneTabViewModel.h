@@ -41,18 +41,23 @@ namespace winrt::TerminalApp::implementation
         // the ListView's click-selection. Re-evaluated by x:Bind whenever
         // IsActive raises PropertyChanged.
         //
-        // ActiveToVisibility gates the selected-tab rounded background + the
-        // bottom selection indicator: Visible when active, Collapsed otherwise.
+        // ActiveToVisibility gates the connected selected-tab background AND the
+        // selected (primary) foreground label: Visible when active, Collapsed
+        // otherwise. RestToVisibility is its inverse and gates the rest
+        // (secondary) foreground label. Both labels carry theme-aware
+        // {ThemeResource} foreground brushes in the template (Slice 2a.1), so the
+        // foreground is theme-correct without an imperative brush lookup.
         static winrt::Windows::UI::Xaml::Visibility ActiveToVisibility(bool isActive)
         {
             return isActive ? winrt::Windows::UI::Xaml::Visibility::Visible
                             : winrt::Windows::UI::Xaml::Visibility::Collapsed;
         }
 
-        // The row label's foreground: the TabViewItem selected/rest foreground
-        // brush, looked up from app resources (mirrors
-        // WorkspaceViewModel::ActiveToRowBrush). Defined out-of-line in the .cpp.
-        static winrt::Windows::UI::Xaml::Media::Brush ActiveToForeground(bool isActive);
+        static winrt::Windows::UI::Xaml::Visibility RestToVisibility(bool isActive)
+        {
+            return isActive ? winrt::Windows::UI::Xaml::Visibility::Collapsed
+                            : winrt::Windows::UI::Xaml::Visibility::Visible;
+        }
 
         // Intent signals (Big-flip Slice C, #54). These only raise events; they
         // never mutate this VM's state and never touch the WorkspaceModel. The

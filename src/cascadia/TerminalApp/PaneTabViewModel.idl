@@ -30,14 +30,22 @@ namespace TerminalApp
         // raises PropertyChanged.
         static Windows.UI.Text.FontWeight ActiveToFontWeight(Boolean isActive);
 
-        // Slice 2a (#54) tab-chrome projection helpers — all driven by IsActive
-        // (OneWay), so the SELECTED look is a pure projection of the model, NOT
-        // the ListView's click-selection. ActiveToVisibility gates the
-        // selected-tab background + selection indicator (Visible when active);
-        // ActiveToForeground returns the TabViewItem selected/rest foreground
-        // brush (mirrors WorkspaceViewModel.ActiveToRowBrush).
+        // Slice 2a (#54) / 2a.1 tab-chrome projection helpers — all driven by
+        // IsActive (OneWay), so the SELECTED look is a pure projection of the
+        // model, NOT the ListView's click-selection.
+        //
+        // ActiveToVisibility (Visible iff active) gates BOTH the connected
+        // selected-tab background AND the selected (primary) foreground label.
+        // RestToVisibility (Visible iff NOT active) gates the rest (secondary)
+        // foreground label. The two label TextBlocks carry theme-aware
+        // {ThemeResource} foreground brushes (PaneTabHeaderForegroundSelected /
+        // PaneTabHeaderForeground), so the framework resolves them per the
+        // strip's effective theme — dark text on Light, light on Dark. This
+        // replaces the Slice-2a imperative ActiveToForeground brush, which
+        // snapshotted the Application theme (WT does not switch it for
+        // "theme":"light") and so rendered light-grey text on the Light strip.
         static Windows.UI.Xaml.Visibility ActiveToVisibility(Boolean isActive);
-        static Windows.UI.Xaml.Media.Brush ActiveToForeground(Boolean isActive);
+        static Windows.UI.Xaml.Visibility RestToVisibility(Boolean isActive);
 
         // sender = the VM (carries Id so the page resolves the tab); args =
         // null (the intent carries no payload beyond Id).

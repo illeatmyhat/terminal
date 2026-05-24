@@ -309,18 +309,22 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StripSlice1_ActivateIntent_DispatchesSelectTab);
         TEST_METHOD(StripSlice1_CloseIntent_DispatchesCloseTab);
 
-        // Per-pane strip Slice 2a (#54): the VISUAL re-skin of the tab-item
-        // chrome (classic MUX TabViewItem look). STRUCTURAL assertions only —
-        // never a laid-out pixel (the headless std::clamp-resize trap):
+        // Per-pane strip Slice 2a (#54) + 2a.1 follow-up: the VISUAL re-skin of
+        // the tab-item chrome (classic MUX TabViewItem look). STRUCTURAL
+        // assertions only — never a laid-out pixel (the headless
+        // std::clamp-resize trap):
         //  - the inner ListView carries the re-skin ItemContainerStyle, and the
-        //    IsActive-driven chrome helpers project correctly (the selected
-        //    background + selection indicator are gated by IsActive, the
-        //    foreground brush flips with IsActive);
-        //  - the selection indicator's IsActive-driven visibility TRACKS the
-        //    model: flipping which VM IsActive moves the Visible projection;
+        //    IsActive-driven chrome helpers project correctly (the CONNECTED
+        //    selected background is gated by IsActive, the foreground brush
+        //    flips with IsActive);
+        //  - the connected-selected-background's IsActive-driven visibility
+        //    TRACKS the model: flipping which VM IsActive moves the Visible
+        //    projection. Slice 2a.1 removed the separate bottom accent bar, so
+        //    the gated element is now the connected selected background — the
+        //    sole selected cue — and this is what the visibility test asserts;
         //  - the foreground projection differs active vs inactive.
         TEST_METHOD(StripSlice2a_InnerListViewCarriesReskinContainerStyle);
-        TEST_METHOD(StripSlice2a_IsActiveDrivesIndicatorVisibility);
+        TEST_METHOD(StripSlice2a_IsActiveDrivesSelectedBackgroundVisibility);
         TEST_METHOD(StripSlice2a_IsActiveDrivesForegroundBrush);
 
         TEST_CLASS_SETUP(ClassSetup)
@@ -6897,14 +6901,17 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // The selection indicator + selected background are gated by IsActive (the
-    // ActiveToVisibility helper the item template x:Binds OneWay). We assert the
-    // helper maps the MODEL-driven IsActive to Visibility, and that flipping
-    // which VM is active (via the model, RequestActivate) MOVES the Visible
-    // projection to the newly-active row and away from the old one. This is the
-    // pure-projection contract for the dominant visual (the indicator) without a
-    // layout pass.
-    void WorkspaceTests::StripSlice2a_IsActiveDrivesIndicatorVisibility()
+    // Slice 2a.1 (#54): the CONNECTED selected background (the rounded-top
+    // SelectedBackground border in the item template) is gated by IsActive via
+    // the ActiveToVisibility helper the template x:Binds OneWay. Slice 2a.1
+    // removed the separate bottom accent bar, so this connected background is
+    // now the SOLE selected cue. We assert the helper maps the MODEL-driven
+    // IsActive to Visibility, and that flipping which VM is active (via the
+    // model, RequestActivate) MOVES the Visible projection to the newly-active
+    // row and away from the old one. This is the pure-projection contract for
+    // the selected visual without a layout pass (the headless std::clamp-resize
+    // trap forbids realizing a container).
+    void WorkspaceTests::StripSlice2a_IsActiveDrivesSelectedBackgroundVisibility()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
         {
@@ -6969,8 +6976,9 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(items);
             VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size());
 
-            // Exactly one row is active; its indicator projects Visible, the
-            // other's Collapsed — the IsActive-driven indicator visibility.
+            // Exactly one row is active; its connected selected background
+            // projects Visible, the other's Collapsed — the IsActive-driven
+            // selected-background visibility (the sole selected cue post-2a.1).
             winrt::TerminalApp::PaneTabViewModel activeVm{ nullptr };
             winrt::TerminalApp::PaneTabViewModel otherVm{ nullptr };
             for (uint32_t i = 0; i < items.Size(); ++i)
@@ -6990,15 +6998,15 @@ namespace TerminalAppLocalTests
 
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(activeVm.IsActive()),
-                             L"the active row's indicator must project Visible");
+                             L"the active row's connected selected background must project Visible");
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
-                             L"the non-active row's indicator must project Collapsed");
+                             L"the non-active row's connected selected background must project Collapsed");
 
             // Flip the active tab through the model (RequestActivate -> dispatch
             // selectTab -> diff flips IsActive). The Visible projection MUST
             // move to the newly-active row and away from the old one — the
-            // indicator follows the MODEL, not a click-selection.
+            // selected background follows the MODEL, not a click-selection.
             otherVm.RequestActivate();
             VERIFY_IS_TRUE(otherVm.IsActive(),
                            L"the newly-activated row must now be active (model diff flipped IsActive)");
@@ -7006,42 +7014,132 @@ namespace TerminalAppLocalTests
                             L"the previously-active row must now be inactive");
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Visible,
                              winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
-                             L"the indicator's Visible projection must move to the newly-active row");
+                             L"the selected background's Visible projection must move to the newly-active row");
             VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Visibility::Collapsed,
                              winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(activeVm.IsActive()),
-                             L"the indicator's Visible projection must leave the old row");
+                             L"the selected background's Visible projection must leave the old row");
         });
         VERIFY_SUCCEEDED(result);
     }
 
-    // The row label foreground is an IsActive-driven projection (the
-    // ActiveToForeground helper the item template x:Binds OneWay): the selected
-    // foreground brush when active, the rest foreground when not. We assert the
-    // helper returns a non-null Brush for both states and that the two differ —
-    // the selected/rest foreground delta of the classic TabViewItem look. (No
-    // layout / realization; the helper is a pure function of IsActive.)
+    // The row label foreground is an IsActive-driven projection. Slice 2a.1
+    // makes it THEME-CORRECT by rendering the label as TWO overlaid TextBlocks,
+    // each carrying a theme-aware {ThemeResource} foreground brush
+    // (PaneTabHeaderForegroundSelected = primary / PaneTabHeaderForeground =
+    // secondary), with exactly one shown at a time gated by IsActive: the
+    // SELECTED (primary, bold) label via ActiveToVisibility, the REST (secondary)
+    // label via RestToVisibility. The framework resolves each {ThemeResource}
+    // per the strip's effective theme, so the active label is dark on Light /
+    // light on Dark — fixing the Slice-2a light-theme contrast bug (which used an
+    // imperative brush snapshotted from the unswitched Application theme).
+    //
+    // Headless witness (no container realization — the std::clamp-resize trap):
+    // the two foreground labels' IsActive-driven visibility helpers are exact
+    // INVERSES, so the selected (primary/theme-correct) label is shown iff
+    // active and the rest (secondary) label iff not — i.e. which foreground the
+    // user sees is a pure projection of the model's IsActive, never a
+    // click-selection. We also confirm flipping the active VM through the model
+    // moves the shown-label projection.
     void WorkspaceTests::StripSlice2a_IsActiveDrivesForegroundBrush()
     {
-        // ActiveToForeground resolves an app theme brush (and, on the
-        // resource-absent path, constructs a SolidColorBrush) — XAML object
-        // work that must run on the UI thread, so drive it through
-        // RunOnUIThread.
+        using V = winrt::Windows::UI::Xaml::Visibility;
+
+        // The two foreground labels are gated by ActiveToVisibility (selected)
+        // and RestToVisibility (rest); they must be exact inverses so exactly one
+        // foreground shows per IsActive.
+        VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(true),
+                         L"the selected (primary) foreground label shows when active");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(true),
+                         L"the rest (secondary) foreground label is hidden when active");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(false),
+                         L"the selected (primary) foreground label is hidden when not active");
+        VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(false),
+                         L"the rest (secondary) foreground label shows when not active");
+
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5800 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
         auto result = RunOnUIThread([&]() {
-            const auto activeBrush = winrt::TerminalApp::PaneTabViewModel::ActiveToForeground(true);
-            const auto restBrush = winrt::TerminalApp::PaneTabViewModel::ActiveToForeground(false);
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
 
-            VERIFY_IS_NOT_NULL(activeBrush, L"ActiveToForeground(true) must return a brush (selected foreground)");
-            VERIFY_IS_NOT_NULL(restBrush, L"ActiveToForeground(false) must return a brush (rest foreground)");
+        Log::Comment(L"Add a second tab so the strip has an active + a non-active row");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
 
-            // The selected and rest foregrounds must differ — the classic look
-            // uses a stronger (primary) foreground for the selected tab and a
-            // softer (secondary) one for the rest tabs. Comparing identity is
-            // sufficient and headless-safe (no rendered color sampling): the
-            // helper resolves a DIFFERENT app brush per state (or,
-            // resource-absent, a different-alpha fallback), so the two
-            // references are not equal.
-            VERIFY_IS_FALSE(activeBrush == restBrush,
-                            L"the selected and rest foreground brushes must differ (IsActive-driven foreground)");
+        result = RunOnUIThread([&]() {
+            const auto strip = _leafTabStripView(_findLeafContainer(page->_workspacePaneTreeRootChildForTest(), leaf0));
+            VERIFY_IS_NOT_NULL(strip);
+            const auto items = strip.TabsListView().ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items);
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size());
+
+            winrt::TerminalApp::PaneTabViewModel activeVm{ nullptr };
+            winrt::TerminalApp::PaneTabViewModel otherVm{ nullptr };
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                const auto vm = items.GetAt(i);
+                (vm.IsActive() ? activeVm : otherVm) = vm;
+            }
+            VERIFY_IS_NOT_NULL(activeVm, L"exactly one row must be active");
+            VERIFY_IS_NOT_NULL(otherVm, L"exactly one row must be non-active");
+
+            // The active row shows the SELECTED (primary, theme-correct) label;
+            // the non-active row shows the REST (secondary) label.
+            VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(activeVm.IsActive()),
+                             L"the active row shows its selected (primary) foreground label");
+            VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(activeVm.IsActive()),
+                             L"the active row hides its rest (secondary) foreground label");
+            VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
+                             L"the non-active row hides its selected (primary) foreground label");
+            VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(otherVm.IsActive()),
+                             L"the non-active row shows its rest (secondary) foreground label");
+
+            // Flip the active tab through the model — the shown-foreground
+            // projection MUST follow IsActive (the model), not a click-selection.
+            otherVm.RequestActivate();
+            VERIFY_IS_TRUE(otherVm.IsActive());
+            VERIFY_IS_FALSE(activeVm.IsActive());
+            VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::ActiveToVisibility(otherVm.IsActive()),
+                             L"the selected (primary) foreground label moves to the newly-active row");
+            VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(activeVm.IsActive()),
+                             L"the previously-active row now shows the rest (secondary) foreground label");
         });
         VERIFY_SUCCEEDED(result);
     }

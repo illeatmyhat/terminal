@@ -6,15 +6,27 @@
 <!--
     Big-flip per-pane strip Slice 2a (#54): the VISUAL re-skin of the per-leaf
     tab strip. Each row is re-skinned to LOOK like a classic MUX TabViewItem —
-    rounded top corners, per-state backgrounds, the selected-tab bottom
-    selection indicator, the TabView foreground/border/padding/height — adapted
-    from the WinUI 2.8 TabViewItem ControlTemplate + its TabViewItem* theme
-    brushes (packages\Microsoft.UI.Xaml.2.8.4 Generic.xaml +
+    rounded top corners, per-state backgrounds, the connected selected-tab
+    background, the TabView foreground/border/padding/height — adapted from the
+    WinUI 2.8 TabViewItem ControlTemplate + its TabViewItem* theme brushes
+    (packages\Microsoft.UI.Xaml.2.8.4 Generic.xaml +
     dev/TabView/TabView_themeresources.xaml).
 
+    Slice 2a.1 (#54) follow-up — match the CLASSIC WT tab strip exactly:
+      (1) The selected tab is marked by a CONNECTED BACKGROUND SHAPE (a
+          rounded-top fill in the content/region layer color that merges into
+          the content area below), NOT a bottom accent bar. Slice 2a's bottom
+          accent underline was removed; the selected fill key was remapped from
+          a lighter floating fill to the classic connected region color
+          (LayerOnMicaBaseAltFillColorDefaultBrush — see the brush block below).
+      (2) Light-theme contrast fix: the foreground helper now resolves the
+          theme-aware Text* brushes correctly (it had been falling through to a
+          white fallback in BOTH themes — correct-by-accident in Dark, faint in
+          Light). See PaneTabViewModel::ActiveToForeground.
+
     CRITICAL — selection is a PURE PROJECTION of the model. The SELECTED chrome
-    (selected background + selection indicator + selected foreground/weight) is
-    driven ENTIRELY by PaneTabViewModel.IsActive (OneWay), NOT by the ListView's
+    (connected selected background + selected foreground/weight) is driven
+    ENTIRELY by PaneTabViewModel.IsActive (OneWay), NOT by the ListView's
     click-selection / ListViewItem.IsSelected. A user click raises
     RequestActivate -> the page dispatches the model action -> the diff flips
     IsActive -> the chrome re-projects. The DEFAULT ListViewItem selection
@@ -61,7 +73,17 @@
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SolidBackgroundFillColorTertiaryBrush" />
+                    <!--
+                        Slice 2a.1 (#54): the CLASSIC selected-tab fill. The WinUI
+                        2.8 TabViewItem's TabViewItemHeaderBackgroundSelected maps
+                        to LayerOnMicaBaseAltFillColorDefaultBrush — the content /
+                        region layer color, the SAME surface the content area
+                        below the strip paints. That is what makes the selected
+                        tab read as a CONNECTED card merging into the content
+                        (vs. Slice-2a's SolidBackgroundFillColorTertiaryBrush,
+                        which was merely a lighter floating fill). No accent bar.
+                    -->
+                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
@@ -71,7 +93,8 @@
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SolidBackgroundFillColorTertiaryBrush" />
+                    <!--  Slice 2a.1 (#54): classic connected selected fill (see Default).  -->
+                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
@@ -81,11 +104,17 @@
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="SystemColorButtonFaceColorBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="SystemColorHighlightColorBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="SystemColorHighlightColorBrush" />
+                    <!--
+                        Slice 2a.1 (#54): HighContrast selected fill = the window
+                        surface color (the content layer in HC), so the selected
+                        tab connects to content as in the themed cases. Foreground
+                        stays the window-text color for max contrast on it.
+                    -->
                     <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SystemColorWindowColorBrush" />
-                    <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="SystemColorWindowTextColorBrush" />
-                    <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="SystemColorHighlightColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="SystemColorGrayTextColorBrush" />
+                    <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="SystemColorWindowTextColorBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="SystemColorWindowTextColorBrush" />
-                    <SolidColorBrush x:Key="PaneTabBorderBrush" Color="{ThemeResource SystemColorHighlightColor}" />
+                    <SolidColorBrush x:Key="PaneTabBorderBrush" Color="{ThemeResource SystemColorWindowTextColor}" />
                 </ResourceDictionary>
             </ResourceDictionary.ThemeDictionaries>
 
@@ -239,20 +268,31 @@
         <ListView.ItemTemplate>
             <DataTemplate x:DataType="local:PaneTabViewModel">
                 <!--
-                    Per-tab chrome. The SELECTED look (selected background +
-                    selection indicator + selected foreground/weight) is driven
-                    ENTIRELY by IsActive (OneWay) via the converter-free x:Bind
-                    helpers on PaneTabViewModel — a pure projection of the model,
-                    never the ListView's click-selection. A tap raises
-                    RequestActivate.
+                    Per-tab chrome. The SELECTED look (connected selected
+                    background + selected foreground/weight) is driven ENTIRELY
+                    by IsActive (OneWay) via the converter-free x:Bind helpers on
+                    PaneTabViewModel — a pure projection of the model, never the
+                    ListView's click-selection. A tap raises RequestActivate.
                 -->
                 <Grid MinHeight="{StaticResource PaneTabItemMinHeight}"
                       Tapped="{x:Bind RequestActivate}">
                     <!--
-                        Selected background — the rounded-top tab fill shown only
-                        when this VM IsActive. Substitutes the TabViewItem's
-                        SelectedBackgroundPath (whose TabGeometry needs the
-                        TabView TemplateSettings we don't have on a ListViewItem).
+                        Slice 2a.1 (#54): the CONNECTED selected-tab background —
+                        the rounded-top tab fill shown only when this VM IsActive.
+                        This IS the selected cue (the classic TabViewItem look);
+                        there is NO separate bottom accent bar. It paints the
+                        content/region layer color (PaneTabHeaderBackgroundSelected
+                        -> LayerOnMicaBaseAltFillColorDefaultBrush) so it reads as
+                        the same surface as the content area below, and it
+                        extends to the very bottom of the row (only a 1px top
+                        inset for the rounded top) so it OVERPAINTS the container
+                        template's BottomBorderLine — the selected tab therefore
+                        has no border line beneath it and visually MERGES into the
+                        content. Substitutes the TabViewItem's SelectedBackgroundPath
+                        (whose TabGeometry needs the TabView TemplateSettings we
+                        don't have on a bare ListViewItem). x:Name'd so headless
+                        TAEF can assert its presence + IsActive-driven visibility
+                        without a layout pass.
                     -->
                     <Border x:Name="SelectedBackground"
                             Margin="0,1,0,0"
@@ -266,13 +306,40 @@
                             <ColumnDefinition Width="*" />
                             <ColumnDefinition Width="Auto" />
                         </Grid.ColumnDefinitions>
+                        <!--
+                            Slice 2a.1 (#54): theme-CORRECT foreground. The label is
+                            TWO overlaid TextBlocks, each carrying a theme-aware
+                            {ThemeResource} foreground brush so the FRAMEWORK
+                            resolves the color per the strip's effective theme —
+                            dark on Light, light on Dark. Exactly one shows at a
+                            time, gated by IsActive (a pure projection of the
+                            model, never click-selection): the SELECTED label
+                            (primary brush, bold) when active; the REST label
+                            (secondary brush, normal) otherwise. This replaces the
+                            Slice-2a imperative ActiveToForeground brush, which
+                            snapshotted the APPLICATION theme — WT does not switch
+                            it for "theme":"light" — and so painted light-grey text
+                            on the Light strip. (x:Bind cannot pass a template
+                            element to a helper here — the XAML codegen breaks — so
+                            the per-theme brush must come from {ThemeResource}, not
+                            an imperative lookup.)
+                        -->
                         <TextBlock Grid.Column="0"
                                    VerticalAlignment="Center"
                                    FontSize="{StaticResource PaneTabItemHeaderFontSize}"
                                    FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
-                                   Foreground="{x:Bind local:PaneTabViewModel.ActiveToForeground(IsActive), Mode=OneWay}"
+                                   Foreground="{ThemeResource PaneTabHeaderForegroundSelected}"
                                    Text="{x:Bind Title, Mode=OneWay}"
-                                   TextTrimming="CharacterEllipsis" />
+                                   TextTrimming="CharacterEllipsis"
+                                   Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
+                        <TextBlock Grid.Column="0"
+                                   VerticalAlignment="Center"
+                                   FontSize="{StaticResource PaneTabItemHeaderFontSize}"
+                                   FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
+                                   Foreground="{ThemeResource PaneTabHeaderForeground}"
+                                   Text="{x:Bind Title, Mode=OneWay}"
+                                   TextTrimming="CharacterEllipsis"
+                                   Visibility="{x:Bind local:PaneTabViewModel.RestToVisibility(IsActive), Mode=OneWay}" />
                         <Button Grid.Column="1"
                                 Width="20"
                                 Height="20"
@@ -286,21 +353,6 @@
                                       Glyph="&#xE711;" />
                         </Button>
                     </Grid>
-
-                    <!--
-                        Selection indicator — the accent bar pinned to the bottom
-                        of the SELECTED tab. Shown only when IsActive (the
-                        dominant "this tab is active" cue). x:Name'd so headless
-                        TAEF can assert its presence + IsActive-driven visibility
-                        without a layout pass.
-                    -->
-                    <Border x:Name="SelectionIndicator"
-                            Height="2"
-                            Margin="6,0,6,0"
-                            VerticalAlignment="Bottom"
-                            Background="{ThemeResource SystemControlHighlightAccentBrush}"
-                            CornerRadius="1,1,0,0"
-                            Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
                 </Grid>
             </DataTemplate>
         </ListView.ItemTemplate>
