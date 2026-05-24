@@ -251,6 +251,16 @@ namespace TerminalAppLocalTests
         TEST_METHOD(BigFlipF2_Collapse_PrunesDeadLeafFromStrip);
         TEST_METHOD(BigFlipF2_FlagOff_NoStripEntries);
 
+        // F-4 (#46): the single window-stay-open predicate that the two
+        // close-decision guards (_CompleteInitialization, _RemoveTab) route
+        // through. Flag-off it mirrors `_tabs.Size() > 0` byte-for-byte;
+        // flag-on it reflects `!workspaces.empty()`, with a safe fallback to
+        // `_tabs.Size()` when the model is null (no crash, no spurious close).
+        TEST_METHOD(BigFlipF4_FlagOff_WindowShouldStayOpen_MirrorsTabCount);
+        TEST_METHOD(BigFlipF4_FlagOn_WindowShouldStayOpen_ReflectsWorkspaces);
+        TEST_METHOD(BigFlipF4_FlagOn_NullModel_DoesNotCrashOrSpuriouslyClose);
+        TEST_METHOD(BigFlipF4_FlagOn_StartupReplay_StaysOpenAndDoesNotRequestClose);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -1916,6 +1926,253 @@ namespace TerminalAppLocalTests
                            L"flag-off last-tab close must NOT instantiate WorkspaceView");
             VERIFY_ARE_EQUAL(1, closeWindowRequestCount->load(),
                              L"flag-off last-tab teardown still raises CloseWindowRequested");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // F-4 (#46): flag-off, _windowShouldStayOpen() is the byte-for-byte
+    // inverse of the upstream `_tabs.Size() == 0` close checks. Pin that it
+    // tracks `_tabs.Size() > 0` across 0/1/2 tabs and that the model
+    // machinery is never engaged.
+    void WorkspaceTests::BigFlipF4_FlagOff_WindowShouldStayOpen_MirrorsTabCount()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOff(page, settings);
+
+        // 1 tab (startup-replay): stay open.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-off, 1 tab -> stay open");
+            VERIFY_ARE_EQUAL(page->_tabs.Size() > 0, page->_windowShouldStayOpen(),
+                             L"flag-off predicate must equal _tabs.Size() > 0");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // 2 tabs: still stay open; model still dormant.
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(2u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-off, 2 tabs -> stay open");
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
+                           L"flag-off predicate must NOT populate the model");
+            VERIFY_IS_TRUE(page->_workspaceView == nullptr,
+                           L"flag-off predicate must NOT instantiate WorkspaceView");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Close both tabs; once _tabs is empty the predicate must be false
+        // (the inverse of the upstream `_tabs.Size() == 0`).
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-off, 1 tab remaining -> stay open");
+
+            CloseTabArgs closeArgs2{ 0u };
+            ActionEventArgs eventArgs2{ closeArgs2 };
+            page->_HandleCloseTab(nullptr, eventArgs2);
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size());
+            VERIFY_IS_FALSE(page->_windowShouldStayOpen(),
+                            L"flag-off, 0 tabs -> do NOT stay open");
+            VERIFY_ARE_EQUAL(page->_tabs.Size() > 0, page->_windowShouldStayOpen(),
+                             L"flag-off predicate must equal _tabs.Size() > 0 at 0 tabs");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // F-4 (#46): flag-on (model populated), _windowShouldStayOpen() reflects
+    // `!workspaces_view().empty()`. After startup-replay the model holds one
+    // workspace, so the window stays open; emptying the model (closing the
+    // last workspace's tab) flips it to false.
+    void WorkspaceTests::BigFlipF4_FlagOn_WindowShouldStayOpen_ReflectsWorkspaces()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // After startup-replay: one workspace in the model -> stay open.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_NOT_NULL(page->_workspaceModelState);
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-on, 1 workspace -> stay open");
+            VERIFY_ARE_EQUAL(!page->_workspaceModelState->workspaces_view().empty(),
+                             page->_windowShouldStayOpen(),
+                             L"flag-on predicate must equal !workspaces.empty()");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Add a second workspace via the new-tab handler: still stay open.
+        result = RunOnUIThread([&page]() {
+            NewTerminalArgs newTerminalArgs{};
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs eventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(2u, page->_workspaceModelState->workspaces_view().size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-on, 2 workspaces -> stay open");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Close both workspaces' tabs -> model empties -> do NOT stay open.
+        result = RunOnUIThread([&page]() {
+            CloseTabArgs closeArgs{ 0u };
+            ActionEventArgs eventArgs{ closeArgs };
+            page->_HandleCloseTab(nullptr, eventArgs);
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-on, 1 workspace remaining -> stay open");
+
+            CloseTabArgs closeArgs2{ 0u };
+            ActionEventArgs eventArgs2{ closeArgs2 };
+            page->_HandleCloseTab(nullptr, eventArgs2);
+            VERIFY_ARE_EQUAL(0u, page->_workspaceModelState->workspaces_view().size(),
+                             L"flag-on, last workspace closed -> model empty");
+            VERIFY_IS_FALSE(page->_windowShouldStayOpen(),
+                            L"flag-on, 0 workspaces -> do NOT stay open");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // F-4 (#46): flag-on but the model is not yet populated (null shared_ptr),
+    // exactly the state at the GH#12267 defterm-readying entry into
+    // _CompleteInitialization. _windowShouldStayOpen() must NOT dereference the
+    // null model (no crash) and must fall back to the classic `_tabs.Size()`
+    // count so startup does not spuriously close.
+    void WorkspaceTests::BigFlipF4_FlagOn_NullModel_DoesNotCrashOrSpuriouslyClose()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Force the model back to null to simulate the pre-shell-population
+        // state (defterm-readying path), while a classic tab still exists.
+        // The flag is ON, so this exercises the null-model guard branch.
+        auto result = RunOnUIThread([&page]() {
+            VERIFY_IS_TRUE(page->_workspacesFlagEnabled());
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+
+            page->_workspaceModelState = nullptr;
+            VERIFY_IS_TRUE(page->_workspaceModelState == nullptr);
+
+            // Must not crash, and with 1 classic tab it must stay open
+            // (fallback to _tabs.Size() > 0).
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"flag-on, null model, 1 tab -> stay open via _tabs fallback");
+            VERIFY_ARE_EQUAL(page->_tabs.Size() > 0, page->_windowShouldStayOpen(),
+                             L"flag-on null-model fallback must equal _tabs.Size() > 0");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // F-4 (#46): no-spurious-close at startup. On the flag-on startup path the
+    // replayed NewTab populates the model with one workspace BEFORE
+    // _CompleteInitialization runs its close guard, so the window stays open
+    // and CloseWindowRequested must NOT have fired. Asserted headlessly by
+    // subscribing before startup completes and checking the post-init state
+    // (the canary CloseLastTab_FlagOn covers the fire-once teardown).
+    void WorkspaceTests::BigFlipF4_FlagOn_StartupReplay_StaysOpenAndDoesNotRequestClose()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // _initializeTerminalPageWithFlagOn waits for Initialized to fire,
+        // which only happens on the stay-open branch of _CompleteInitialization
+        // (the close branch co_returns before raising Initialized). Reaching
+        // here at all means the startup guard chose stay-open. Pin the model
+        // and tab state that produced that decision, and confirm a freshly
+        // subscribed handler sees no close request fire after init.
+        auto closeWindowRequestCount = std::make_shared<std::atomic<int>>(0);
+        auto result = RunOnUIThread([&page, closeWindowRequestCount]() {
+            VERIFY_IS_NOT_NULL(page->_workspaceModelState);
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size(),
+                             L"startup-replay populated the model before the close guard");
+            VERIFY_ARE_EQUAL(1u, page->_tabs.Size());
+            VERIFY_IS_TRUE(page->_windowShouldStayOpen(),
+                           L"startup guard must choose stay-open");
+
+            page->CloseWindowRequested(
+                [closeWindowRequestCount](auto&&, auto&&) {
+                    closeWindowRequestCount->fetch_add(1);
+                });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([closeWindowRequestCount]() {
+            VERIFY_ARE_EQUAL(0, closeWindowRequestCount->load(),
+                             L"startup must not spuriously request a window close");
         });
         VERIFY_SUCCEEDED(result);
     }

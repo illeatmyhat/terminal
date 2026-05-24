@@ -845,7 +845,16 @@ namespace winrt::TerminalApp::implementation
         // GH#12267: Make sure that we don't instantly close ourselves when
         // we're readying to accept a defterm connection. In that case, we don't
         // have a tab yet, but will once we're initialized.
-        if (_tabs.Size() == 0)
+        //
+        // F-4 (#46): routed through _windowShouldStayOpen(). Flag-off this is
+        // the byte-for-byte inverse of `_tabs.Size() == 0`. Flag-on, the
+        // startup-replay NewTab has already populated the model with one
+        // workspace by the time we get here (ProcessStartupActions runs before
+        // _CompleteInitialization), so the model is non-empty and we stay open.
+        // On the defterm-readying path no workspace exists yet, so the model is
+        // still null and _windowShouldStayOpen() falls back to `_tabs.Size()`,
+        // preserving the GH#12267 don't-close-yet intent.
+        if (!_windowShouldStayOpen())
         {
             CloseWindowRequested.raise(*this, nullptr);
             co_return;
@@ -6107,6 +6116,44 @@ namespace winrt::TerminalApp::implementation
             return false;
         }
         return _settings.GlobalSettings().WorkspacesEnabled();
+    }
+
+    // Big-flip F-4 (#46): the single window-stay-open predicate. The two
+    // close-decision guards (_CompleteInitialization and _RemoveTab) route
+    // through this instead of testing `_tabs.Size() == 0` directly, so the
+    // close semantics live in one place ahead of the F-5 cutover.
+    //
+    // Flag-off: `_tabs.Size() > 0` — EXACTLY the inverse of the upstream
+    // `_tabs.Size() == 0` close checks, so flag-off is byte-for-byte upstream.
+    //
+    // Flag-on: the window should stay open while the model still holds a
+    // workspace. `_workspaceModelState` is a `shared_ptr<const ...>` that is
+    // null until the workspace shell is populated (the startup-replay NewTab
+    // dispatches newWorkspace -> _applyWorkspaceAction; the defterm-readying
+    // path of GH#12267 reaches _CompleteInitialization with NO workspace yet).
+    // Dereferencing a null model would crash, so when the model is not yet
+    // initialized we fall back to the classic `_tabs.Size()` count. That
+    // fallback is also behavior-preserving: it keeps the GH#632 elevated-only
+    // close AND the GH#12267 don't-close-while-readying-a-defterm-connection
+    // intent intact (no tab and no workspace -> stay-open false at
+    // _CompleteInitialization, exactly as `_tabs.Size() == 0` did today).
+    //
+    // NOTE (spawn-failure divergence, F-4): once the model is populated, a
+    // workspace whose backing classic tab failed to spawn
+    // (_openDefaultTabForWorkspace returned nullptr -> no _workspaceClassicTabs
+    // binding) makes `_tabs.Size()` and `workspaces_view().size()` diverge:
+    // `_tabs` can be 0 while a workspace still exists. Flag-on then returns
+    // true (stay open with an empty workspace) where the old
+    // `_tabs.Size() == 0` would have closed. The new behavior is arguably more
+    // correct, but it is NOT strictly byte-for-byte. We do NOT paper over it
+    // with a fallback classic tab — tabs must belong to a workspace.
+    bool TerminalPage::_windowShouldStayOpen() const
+    {
+        if (_workspacesFlagEnabled() && _workspaceModelState)
+        {
+            return !_workspaceModelState->workspaces_view().empty();
+        }
+        return _tabs.Size() > 0;
     }
 
     void TerminalPage::_ensureWorkspaceView()

@@ -655,6 +655,17 @@ namespace winrt::TerminalApp::implementation
         std::unordered_map<::WorkspaceModel::WorkspaceId, winrt::weak_ref<winrt::TerminalApp::Tab>> _workspaceClassicTabs;
 
         bool _workspacesFlagEnabled() const noexcept;
+
+        // Big-flip F-4 (#46): the single window-stay-open predicate the two
+        // close-decision guards (_CompleteInitialization, _RemoveTab) consult.
+        // Flag-off it is the exact inverse of the upstream `_tabs.Size() == 0`
+        // checks (byte-for-byte). Flag-on it reflects the model's workspace
+        // count instead — but only once the model exists; before the shell is
+        // populated it falls back to the classic `_tabs.Size()` count so
+        // startup never spuriously closes. F-5 relies on this once classic
+        // tabs stop being built.
+        bool _windowShouldStayOpen() const;
+
         void _ensureWorkspaceView();
         void _applyWorkspaceAction(::WorkspaceModel::ModelState newState);
 

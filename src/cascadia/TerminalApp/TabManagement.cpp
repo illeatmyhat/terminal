@@ -508,7 +508,13 @@ namespace winrt::TerminalApp::implementation
         _UpdateTabIndices();
 
         // To close the window here, we need to close the hosting window.
-        if (_tabs.Size() == 0)
+        //
+        // F-4 (#46): routed through _windowShouldStayOpen(). Flag-off this is
+        // the byte-for-byte inverse of `_tabs.Size() == 0`. Flag-on, the window
+        // stays open while the model still holds a workspace; removing the last
+        // workspace's classic tab empties both _tabs and the model, so the
+        // guard still fires exactly once on the true last-tab teardown.
+        if (!_windowShouldStayOpen())
         {
             // If we are supposed to save state, make sure we clear it out
             // if the user manually closed all tabs.
