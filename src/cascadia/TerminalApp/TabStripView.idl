@@ -1,0 +1,36 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT license.
+
+namespace TerminalApp
+{
+    // Big-flip per-pane strip Slice 1 (#54): the per-leaf tab strip, extracted
+    // from the inline TerminalPage.xaml `PaneTabStrip` into a real UserControl.
+    //
+    // It wraps a horizontal ListView whose ItemTemplate is the SAME plain
+    // PaneTabViewModel row template the inline strip carried (Title TextBlock +
+    // a close Button), plus the ItemsPanel / ScrollViewer / SelectionMode the
+    // programmatic per-leaf clone in `_projectLeafContainer` used to OMIT (the
+    // omission stacked tabs vertically — fixed by relocating them in here).
+    //
+    // Selection is a PURE PROJECTION of the model: the row highlight derives
+    // from each PaneTabViewModel's IsActive (its FontWeight binding); the
+    // ListView's own SelectedItem is NOT bound as a source of truth and never
+    // mutates the model. A user tap raises the VM's RequestActivate intent (the
+    // template binds Tapped -> RequestActivate); the close Button raises
+    // RequestClose. The owning page dispatches the model action and the diff
+    // re-projects the strip. No control-level events are introduced this slice.
+    [default_interface] runtimeclass TabStripView : Windows.UI.Xaml.Controls.UserControl
+    {
+        TabStripView();
+
+        // Projected onto the inner ListView's ItemsSource. The page sets this to
+        // the leaf's PaneTabViewModel collection (`_paneTabStripForLeaf(leaf)`).
+        Object ItemsSource;
+
+        // Test-only structural accessor: the inner ListView, so headless TAEF
+        // can assert orientation / SelectionMode / items WITHOUT laying out
+        // pixels (the headless std::clamp-resize trap). Production code drives
+        // the strip through ItemsSource and the VM intents only.
+        Windows.UI.Xaml.Controls.ListView TabsListView { get; };
+    }
+}

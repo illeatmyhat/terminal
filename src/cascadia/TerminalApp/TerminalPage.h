@@ -916,8 +916,8 @@ namespace winrt::TerminalApp::implementation
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf
         // gets an entry the first time a tab is projected into it; entries are
         // dropped when their leaf disappears (a later slice; single-leaf scope
-        // here). The strip ListView in TerminalPage.xaml binds to the ACTIVE
-        // leaf's collection — invisible this slice (host Collapsed).
+        // here). Each projected leaf's TabStripView (built in
+        // _projectLeafContainer) binds its ItemsSource to THAT leaf's collection.
         std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>> _paneTabStrips;
 
         // Big-flip Slice F-0 (#54): the per-leaf content host Grids, keyed by the
@@ -932,14 +932,12 @@ namespace winrt::TerminalApp::implementation
         // so the hosts are invisible this slice.
         std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::UI::Xaml::Controls::Grid> _paneContentHosts;
 
-        // Big-flip Slice C (#54): the realized flag-on strip ListView (the
-        // x:Load="False" PaneTabStrip inside the WorkspaceContentHost), resolved
-        // via FindName in _initializeWorkspaceShell. nullptr when the flag is off
-        // / the shell hasn't initialized. Its ItemsSource is the active leaf's
-        // strip collection; it lives inside the Collapsed host, so it is
-        // invisible this slice. Production triggers (row tap / close / +) are
-        // deferred to Slice F.
-        winrt::Windows::UI::Xaml::Controls::ListView _paneTabStrip{ nullptr };
+        // Big-flip per-pane strip Slice 1 (#54): the inline PaneTabStrip
+        // template-source ListView (and the _paneTabStrip field that held it)
+        // was removed — each projected leaf builds its own TabStripView
+        // UserControl in _projectLeafContainer, which carries the row template,
+        // horizontal ItemsPanel, scroll settings, and SelectionMode internally.
+        // The per-leaf PaneId->VM-collection map (_paneTabStrips, above) stays.
 
         // Big-flip Slice D (#54): rebuild the projected SPLIT pane tree of the
         // ACTIVE workspace inside the (Collapsed) WorkspacePaneTreeRoot. Called

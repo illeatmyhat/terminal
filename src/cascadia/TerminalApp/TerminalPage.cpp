@@ -28,6 +28,7 @@
 #include "WorkspaceView.h"
 #include "WorkspaceViewModel.h"
 #include "PaneTabViewModel.h"
+#include "TabStripView.h"
 
 #include "../WorkspaceModel/Diff.h"
 
@@ -6812,16 +6813,11 @@ namespace winrt::TerminalApp::implementation
         // workspace's content into it.
         _workspaceContentHost = FindName(L"WorkspaceContentHost").try_as<Controls::Grid>();
 
-        // Big-flip Slice C (#54): realize the (invisible) per-leaf tab strip
-        // that lives INSIDE the collapsed WorkspaceContentHost. It is
-        // x:Load="False" so the flag-off path never realizes it; here on the
-        // flag-on path we materialize it via FindName like the host above. Its
-        // ItemsSource is bound to the active leaf's strip collection. We do NOT
-        // touch its visibility or the host's — both stay Collapsed this slice,
-        // so the strip is invisible and the classic tab stays the only thing on
-        // screen. Selecting WHICH leaf's collection to show, and wiring the
-        // visible row/close/+ triggers, is deferred to Slice F.
-        _paneTabStrip = FindName(L"PaneTabStrip").try_as<Controls::ListView>();
+        // Big-flip per-pane strip Slice 1 (#54): the inline PaneTabStrip
+        // template-source ListView was retired — each projected leaf now builds
+        // its own TabStripView UserControl (which carries the row template,
+        // horizontal ItemsPanel, scroll settings, and SelectionMode internally),
+        // so there is no longer a shared XAML strip to FindName/realize here.
 
         // Big-flip Slice D (#54): realize the (invisible) projected-pane-tree
         // container that lives in the host's star row. It is x:Load="False" so
@@ -7914,30 +7910,23 @@ namespace winrt::TerminalApp::implementation
         container.RowDefinitions().Append(firstRow);
         container.RowDefinitions().Append(secondRow);
 
-        // The per-leaf strip ListView, bound to the leaf's reused Slice-C
-        // collection. _paneTabStripForLeaf creates the collection on first use,
-        // so a freshly-split sibling leaf (whose strip the TabAdded arm now
-        // appends) projects its row here. Invisible (the host is Collapsed).
+        // The per-leaf tab strip, bound to the leaf's reused Slice-C collection.
+        // _paneTabStripForLeaf creates the collection on first use, so a
+        // freshly-split sibling leaf (whose strip the TabAdded arm now appends)
+        // projects its row here.
         //
-        // IMPORTANT: clone the ItemTemplate from the XAML-defined PaneTabStrip
-        // so each row renders Title (the TextBlock Text="{x:Bind Title}" binding)
-        // rather than falling back to IInspectable.ToString() which produces the
-        // raw type name "TerminalApp.PaneTabViewModel". The named strip is
-        // realized before any pane tree is built (_initializeWorkspaceShell runs
-        // first), so _paneTabStrip is always non-null here.
-        Controls::ListView strip{};
-        if (_paneTabStrip)
-        {
-            strip.ItemTemplate(_paneTabStrip.ItemTemplate());
-            // Mirror the chrome background of the XAML-defined PaneTabStrip
-            // (the {ThemeResource TabViewBackground} brush — the same opaque,
-            // theme-aware brush the classic tab strip uses, see _updateThemeColors's
-            // "TabViewBackground" lookup). Without this the per-leaf strip's default
-            // ListView template paints no Background and the strip renders
-            // see-through onto the terminal/window. Sharing the named strip's
-            // resolved brush keeps both strips consistent in dark AND light themes.
-            strip.Background(_paneTabStrip.Background());
-        }
+        // Big-flip per-pane strip Slice 1 (#54): this is now the TabStripView
+        // UserControl, NOT a hand-built ListView cloning the inline PaneTabStrip.
+        // TabStripView carries the row ItemTemplate, the horizontal ItemsPanel,
+        // the ScrollViewer settings, SelectionMode="Single", and the
+        // {ThemeResource TabViewBackground} background INTERNALLY — so the
+        // previous clone's omission of ItemsPanel/scroll/SelectionMode (which
+        // stacked tabs vertically) is fixed by construction. Selection stays a
+        // pure projection of the model: the row highlight derives from each VM's
+        // IsActive; the activate/close intents are still raised by the VM
+        // (RequestActivate/RequestClose, wired in _appendPaneTabVm) and the page
+        // dispatches the model action.
+        winrt::TerminalApp::TabStripView strip{};
         strip.ItemsSource(_paneTabStripForLeaf(leaf));
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);

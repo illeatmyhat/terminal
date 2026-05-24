@@ -298,69 +298,15 @@
                 </Grid.RowDefinitions>
 
                 <!--
-                    Big-flip Slice C (#54): the per-leaf tab strip — the
-                    invisible projection of a leaf pane's tabs. A ListView (NOT
-                    a MUX TabView: AllowDropTabs + CanReorderTabs crash on
-                    drag-out, GH#mux-tabview-drag) bound to the ACTIVE leaf's
-                    PaneTabViewModel collection; SelectedItem follows IsActive,
-                    a per-row close affordance raises CloseRequested, and the
-                    row's Tapped raises ActivateRequested. The VM never touches
-                    the model; the page dispatches the action and the diff
-                    re-projects the strip.
-
-                    INVISIBLE this slice: the strip is Collapsed AND lives
-                    inside the Collapsed host, so it neither renders nor
-                    hit-tests — the classic tab stays the only thing on screen.
-                    The strip's ItemsSource is bound by the page (active leaf),
-                    and the visible new-tab "+"/keybinding triggers are wired in
-                    Slice F when the strip becomes visible; this slice only
-                    builds the strip + its arm projection.
+                    Big-flip per-pane strip Slice 1 (#54): the inline per-leaf
+                    tab strip ListView that used to live here (x:Name="PaneTabStrip",
+                    the shared template source the programmatic per-leaf clone
+                    copied from) was extracted into the TabStripView UserControl.
+                    Each projected leaf container now builds its own TabStripView
+                    in _projectLeafContainer, so there is no shared strip here and
+                    the host's Auto row 0 is intentionally empty (the actual strips
+                    live inside the projected pane tree's leaf containers).
                 -->
-                <ListView x:Name="PaneTabStrip"
-                          Grid.Row="0"
-                          x:Load="False"
-                          Background="{ThemeResource TabViewBackground}"
-                          ScrollViewer.HorizontalScrollBarVisibility="Auto"
-                          ScrollViewer.HorizontalScrollMode="Auto"
-                          ScrollViewer.VerticalScrollBarVisibility="Disabled"
-                          ScrollViewer.VerticalScrollMode="Disabled"
-                          SelectionMode="Single"
-                          Visibility="Collapsed">
-                    <ListView.ItemsPanel>
-                        <ItemsPanelTemplate>
-                            <StackPanel Orientation="Horizontal" />
-                        </ItemsPanelTemplate>
-                    </ListView.ItemsPanel>
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="local:PaneTabViewModel">
-                            <Grid ColumnSpacing="6"
-                                  Padding="8,4,4,4"
-                                  Tapped="{x:Bind RequestActivate}">
-                                <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="*" />
-                                    <ColumnDefinition Width="Auto" />
-                                </Grid.ColumnDefinitions>
-                                <TextBlock Grid.Column="0"
-                                           VerticalAlignment="Center"
-                                           FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
-                                           Text="{x:Bind Title, Mode=OneWay}"
-                                           TextTrimming="CharacterEllipsis" />
-                                <Button Grid.Column="1"
-                                        Width="20"
-                                        Height="20"
-                                        Padding="0"
-                                        VerticalAlignment="Center"
-                                        Background="Transparent"
-                                        BorderThickness="0"
-                                        Click="{x:Bind RequestClose}">
-                                    <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
-                                              FontSize="10"
-                                              Glyph="&#xE711;" />
-                                </Button>
-                            </Grid>
-                        </DataTemplate>
-                    </ListView.ItemTemplate>
-                </ListView>
 
                 <!--
                     Big-flip Slice D (#54): the projected SPLIT pane tree of the

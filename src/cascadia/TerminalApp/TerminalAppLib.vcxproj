@@ -58,6 +58,9 @@
     <Page Include="TabRowControl.xaml">
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="TabStripView.xaml">
+      <SubType>Designer</SubType>
+    </Page>
     <Page Include="TabHeaderControl.xaml">
       <SubType>Designer</SubType>
     </Page>
@@ -127,6 +130,9 @@
     </ClInclude>
     <ClInclude Include="TabRowControl.h">
       <DependentUpon>TabRowControl.xaml</DependentUpon>
+    </ClInclude>
+    <ClInclude Include="TabStripView.h">
+      <DependentUpon>TabStripView.xaml</DependentUpon>
     </ClInclude>
     <ClInclude Include="TabHeaderControl.h">
       <DependentUpon>TabHeaderControl.xaml</DependentUpon>
@@ -249,6 +255,9 @@
     <ClCompile Include="TabRowControl.cpp">
       <DependentUpon>TabRowControl.xaml</DependentUpon>
     </ClCompile>
+    <ClCompile Include="TabStripView.cpp">
+      <DependentUpon>TabStripView.xaml</DependentUpon>
+    </ClCompile>
     <ClCompile Include="TabHeaderControl.cpp">
       <DependentUpon>TabHeaderControl.xaml</DependentUpon>
     </ClCompile>
@@ -362,6 +371,10 @@
     </Midl>
     <Midl Include="TabRowControl.idl">
       <DependentUpon>TabRowControl.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Midl>
+    <Midl Include="TabStripView.idl">
+      <DependentUpon>TabStripView.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Midl>
     <Midl Include="TabHeaderControl.idl">

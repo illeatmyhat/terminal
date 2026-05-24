@@ -85,6 +85,9 @@
     <Midl Include="PaneTabViewModel.idl">
       <Filter>tab</Filter>
     </Midl>
+    <Midl Include="TabStripView.idl">
+      <Filter>tab</Filter>
+    </Midl>
     <Midl Include="PaletteItemTemplateSelector.idl" />
     <Midl Include="Tab.idl" />
     <Midl Include="TerminalWindow.idl" />
@@ -98,6 +101,9 @@
       <Filter>controls</Filter>
     </Page>
     <Page Include="TabRowControl.xaml">
+      <Filter>controls</Filter>
+    </Page>
+    <Page Include="TabStripView.xaml">
       <Filter>controls</Filter>
     </Page>
     <Page Include="TabHeaderControl.xaml">

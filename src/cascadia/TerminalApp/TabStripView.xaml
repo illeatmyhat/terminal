@@ -1,0 +1,77 @@
+<!--
+    Copyright (c) Microsoft Corporation. All rights reserved. Licensed under
+    the MIT License. See LICENSE in the project root for license information.
+-->
+
+<!--
+    Big-flip per-pane strip Slice 1 (#54): the per-leaf tab strip, extracted
+    from the inline TerminalPage.xaml `PaneTabStrip`. The plain row template is
+    copied VERBATIM (Grid + Title TextBlock + close Button, with the existing
+    PaneTabViewModel RequestActivate/RequestClose x:Bind intents). The
+    ItemsPanel (horizontal StackPanel), the ScrollViewer.* settings, and
+    SelectionMode="Single" — which the old programmatic per-leaf clone OMITTED,
+    stacking tabs vertically — now live here so every projected leaf gets them.
+
+    Selection is a PURE PROJECTION of the model: the row highlight derives from
+    PaneTabViewModel.IsActive (the FontWeight binding); the ListView's own
+    SelectedItem is deliberately NOT bound as a source of truth, so a click can
+    never mutate the model behind the diff. A tap raises RequestActivate; the
+    close Button raises RequestClose; the page dispatches the model action and
+    the resulting diff re-projects the strip.
+
+    NO visual chrome change this slice — this is the same plain item template,
+    just relocated. Full TabView chrome (tab shapes, selection bar, hover-reveal
+    close, "+" button) is a LATER slice.
+-->
+<UserControl x:Class="TerminalApp.TabStripView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:local="using:TerminalApp"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d">
+
+    <ListView x:Name="TabsList"
+              Background="{ThemeResource TabViewBackground}"
+              ScrollViewer.HorizontalScrollBarVisibility="Auto"
+              ScrollViewer.HorizontalScrollMode="Auto"
+              ScrollViewer.VerticalScrollBarVisibility="Disabled"
+              ScrollViewer.VerticalScrollMode="Disabled"
+              SelectionMode="Single">
+        <ListView.ItemsPanel>
+            <ItemsPanelTemplate>
+                <StackPanel Orientation="Horizontal" />
+            </ItemsPanelTemplate>
+        </ListView.ItemsPanel>
+        <ListView.ItemTemplate>
+            <DataTemplate x:DataType="local:PaneTabViewModel">
+                <Grid ColumnSpacing="6"
+                      Padding="8,4,4,4"
+                      Tapped="{x:Bind RequestActivate}">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0"
+                               VerticalAlignment="Center"
+                               FontWeight="{x:Bind local:PaneTabViewModel.ActiveToFontWeight(IsActive), Mode=OneWay}"
+                               Text="{x:Bind Title, Mode=OneWay}"
+                               TextTrimming="CharacterEllipsis" />
+                    <Button Grid.Column="1"
+                            Width="20"
+                            Height="20"
+                            Padding="0"
+                            VerticalAlignment="Center"
+                            Background="Transparent"
+                            BorderThickness="0"
+                            Click="{x:Bind RequestClose}">
+                        <FontIcon FontFamily="{ThemeResource SymbolThemeFontFamily}"
+                                  FontSize="10"
+                                  Glyph="&#xE711;" />
+                    </Button>
+                </Grid>
+            </DataTemplate>
+        </ListView.ItemTemplate>
+    </ListView>
+
+</UserControl>

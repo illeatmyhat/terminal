@@ -13,6 +13,7 @@
 #include "../TerminalApp/WorkspaceView.h"
 #include "../TerminalApp/WorkspaceViewModel.h"
 #include "../TerminalApp/PaneTabViewModel.h"
+#include "../TerminalApp/TabStripView.h"
 #include "../WorkspaceModel/WorkspaceChange.h"
 #include "../WorkspaceModel/Diff.h"
 #include "../WorkspaceModel/Validator.h"
@@ -287,6 +288,26 @@ namespace TerminalAppLocalTests
         // (which would clear _tabContent and drop the workspace host). It is
         // guarded to a no-op; the sole-child host invariant must survive the call.
         TEST_METHOD(BigFlipF5_FlagOn_OpenSettings_DoesNotCorruptHost);
+
+        // Per-pane strip Slice 1 (#54): the per-leaf strip is now a TabStripView
+        // UserControl built in _projectLeafContainer (NOT a hand-built ListView
+        // cloning the inline PaneTabStrip). STRUCTURAL assertions only — never a
+        // laid-out pixel (the headless std::clamp-resize trap):
+        //  - a projected leaf's row-0 child is a TabStripView whose inner
+        //    ListView items count == the leaf's model tab count, in order;
+        //  - the inner ListView is configured horizontal (its ItemsPanel
+        //    template is a StackPanel Orientation=Horizontal — the bug fix) and
+        //    SelectionMode=Single;
+        //  - the active VM (IsActive) is the row reflected as the active one,
+        //    and the ListView's SelectedItem is NOT a model-mutating source of
+        //    truth (pure projection);
+        //  - the activate + close intents still dispatch the right model action
+        //    (dispatch-level, mirroring the BigFlipC strip tests).
+        TEST_METHOD(StripSlice1_LeafRowZeroChildIsTabStripView_ItemsMatchModel);
+        TEST_METHOD(StripSlice1_InnerListViewIsHorizontalAndSingleSelect);
+        TEST_METHOD(StripSlice1_ActiveVmIsReflected_SelectionIsPureProjection);
+        TEST_METHOD(StripSlice1_ActivateIntent_DispatchesSelectTab);
+        TEST_METHOD(StripSlice1_CloseIntent_DispatchesCloseTab);
 
         TEST_CLASS_SETUP(ClassSetup)
         {
@@ -6254,6 +6275,480 @@ namespace TerminalAppLocalTests
                            L"flag-off the tab row keeps its upstream auto (NaN) height");
             VERIFY_IS_TRUE(page->_workspaceModelState == nullptr,
                            L"flag-off must leave the workspace model dormant");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // ============================================================
+    // Per-pane strip Slice 1 (#54): TabStripView extraction.
+    // ============================================================
+    namespace
+    {
+        // The TabStripView the projector put in `leaf`'s container row 0. The
+        // leaf container (built by _projectLeafContainer) is a Grid whose row-0
+        // child is the strip control and row-1 child is the per-leaf content
+        // host. Returns nullptr if no such control is there.
+        winrt::TerminalApp::TabStripView _leafTabStripView(
+            const winrt::Windows::UI::Xaml::FrameworkElement& leafContainer)
+        {
+            const auto grid = leafContainer.try_as<winrt::Windows::UI::Xaml::Controls::Grid>();
+            if (!grid)
+            {
+                return nullptr;
+            }
+            for (uint32_t i = 0; i < grid.Children().Size(); ++i)
+            {
+                const auto child = grid.Children().GetAt(i);
+                if (const auto strip = child.try_as<winrt::TerminalApp::TabStripView>())
+                {
+                    return strip;
+                }
+            }
+            return nullptr;
+        }
+    }
+
+    // Per-pane strip Slice 1 (#54): a projected leaf's row-0 child is a
+    // TabStripView (NOT a bare ListView), and its inner ListView's items are the
+    // leaf's PaneTabViewModels in model order. We add a SECOND tab to the root
+    // leaf via the model (so the strip has 2 rows to order-check), then walk the
+    // projected tree to the leaf container and assert the control type + items.
+    //
+    // RED before the extraction: the leaf row-0 child is a hand-built ListView,
+    // not a TabStripView. GREEN after: it is a TabStripView whose inner
+    // ListView's ItemsSource is the leaf's VM collection.
+    void WorkspaceTests::StripSlice1_LeafRowZeroChildIsTabStripView_ItemsMatchModel()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a SECOND tab to the root leaf so the strip has two ordered rows");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer, L"the root leaf must have a projected leaf container");
+
+            // GREEN: the leaf container's row-0 child is a TabStripView.
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip,
+                               L"the leaf container's row-0 child must be a TabStripView (not a bare ListView)");
+
+            // Its inner ListView's items are the leaf's PaneTabViewModels, in
+            // model order (same collection the page mutates per arm).
+            const auto inner = strip.TabsListView();
+            VERIFY_IS_NOT_NULL(inner, L"the TabStripView must expose its inner ListView");
+            const auto items = inner.ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items, L"the inner ListView's ItemsSource must be the leaf's VM collection");
+
+            // Items count == the leaf's model tab count.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), leaf->tabs.size());
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size(),
+                             L"the strip items count must equal the leaf's model tab count");
+
+            // Order matches the model's tab order (by stable id).
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                VERIFY_ARE_EQUAL(leaf->tabs[i].id.v, items.GetAt(i).Id(),
+                                 L"the strip rows must be in model tab order, by id");
+            }
+
+            // Cutover invariant: no classic Tab was built.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the strip extraction must not create a classic Tab (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Per-pane strip Slice 1 (#54): the inner ListView is configured with an
+    // explicit (horizontal) ItemsPanel template and SelectionMode=Single — the
+    // two things the old hand-built per-leaf clone OMITTED, which left the
+    // default vertical StackPanel and a multi-select-capable ListView. We assert
+    // the ItemsPanel template is present and SelectionMode==Single, NOT any
+    // laid-out pixel width (the headless std::clamp-resize trap). The horizontal
+    // orientation itself is fixed in TabStripView.xaml + smoke-verified.
+    //
+    // RED before the extraction: the hand-built per-leaf ListView had a null
+    // ItemsPanel (default vertical) and default SelectionMode. GREEN after: the
+    // TabStripView's inner ListView carries the explicit panel + single select.
+    void WorkspaceTests::StripSlice1_InnerListViewIsHorizontalAndSingleSelect()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5200 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+            const auto inner = strip.TabsListView();
+            VERIFY_IS_NOT_NULL(inner);
+
+            // SelectionMode == Single (was omitted by the old clone).
+            VERIFY_ARE_EQUAL(winrt::Windows::UI::Xaml::Controls::ListViewSelectionMode::Single,
+                             inner.SelectionMode(),
+                             L"the strip's inner ListView must be SelectionMode=Single");
+
+            // The strip carries an explicit ItemsPanel template — the SINGLE
+            // thing the old programmatic per-leaf clone OMITTED, which left the
+            // ListView on its default VERTICAL StackPanel and stacked the tabs
+            // vertically. Asserting the template is present (non-null) is the
+            // headless-safe structural check that the bug fix is in place:
+            // FrameworkTemplate.LoadContent() (which would let us read the
+            // realized panel's Orientation directly) is NOT in the WinRT
+            // projection, and realizing the panel needs a layout pass we must
+            // avoid (the headless std::clamp-resize trap). The template's root
+            // being a horizontal StackPanel is fixed in TabStripView.xaml and
+            // confirmed by the packaged smoke run (tabs render horizontally).
+            const auto panelTemplate = inner.ItemsPanel();
+            VERIFY_IS_NOT_NULL(panelTemplate,
+                               L"the strip's inner ListView must carry an explicit ItemsPanel template "
+                               L"(the old clone omitted it -> default vertical stack -> the bug)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Per-pane strip Slice 1 (#54): selection is a PURE PROJECTION of the model.
+    // The active row is the VM with IsActive == true (the model-seeded first
+    // tab); the inner ListView's SelectedItem is NOT bound as a model-mutating
+    // source of truth — clearing it does NOT change which VM is active. We
+    // verify the active VM is the model's active tab and that mutating the
+    // ListView's SelectedItem leaves the model + IsActive untouched.
+    void WorkspaceTests::StripSlice1_ActiveVmIsReflected_SelectionIsPureProjection()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5300 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // The model's active tab id for the root leaf.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_IS_FALSE(leaf->tabs.empty());
+            const auto modelActiveId = leaf->tabs[leaf->activeTabIdx].id.v;
+
+            // The strip's active VM (IsActive) is the model's active tab — the
+            // highlight derives from IsActive (F-2 seed), not the ListView's own
+            // selection state.
+            const auto activeVmId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeVmId.has_value(), L"the leaf's strip must have an active VM");
+            VERIFY_ARE_EQUAL(modelActiveId, *activeVmId,
+                             L"the active strip VM must reflect the model's active tab");
+
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+            const auto inner = strip.TabsListView();
+            VERIFY_IS_NOT_NULL(inner);
+
+            // Pure projection: the ListView's SelectedItem is NOT a source of
+            // truth. Force it to null; the model's active tab and the active VM
+            // (IsActive) are unchanged — the model never observes ListView
+            // selection. (If SelectedItem were bound two-way, this would flip
+            // IsActive / mutate the model — the anti-pattern we forbid.)
+            inner.SelectedItem(nullptr);
+
+            const auto& workspaces2 = page->_workspaceModelState->workspaces_view();
+            const auto* leaf2 = std::get_if<::WorkspaceModel::LeafPane>(&workspaces2[0].root);
+            VERIFY_IS_NOT_NULL(leaf2);
+            VERIFY_ARE_EQUAL(modelActiveId, leaf2->tabs[leaf2->activeTabIdx].id.v,
+                             L"clearing the ListView SelectedItem must NOT change the model's active tab");
+            const auto activeVmAfter = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeVmAfter.has_value());
+            VERIFY_ARE_EQUAL(modelActiveId, *activeVmAfter,
+                             L"clearing the ListView SelectedItem must NOT change the active VM (pure projection)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Per-pane strip Slice 1 (#54): a row's RequestActivate intent still
+    // dispatches selectTab through the model (the intent is wired on the VM in
+    // _appendPaneTabVm; the template's Tapped binds to it). Dispatch-level —
+    // raise RequestActivate on a non-active VM and assert the model's active tab
+    // flips to it (mirroring the BigFlipC strip-intent coverage).
+    void WorkspaceTests::StripSlice1_ActivateIntent_DispatchesSelectTab()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5400 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a second tab; the first stays active. Raise RequestActivate on the second.");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+            const auto items = strip.TabsListView().ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items);
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), items.Size());
+
+            // Find a VM that is NOT currently active and raise its activate intent.
+            winrt::TerminalApp::PaneTabViewModel target{ nullptr };
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                if (!items.GetAt(i).IsActive())
+                {
+                    target = items.GetAt(i);
+                    break;
+                }
+            }
+            VERIFY_IS_NOT_NULL(target, L"there must be a non-active row to activate");
+            const auto targetId = target.Id();
+
+            // The template binds Tapped -> RequestActivate; call it directly
+            // (dispatch-level — no synthetic pointer / layout).
+            target.RequestActivate();
+
+            // The model's active tab flipped to the target.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(targetId, leaf->tabs[leaf->activeTabIdx].id.v,
+                             L"RequestActivate must dispatch selectTab so the model's active tab flips");
+            // And the projected active VM reflects the new active tab.
+            const auto activeVmId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeVmId.has_value());
+            VERIFY_ARE_EQUAL(targetId, *activeVmId,
+                             L"the strip's active VM must re-project to the newly active tab");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Per-pane strip Slice 1 (#54): a row's RequestClose intent still dispatches
+    // closeTab through the model. Dispatch-level — add a 2nd tab, raise
+    // RequestClose on one row, assert the leaf drops to one model tab and the
+    // strip re-projects to one row.
+    void WorkspaceTests::StripSlice1_CloseIntent_DispatchesCloseTab()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5500 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        ::WorkspaceModel::TabId secondId{ 0 };
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            secondId = added.id;
+            page->_applyWorkspaceAction(std::move(added.state));
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto strip = _leafTabStripView(_findLeafContainer(page->_workspacePaneTreeRootChildForTest(), leaf0));
+            VERIFY_IS_NOT_NULL(strip);
+            const auto items = strip.TabsListView().ItemsSource().try_as<IObservableVector<winrt::TerminalApp::PaneTabViewModel>>();
+            VERIFY_IS_NOT_NULL(items);
+
+            // Raise RequestClose on the row for the SECOND tab (the close Button
+            // binds Click -> RequestClose; call it directly, dispatch-level).
+            winrt::TerminalApp::PaneTabViewModel target{ nullptr };
+            for (uint32_t i = 0; i < items.Size(); ++i)
+            {
+                if (items.GetAt(i).Id() == secondId.v)
+                {
+                    target = items.GetAt(i);
+                    break;
+                }
+            }
+            VERIFY_IS_NOT_NULL(target);
+            target.RequestClose();
+
+            // The leaf dropped to one model tab and the strip re-projected to one.
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), leaf->tabs.size(),
+                             L"RequestClose must dispatch closeTab so the leaf drops to one tab");
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the strip must re-project to one row after the close");
         });
         VERIFY_SUCCEEDED(result);
     }
