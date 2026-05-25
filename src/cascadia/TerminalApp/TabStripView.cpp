@@ -4,6 +4,10 @@
 #include "pch.h"
 #include "TabStripView.h"
 
+// Workspaces M2 (#54, ADR-001): the projected TabHeaderControl activation factory
+// (we construct one per TabViewItem to host the reused inline renamer).
+#include "winrt/TerminalApp.h"
+
 #include "TabStripView.g.cpp"
 
 using namespace winrt;
@@ -198,19 +202,56 @@ namespace winrt::TerminalApp::implementation
         // decoupled.
         item.Content(winrt::Windows::UI::Xaml::Controls::Border{});
 
+        // Workspaces M2 (#54, ADR-001): host a TabHeaderControl in the item's
+        // Header (mirroring classic Tab — Tab.cpp ~line 112: "Use our header
+        // control as the TabViewItem's header"), reusing its inline renamer rather
+        // than reimplementing it. _applyChrome pushes the title into it; the
+        // renamer's TitleChangeRequested becomes the VM's RequestRename intent.
+        winrt::TerminalApp::TabHeaderControl header{};
+
+        // Double-tap the tab → BeginRename() (mirrors classic Tab::_MakeTabViewItem
+        // ~line 158: TabViewItem().DoubleTapped → ActivateTabRenamer). Weak-capture
+        // the header so a late double-tap on a torn-down tab is a safe no-op.
+        item.DoubleTapped([weakHeader = winrt::make_weak(header)](auto&& /*s*/, auto&& /*e*/) {
+            if (auto h{ weakHeader.get() })
+            {
+                h.BeginRename();
+            }
+        });
+
+        // The renamer committed a new title → raise the VM's RequestRename intent
+        // (→ setTabTitle model action). We never write the title onto the view
+        // here; the committed title comes back via the model projection
+        // (TabDecorationUpdated → CustomTitle). Weak-capture the VM so a commit
+        // after the row was re-projected is a safe no-op.
+        header.TitleChangeRequested([weakVm = winrt::make_weak(vm)](auto&& title) {
+            if (auto vm{ weakVm.get() })
+            {
+                vm.RequestRename(title);
+            }
+        });
+
+        item.Header(header);
+
         _applyChrome(item, vm);
         return item;
     }
 
-    // Refresh the native TabViewItem chrome (header text + icon + tooltip) from
+    // Refresh the native TabViewItem chrome (header title + icon + tooltip) from
     // the VM — the maintainers' control renders the rounded top / flare / hover /
-    // separator natively, so the old bespoke projection is gone. The icon uses
-    // IconPathConverter::IconSourceMUX (mirrors classic Tab::UpdateIcon ~line
-    // 377); an empty path clears it. The tooltip mirrors the title.
+    // separator natively, so the old bespoke projection is gone. The header is a
+    // hosted TabHeaderControl (M2) whose Title we push; an in-progress rename is
+    // NOT clobbered because the renamer collapses the title TextBlock while the
+    // TextBox is up. The icon uses IconPathConverter::IconSourceMUX (mirrors
+    // classic Tab::UpdateIcon ~line 377); an empty path clears it. The tooltip
+    // mirrors the title.
     void TabStripView::_applyChrome(const MUXC::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm)
     {
         const auto title = vm.Title();
-        item.Header(winrt::box_value(title));
+        if (const auto header = item.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
+        {
+            header.Title(title);
+        }
 
         // Native tooltip (classic uses ToolTipService.SetToolTip on the
         // TabViewItem). Mirror the title.

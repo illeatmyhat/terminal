@@ -345,6 +345,21 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StripSlice2a_InnerListViewCarriesReskinContainerStyle);
         TEST_METHOD(StripSlice2a_IsActiveDrivesSelectedBackgroundVisibility);
 
+        // Workspaces M2 (#54, ADR-001): tab rename via the reused TabHeaderControl,
+        // model-driven through setTabTitle, with custom-wins title precedence. Two
+        // facets, both dispatch-level (no synthetic pointer / layout — the headless
+        // std::clamp-resize trap):
+        //  - the rename INTENT path: raising the VM's RequestRename(newTitle)
+        //    dispatches setTabTitle through the model; the diff's TabDecorationUpdated
+        //    arm projects the new customTitle back onto the VM, and the VM's computed
+        //    Title surfaces it. Pins the model-as-truth round trip (the title is NOT
+        //    written on the view at the intent site).
+        //  - precedence (custom wins): after a rename, a subsequent live
+        //    content.TitleChanged (MockPaneContent.SetTitle) must NOT clobber the
+        //    custom title — the VM Title still shows the custom title. Clearing the
+        //    custom title (rename to empty) lets the live title take over again.
+        TEST_METHOD(StripM2_Rename_DispatchesSetTabTitle_CustomTitleWins);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -4699,6 +4714,143 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
+    // Workspaces M2 (#54, ADR-001): tab rename via the reused TabHeaderControl,
+    // model-driven through setTabTitle, with custom-wins title precedence.
+    //
+    // The strip VM's Title is a COMPUTED effective title: CustomTitle (the model's
+    // TabRecord.customTitle, set by rename) wins when non-empty, else the live
+    // shell title. This pins the whole rename round trip + the precedence:
+    //
+    //  1. At startup the root leaf's VM title is the live "mock" title (no custom
+    //     title yet).
+    //  2. Raising the VM's RequestRename("My Tab") dispatches setTabTitle through
+    //     the model (intent → action → diff); the TabDecorationUpdated arm projects
+    //     the new customTitle back onto the VM. The VM Title surfaces "My Tab". The
+    //     model's TabRecord.customTitle is "My Tab" (the rename actually mutated the
+    //     model, not just the view).
+    //  3. A subsequent live content.TitleChanged (SetTitle) must NOT clobber the
+    //     custom title — the VM Title still shows "My Tab" (custom wins).
+    //  4. Renaming to the empty string clears the custom title; the live title
+    //     (the latest SetTitle value) takes over again.
+    //
+    // RED before M2: there is no rename intent / no customTitle projection; a live
+    // TitleChanged always wins. GREEN after: custom wins, end to end through the
+    // model. The classic path is untouched.
+    void WorkspaceTests::StripM2_Rename_DispatchesSetTabTitle_CustomTitleWins()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xE100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId tab0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM (the first tab)");
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"the startup tab's content must have mounted (one mock)");
+
+            // Resolve the startup tab's model id (the one VM in the strip).
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs.empty());
+            tab0 = leafPane->tabs[0].id;
+            VERIFY_IS_TRUE(tab0.valid());
+
+            // No custom title yet: the VM Title is the live "mock" title.
+            const auto seeded = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(seeded.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"mock" }, *seeded,
+                             L"startup: the VM title is the live content title (no custom title)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Raise the VM's RequestRename intent; it must dispatch setTabTitle through the model.");
+        result = RunOnUIThread([&]() {
+            // Resolve the strip VM and raise its rename intent (the path the
+            // hosted TabHeaderControl.TitleChangeRequested takes — dispatch-level,
+            // no synthetic pointer / double-tap / layout).
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            vm.RequestRename(winrt::hstring{ L"My Tab" });
+
+            // The rename mutated the MODEL (custom-title is model-as-truth).
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_ARE_EQUAL(std::string{ "My Tab" }, leafPane->tabs[0].customTitle,
+                             L"RequestRename must dispatch setTabTitle so the model's customTitle changes");
+
+            // And the diff projected the custom title back onto the VM.
+            const auto renamed = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(renamed.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"My Tab" }, *renamed,
+                             L"the VM Title must surface the custom title after the rename round trip");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"A later live TitleChanged must NOT clobber the custom title (custom wins).");
+        result = RunOnUIThread([&]() {
+            (*mocks)[0]->SetTitle(L"Administrator: Command Prompt");
+
+            const auto stillCustom = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(stillCustom.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"My Tab" }, *stillCustom,
+                             L"a live TitleChanged must not override the user's custom title — custom wins");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Clearing the custom title (rename to empty) lets the live title take over.");
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            vm.RequestRename(winrt::hstring{ L"" });
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_TRUE(leafPane->tabs[0].customTitle.empty(),
+                           L"renaming to empty must reset the model's customTitle");
+
+            const auto liveAgain = page->_paneTabStripFirstTitleForTest(leaf0);
+            VERIFY_IS_TRUE(liveAgain.has_value());
+            VERIFY_ARE_EQUAL(winrt::hstring{ L"Administrator: Command Prompt" }, *liveAgain,
+                             L"with the custom title cleared, the VM Title falls back to the latest live title");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
     // Slice 2a.2 (#54): the selected pane-tab's connected background tracks the
     // mounted content's live background COLOR — the faithful classic WT behavior
     // ("tab.background = terminalBackground", Tab::_RecalculateAndApplyTabColor)
@@ -7172,16 +7324,21 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(tabView);
             VERIFY_IS_TRUE(tabView.TabItems().Size() >= 1u, L"the leaf has at least one projected tab");
 
-            // Native chrome: the TabViewItem.Header is the VM Title (box_value'd
-            // string). The deleted re-skin used a hand-built TextBlock; M1 lets the
-            // native TabViewItem render the header.
+            // Native chrome: M1 set the TabViewItem.Header to the VM Title
+            // (box_value'd string). Workspaces M2 (#54, ADR-001) replaced that
+            // plain string with a hosted TabHeaderControl (reusing classic WT's
+            // inline renamer) whose Title carries the VM Title — so the header is
+            // now the control, and its Title (not a boxed string) projects the VM
+            // Title. The deleted re-skin used a hand-built TextBlock.
             const auto item = tabView.TabItems().GetAt(0).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
             VERIFY_IS_NOT_NULL(item);
             const auto vm = item.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
             VERIFY_IS_NOT_NULL(vm);
-            const auto header = winrt::unbox_value_or<winrt::hstring>(item.Header(), L"");
-            VERIFY_ARE_EQUAL(vm.Title(), header,
-                             L"the native TabViewItem.Header must project the VM Title");
+            const auto header = item.Header().try_as<winrt::TerminalApp::TabHeaderControl>();
+            VERIFY_IS_NOT_NULL(header,
+                               L"the native TabViewItem.Header must be the reused TabHeaderControl (M2 renamer host)");
+            VERIFY_ARE_EQUAL(vm.Title(), header.Title(),
+                             L"the hosted TabHeaderControl.Title must project the VM Title");
 
             // The Content is the throwaway empty Border (the drag-identity bodge —
             // the terminal lives in the leaf content host, not the strip).

@@ -15,6 +15,13 @@ namespace TerminalApp
         // selection projection — TabStripView pushes SelectedItem when IsActive
         // flips). A user SelectionChanged is an intent only and never writes
         // IsActive back from the control.
+        //
+        // Workspaces M2 (#54, ADR-001): Title is now a COMPUTED effective title —
+        // CustomTitle (the model's TabRecord.customTitle, set by rename) wins when
+        // non-empty, else the live shell title. The Title SETTER writes the LIVE
+        // title (the live-push path keeps calling vm.Title(content.Title())); the
+        // rename diff arm writes CustomTitle. A later live TitleChanged therefore
+        // cannot clobber a user's custom title.
         String Title { get; set; };
         Boolean IsActive { get; set; };
 
@@ -50,5 +57,25 @@ namespace TerminalApp
         // pure downstream projection of the mounted content. APPENDED LAST (after
         // Background) for the same vtable-slot reason.
         String Icon { get; set; };
+
+        // Workspaces M2 (#54, ADR-001): the model's TabRecord.customTitle — the
+        // user-chosen title set via rename. A pure downstream projection of the
+        // model (the TabDecorationUpdated diff arm sets it through the page;
+        // the VM never writes it back). When non-empty it WINS over the live
+        // shell title in the computed Title; empty means "no custom title, use
+        // the live title". APPENDED LAST (after Icon) for the same vtable-slot
+        // reason (inserting mid-runtimeclass trips the /RTCs corruption trap).
+        String CustomTitle { get; set; };
+
+        // Workspaces M2 (#54, ADR-001): rename INTENT. TabStripView wires the
+        // hosted TabHeaderControl's TitleChangeRequested to raise this with the
+        // committed title; the owning TerminalPage dispatches setTabTitle for this
+        // VM's Id, and the resulting TabDecorationUpdated diff arm projects the
+        // new customTitle back onto CustomTitle. The VM NEVER touches the model.
+        void RequestRename(String newTitle);
+
+        // sender = the VM (carries Id); args = the committed title (a boxed
+        // String). APPENDED LAST for the vtable-slot reason.
+        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> RenameRequested;
     }
 }

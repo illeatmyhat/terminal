@@ -7291,7 +7291,19 @@ namespace winrt::TerminalApp::implementation
 
         winrt::TerminalApp::PaneTabViewModel vm{};
         vm.Id(tab.v);
-        vm.Title(winrt::hstring{ til::u8u16(title.empty() ? std::string{ "Tab" } : title) });
+        // Workspaces M2 (#54, ADR-001): `title` here is the model's
+        // TabRecord.customTitle (TabAdded.customTitle) — the user-chosen rename
+        // title, empty for a fresh tab. Seed it onto CustomTitle (custom-wins
+        // precedence), and seed the LIVE title to the static "Tab" placeholder.
+        // The live shell title arrives momentarily via
+        // _bindTabChromeToContent → _setPaneTabTitleForTab (the Title setter, which
+        // writes the live title); while a custom title is in force the computed
+        // Title ignores it, so a rename survives the first live TitleChanged.
+        vm.Title(winrt::hstring{ L"Tab" });
+        if (!title.empty())
+        {
+            vm.CustomTitle(winrt::hstring{ til::u8u16(title) });
+        }
         vm.IsActive(isActive);
 
         // Subscribe to the row's intent signals (Big-flip Slice C, #54). The VM
@@ -7337,6 +7349,37 @@ namespace winrt::TerminalApp::implementation
                 return;
             }
             auto next = ::WorkspaceModel::closeTab(page->_workspaceModelState, id);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
+        // Workspaces M2 (#54, ADR-001): the rename intent. The strip's hosted
+        // TabHeaderControl commits a new title → the VM raises RenameRequested
+        // carrying the boxed title → we dispatch setTabTitle for this tab's id.
+        // The resulting TabDecorationUpdated diff arm projects the new customTitle
+        // back onto the VM's CustomTitle (model-as-truth — the committed title is
+        // NEVER written onto the view here; it returns via the projection). This
+        // mirrors the ActivateRequested/CloseRequested dispatch shape exactly.
+        vm.RenameRequested([weakThis = get_weak()](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& args) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            // args is the boxed committed title (an empty string is a valid
+            // "reset to live title" intent — the model stores empty customTitle
+            // and the TabDecorationUpdated arm clears CustomTitle). unbox_value_or
+            // yields an empty hstring if args is null/not a boxed string.
+            const winrt::hstring newTitle{ winrt::unbox_value_or<winrt::hstring>(args, winrt::hstring{}) };
+            auto next = ::WorkspaceModel::setTabTitle(page->_workspaceModelState, id, winrt::to_string(newTitle));
             page->_applyWorkspaceAction(std::move(next));
         });
 
@@ -7411,6 +7454,37 @@ namespace winrt::TerminalApp::implementation
                 if (vm.Id() == tab.v)
                 {
                     vm.Title(title);
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Workspaces M2 (#54, ADR-001): set the strip VM whose stable Id matches
+    // `tab` to carry the model's customTitle (the rename result). Mirrors
+    // _setPaneTabTitleForTab — resolve across ALL leaf strips by id identity (the
+    // TabDecorationUpdated diff arm carries a TabId directly) — but writes
+    // CustomTitle, not the live title. The VM's computed Title shows the custom
+    // title when it is non-empty, else the live shell title; so a rename
+    // surfaces immediately AND a later live TitleChanged cannot clobber it. An
+    // empty customTitle clears the override (reset to the live title). A pure
+    // downstream projection — the committed rename returns through here, not
+    // written on the view at the intent site. Returns the matching VM (empty when
+    // none).
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabCustomTitleForTab(::WorkspaceModel::TabId tab, const winrt::hstring& customTitle)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.CustomTitle(customTitle);
                     return vm;
                 }
             }

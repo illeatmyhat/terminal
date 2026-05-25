@@ -969,6 +969,18 @@ namespace winrt::TerminalApp::implementation
         {
             return;
         }
+
+        // Workspaces M2 (#54, ADR-001): project the customTitle (the rename
+        // result) onto the per-leaf strip VM, resolved by the change's TabId
+        // (c.id). This is the model→view return path for a rename: the rename
+        // intent dispatched setTabTitle, and here the diff arm pushes the new
+        // customTitle onto the VM's CustomTitle (custom-wins over the live
+        // title). Done UNCONDITIONALLY — before the classic-resolution gate
+        // below — so the flag-on strip updates even when there is no classic tab
+        // to resolve. (The color/pin still ride the classic path for now; M4
+        // routes runtimeColor to the strip.)
+        page->_setPaneTabCustomTitleForTab(c.id, winrt::hstring{ til::u8u16(c.customTitle) });
+
         const auto resolved = _resolveClassicTabIndex(c.workspaceId);
         if (!resolved.has_value())
         {

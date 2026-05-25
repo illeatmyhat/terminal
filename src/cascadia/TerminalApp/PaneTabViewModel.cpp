@@ -28,4 +28,15 @@ namespace winrt::TerminalApp::implementation
     {
         CloseRequested.raise(*this, nullptr);
     }
+
+    // Rename intent (Workspaces M2, #54, ADR-001). Raise RenameRequested carrying
+    // the committed title so the page dispatches setTabTitle(Id, newTitle); the
+    // resulting TabDecorationUpdated diff arm projects the new customTitle back
+    // onto this VM's CustomTitle (custom-wins over the live title). The VM never
+    // touches the model. TabStripView raises this from the hosted
+    // TabHeaderControl.TitleChangeRequested.
+    void PaneTabViewModel::RequestRename(const winrt::hstring& newTitle)
+    {
+        RenameRequested.raise(*this, winrt::box_value(newTitle));
+    }
 }
