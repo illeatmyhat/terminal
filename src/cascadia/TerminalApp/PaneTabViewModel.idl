@@ -47,6 +47,14 @@ namespace TerminalApp
         static Windows.UI.Xaml.Visibility ActiveToVisibility(Boolean isActive);
         static Windows.UI.Xaml.Visibility RestToVisibility(Boolean isActive);
 
+        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility helper —
+        // Visible iff `show`. Mirrors ActiveToVisibility/RestToVisibility. The
+        // separator is now a model projection (ShowSeparator, computed by
+        // TerminalPage::_recomputePaneTabSeparators) shown ONLY between two
+        // consecutive UNSELECTED tabs — never adjacent to the selected tab,
+        // never trailing after the last tab. See ShowSeparator below.
+        static Windows.UI.Xaml.Visibility ShowSeparatorToVisibility(Boolean show);
+
         // sender = the VM (carries Id so the page resolves the tab); args =
         // null (the intent carries no payload beyond Id).
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> ActivateRequested;
@@ -61,5 +69,16 @@ namespace TerminalApp
         // APPENDED LAST: inserting a property mid-runtimeclass shifts vtable
         // slots and trips the /RTCs "Stack around 'value' corrupted" trap.
         Windows.UI.Xaml.Media.Brush Background { get; set; };
+
+        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility, a model
+        // projection computed by TerminalPage::_recomputePaneTabSeparators after
+        // every strip-membership / active-state mutation. true iff this tab is
+        // NOT the last tab AND this tab is NOT selected AND its right-neighbour
+        // tab is NOT selected — i.e. a divider shows ONLY between two consecutive
+        // UNSELECTED tabs (classic WT), never adjacent to the selected tab and
+        // never trailing after the last tab. The item template binds the
+        // separator Border's Visibility to ShowSeparatorToVisibility(ShowSeparator).
+        // APPENDED LAST (after Background) for the same vtable-slot reason.
+        Boolean ShowSeparator { get; set; };
     }
 }

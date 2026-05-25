@@ -877,6 +877,17 @@ namespace winrt::TerminalApp::implementation
         void _removePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
         void _setActivePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
 
+        // Slice 2a.3 follow-up (#54): recompute every strip VM's ShowSeparator for
+        // `leaf`. Walks the leaf's strip collection IN ORDER and sets each VM's
+        // ShowSeparator = (i < count-1) && !vm[i].IsActive() && !vm[i+1].IsActive()
+        // — so a divider shows ONLY between two consecutive UNSELECTED tabs
+        // (classic WT), never adjacent to the selected tab, never trailing after
+        // the last tab. Called after every mutation of a leaf's strip membership
+        // or active state (end of _appendPaneTabVm / _removePaneTabVm /
+        // _setActivePaneTabVm). O(n) per call, n tiny. The separator is therefore
+        // a pure model projection, MVVM-consistent with the rest of the strip.
+        void _recomputePaneTabSeparators(::WorkspaceModel::PaneId leaf);
+
         // Live pane-tab title. Set the strip view-model whose stable Id matches
         // `tab` to `title`, resolving the VM across ALL leaf strips by id (the
         // ContentMounted arm that drives this carries only a TabId, not the
@@ -933,6 +944,11 @@ namespace winrt::TerminalApp::implementation
         // strip), so a test can subscribe to its PropertyChanged and assert the
         // color-equality short-circuit raises Background only on a real change.
         [[nodiscard]] winrt::TerminalApp::PaneTabViewModel _paneTabStripFirstVmForTest(::WorkspaceModel::PaneId leaf) const;
+        // Slice 2a.3 follow-up (#54): the ShowSeparator of the strip VM at
+        // `index` in `leaf` (nullopt when no strip / index out of range). Lets a
+        // headless test assert _recomputePaneTabSeparators applied the classic
+        // "divider only between two consecutive unselected tabs" rule per VM.
+        [[nodiscard]] std::optional<bool> _paneTabStripShowSeparatorForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const;
 
         // The per-leaf observable tab-strip view-models, keyed by the leaf's
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf

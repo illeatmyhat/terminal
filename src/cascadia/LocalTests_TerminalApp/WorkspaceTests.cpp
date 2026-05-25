@@ -344,6 +344,16 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StripSlice2a_IsActiveDrivesSelectedBackgroundVisibility);
         TEST_METHOD(StripSlice2a_IsActiveDrivesForegroundBrush);
 
+        // Slice 2a.3 follow-up (#54): the inter-tab separator is now a MODEL
+        // PROJECTION (PaneTabViewModel.ShowSeparator, computed by
+        // TerminalPage::_recomputePaneTabSeparators) shown ONLY between two
+        // consecutive UNSELECTED tabs — never adjacent to the selected tab, never
+        // trailing after the last tab. Pure VM/accessor assertions, NO layout
+        // (the headless std::clamp-resize trap). Drives the strip to known
+        // configurations and asserts each VM's ShowSeparator across multiple
+        // active positions.
+        TEST_METHOD(StripSlice2a3_SeparatorShownOnlyBetweenUnselectedTabs);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -7385,6 +7395,156 @@ namespace TerminalAppLocalTests
                              L"the selected (primary) foreground label moves to the newly-active row");
             VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::RestToVisibility(activeVm.IsActive()),
                              L"the previously-active row now shows the rest (secondary) foreground label");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 2a.3 follow-up (#54): the inter-tab separator is a MODEL PROJECTION.
+    // ShowSeparator (computed by TerminalPage::_recomputePaneTabSeparators after
+    // every strip-membership / active-state mutation) is true for a tab iff it is
+    // NOT the last tab AND it is NOT selected AND its right-neighbour is NOT
+    // selected — so a divider shows ONLY between two consecutive UNSELECTED tabs
+    // (classic WT), never adjacent to the selected tab, never trailing after the
+    // last tab. A single selected tab shows no divider.
+    //
+    // PURE VM/accessor assertions, NO layout (the headless std::clamp-resize
+    // trap). We also verify the helper mapping (ShowSeparatorToVisibility) is the
+    // straight Visible-iff-true projection.
+    //
+    // Expected ShowSeparator per active position (rule: i<count-1 && !self.active
+    // && !next.active), count=3:
+    //   tab0 active -> [false, true,  false]
+    //   tab1 active -> [false, false, false]
+    //   tab2 active -> [true,  false, false]
+    void WorkspaceTests::StripSlice2a3_SeparatorShownOnlyBetweenUnselectedTabs()
+    {
+        using V = winrt::Windows::UI::Xaml::Visibility;
+
+        // The helper is a pure Visible-iff-show projection — verify independent of
+        // any container (mirrors ActiveToVisibility coverage).
+        VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::ShowSeparatorToVisibility(true),
+                         L"ShowSeparatorToVisibility(true) must be Visible");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::ShowSeparatorToVisibility(false),
+                         L"ShowSeparatorToVisibility(false) must be Collapsed");
+
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5900 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId tab0{ 0 };
+        ::WorkspaceModel::TabId tab1{ 0 };
+        ::WorkspaceModel::TabId tab2{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&page->_workspaceModelState->workspaces_view()[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            tab0 = leaf->tabs[0].id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // ONE selected tab → no divider (never trailing, single selected).
+        result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+            const auto s0 = page->_paneTabStripShowSeparatorForTest(leaf0, 0);
+            VERIFY_IS_TRUE(s0.has_value());
+            VERIFY_IS_FALSE(*s0, L"a single selected tab shows no separator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add tab1 and tab2 (the strip becomes [tab0, tab1, tab2], tab2 active)");
+        result = RunOnUIThread([&]() {
+            auto a1 = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ ::WorkspaceModel::TerminalSpec{} });
+            VERIFY_IS_TRUE(a1.id.valid());
+            tab1 = a1.id;
+            page->_applyWorkspaceAction(std::move(a1.state));
+
+            auto a2 = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ ::WorkspaceModel::TerminalSpec{} });
+            VERIFY_IS_TRUE(a2.id.valid());
+            tab2 = a2.id;
+            page->_applyWorkspaceAction(std::move(a2.state));
+
+            VERIFY_ARE_EQUAL(3u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // A small helper to read the three ShowSeparator flags for the leaf.
+        const auto sep = [&](uint32_t i) {
+            const auto v = page->_paneTabStripShowSeparatorForTest(leaf0, i);
+            VERIFY_IS_TRUE(v.has_value(), L"index in range");
+            return *v;
+        };
+
+        Log::Comment(L"tab2 active -> [true, false, false]");
+        result = RunOnUIThread([&]() {
+            // After adding tab2 it is the active tab.
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(tab2.v, *activeId, L"tab2 is active after being added last");
+
+            VERIFY_IS_TRUE(sep(0), L"tab0: !self & !next(tab1) & not-last -> separator");
+            VERIFY_IS_FALSE(sep(1), L"tab1: right-neighbour tab2 is selected -> no separator");
+            VERIFY_IS_FALSE(sep(2), L"tab2: last tab -> no separator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Select tab0 -> [false, true, false]");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, tab0);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(tab0.v, *activeId);
+
+            VERIFY_IS_FALSE(sep(0), L"tab0: selected -> no separator");
+            VERIFY_IS_TRUE(sep(1), L"tab1: !self & !next(tab2) & not-last -> separator (between two unselected)");
+            VERIFY_IS_FALSE(sep(2), L"tab2: last tab -> no separator");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Select tab1 -> [false, false, false]");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, tab1);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(tab1.v, *activeId);
+
+            VERIFY_IS_FALSE(sep(0), L"tab0: right-neighbour tab1 is selected -> no separator");
+            VERIFY_IS_FALSE(sep(1), L"tab1: selected -> no separator");
+            VERIFY_IS_FALSE(sep(2), L"tab2: last tab -> no separator");
         });
         VERIFY_SUCCEEDED(result);
     }

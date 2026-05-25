@@ -7341,6 +7341,10 @@ namespace winrt::TerminalApp::implementation
         });
 
         strip.Append(vm);
+
+        // The strip membership changed — re-derive which dividers show (classic
+        // WT: only between two consecutive unselected tabs).
+        _recomputePaneTabSeparators(leaf);
     }
 
     // Remove the strip view-model that backs a removed tab, located by its
@@ -7365,6 +7369,9 @@ namespace winrt::TerminalApp::implementation
             if (strip.GetAt(i).Id() == tab.v)
             {
                 strip.RemoveAt(i);
+                // The strip membership changed — re-derive which dividers show
+                // (classic WT: only between two consecutive unselected tabs).
+                _recomputePaneTabSeparators(leaf);
                 return;
             }
         }
@@ -7384,6 +7391,39 @@ namespace winrt::TerminalApp::implementation
         for (const auto& vm : it->second)
         {
             vm.IsActive(tab.valid() && vm.Id() == tab.v);
+        }
+        // The active-state changed for this leaf's rows — re-derive which
+        // dividers show (classic WT: only between two consecutive unselected
+        // tabs). The leaf is already in hand here.
+        _recomputePaneTabSeparators(leaf);
+    }
+
+    // Slice 2a.3 follow-up (#54): recompute every strip VM's ShowSeparator for
+    // `leaf`. Walk the leaf's strip collection IN ORDER and set each VM's
+    // ShowSeparator = (i < count-1) && !vm[i].IsActive() && !vm[i+1].IsActive()
+    // — so a divider shows ONLY between two consecutive UNSELECTED tabs (classic
+    // WT), never adjacent to the selected tab, never trailing after the last
+    // tab, and a single selected tab shows no divider. The separator is thus a
+    // pure model projection (MVVM-consistent with the rest of the strip — the
+    // item template binds the separator Border to
+    // ShowSeparatorToVisibility(ShowSeparator)), recomputed after every mutation
+    // of a leaf's strip membership or active state. O(n) per call, n tiny.
+    void TerminalPage::_recomputePaneTabSeparators(::WorkspaceModel::PaneId leaf)
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end())
+        {
+            return;
+        }
+        auto& strip = it->second;
+        const uint32_t count = strip.Size();
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            const auto vm = strip.GetAt(i);
+            const bool show = (i + 1 < count) &&
+                              !vm.IsActive() &&
+                              !strip.GetAt(i + 1).IsActive();
+            vm.ShowSeparator(show);
         }
     }
 
@@ -7582,6 +7622,21 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         }
         return it->second.GetAt(0);
+    }
+
+    // Slice 2a.3 follow-up (#54): the ShowSeparator of the strip VM at `index` in
+    // `leaf` (nullopt when the leaf has no strip or `index` is out of range).
+    // Lets a headless test assert _recomputePaneTabSeparators applied the classic
+    // "divider only between two consecutive unselected tabs" rule per VM, with no
+    // layout pass.
+    std::optional<bool> TerminalPage::_paneTabStripShowSeparatorForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end() || index >= it->second.Size())
+        {
+            return std::nullopt;
+        }
+        return it->second.GetAt(index).ShowSeparator();
     }
 
     // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane

@@ -203,13 +203,11 @@
                                         <VisualState x:Name="PointerOver">
                                             <VisualState.Setters>
                                                 <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPointerOver}" />
-                                                <Setter Target="TabSeparator.Opacity" Value="0" />
                                             </VisualState.Setters>
                                         </VisualState>
                                         <VisualState x:Name="Pressed">
                                             <VisualState.Setters>
                                                 <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPressed}" />
-                                                <Setter Target="TabSeparator.Opacity" Value="0" />
                                             </VisualState.Setters>
                                         </VisualState>
                                         <!--
@@ -226,13 +224,11 @@
                                         <VisualState x:Name="PointerOverSelected">
                                             <VisualState.Setters>
                                                 <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPointerOver}" />
-                                                <Setter Target="TabSeparator.Opacity" Value="0" />
                                             </VisualState.Setters>
                                         </VisualState>
                                         <VisualState x:Name="PressedSelected">
                                             <VisualState.Setters>
                                                 <Setter Target="PointerBackground.Background" Value="{ThemeResource PaneTabHeaderBackgroundPressed}" />
-                                                <Setter Target="TabSeparator.Opacity" Value="0" />
                                             </VisualState.Setters>
                                         </VisualState>
                                     </VisualStateGroup>
@@ -269,17 +265,17 @@
                                                   VerticalContentAlignment="Stretch" />
 
                                 <!--
-                                    Inter-tab separator — the thin divider on the
-                                    right edge of each tab (TabViewItem.TabSeparator),
-                                    faded out on hover/press by the CommonStates
-                                    setters above.
+                                    Slice 2a.3 follow-up (#54): the inter-tab
+                                    separator used to live HERE as a container-level
+                                    Border drawn on EVERY tab's right edge (faded
+                                    only on hover), which left a stray trailing line
+                                    after the selected/only tab. It is now a MODEL
+                                    PROJECTION moved into the item DataTemplate (so
+                                    it can x:Bind the VM's ShowSeparator) and shown
+                                    ONLY between two consecutive UNSELECTED tabs
+                                    (classic WT). The hover-fade of the separator is
+                                    dropped here (acceptable — a Slice 2b polish).
                                 -->
-                                <Border x:Name="TabSeparator"
-                                        Width="1"
-                                        Margin="0,8,0,8"
-                                        HorizontalAlignment="Right"
-                                        BorderBrush="{ThemeResource PaneTabSeparator}"
-                                        BorderThickness="1" />
                             </Grid>
                         </ControlTemplate>
                     </Setter.Value>
@@ -355,18 +351,20 @@
                             Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
 
                     <!--
-                        Slice 2a.3 (#54): the manila-folder BOTTOM FLARE. The
-                        SelectedBackground border above is the tab BODY — rounded
-                        TOP (4,4,0,0), SQUARE bottom, full cell width. These two
-                        4x4 corner-fillet Paths add the OUTWARD flare at the two
+                        Slice 2a.3 (#54) + follow-up: the manila-folder BOTTOM
+                        FLARE, a CONCAVE chamfer foot. The SelectedBackground
+                        border above is the tab BODY — rounded TOP (4,4,0,0),
+                        SQUARE bottom, full cell width. These two 4x4
+                        corner-fillet Paths add the OUTWARD flare at the two
                         BOTTOM corners so the selected tab matches classic WT
                         exactly: classic's WinUI 2.8 TabViewItem selected fill is
                         SelectedBackgroundPath with Margin="-4,0,-4,0"
                         (Generic.xaml ~3047) — the fill flares 4px outward each
-                        side at the bottom with a concave fillet hugging the
-                        baseline (the browser/folder foot). A bare ListViewItem
-                        has no TabViewTemplateSettings.TabGeometry to drive that
-                        Path, so we substitute two corner fillets here. Each:
+                        side at the bottom with a CONCAVE fillet hugging the
+                        baseline (the browser/folder foot), the dark boundary
+                        curving TOWARD the tab body. A bare ListViewItem has no
+                        TabViewTemplateSettings.TabGeometry to drive that Path, so
+                        we substitute two corner fillets here. Each:
                           * Fill = the LIVE content background color (the SAME
                             PaneTabViewModel.Background brush the body uses), so
                             the foot MERGES SEAMLESSLY into both the body and the
@@ -380,20 +378,32 @@
                             corner and extended FlareSize px outward beyond the
                             cell (left flare Margin="-4,0,0,0", right
                             Margin="0,0,-4,0").
-                        Geometry is a quarter-disk fillet: the dark fill is
-                        full-width at the baseline (bottom) and tapers to zero at
-                        the top of the 4px box, with the arc bulging toward the
-                        tab body (concave foot) so the dark region WIDENS toward
-                        the baseline like classic — not a rounded-in pill.
-                        Part of the transitional re-skin (fold back into the
-                        shared TabViewItem dictionary before the upstream PR).
+                        Geometry is a CONCAVE quarter-disk fillet (Slice 2a.3
+                        follow-up: was a convex bump bulging OUTWARD into the
+                        strip; the arc-sweep flag is now flipped so the foot is
+                        concave). For the LEFT foot the 4x4 box's right edge (x=4)
+                        abuts the tab body's bottom-left corner; the box extends
+                        4px to the LEFT (Margin -4) so x=0 is the baseline's
+                        outermost point. The path "M4,0 A4,4 0 0 1 0,4 L4,4 Z"
+                        traces: tab-body bottom corner (4,0) -> arc (sweep 1,
+                        centre at the box's top-left (0,0)) down-and-out to the
+                        baseline (0,4) -> line to (4,4) -> close. The filled
+                        region is the quarter-disk in the bottom-RIGHT of the box,
+                        so the dark area is FULL-width at the baseline and tapers
+                        to zero at the top, the arc boundary curving concavely
+                        toward the tab — the foot WIDENS the tab ~4px outward at
+                        the baseline (classic's concave foot), not a rounded-in
+                        pill or an outward convex bump. The right foot mirrors it
+                        (sweep 0). Part of the transitional re-skin (fold back
+                        into the shared TabViewItem dictionary before the upstream
+                        PR).
                     -->
                     <Path HorizontalAlignment="Left"
                           VerticalAlignment="Bottom"
                           Width="{StaticResource PaneTabItemFlareSize}"
                           Height="{StaticResource PaneTabItemFlareSize}"
                           Margin="-4,0,0,0"
-                          Data="M4,0 A4,4 0 0 0 0,4 L4,4 Z"
+                          Data="M4,0 A4,4 0 0 1 0,4 L4,4 Z"
                           Fill="{x:Bind Background, Mode=OneWay}"
                           Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
                     <Path HorizontalAlignment="Right"
@@ -401,7 +411,7 @@
                           Width="{StaticResource PaneTabItemFlareSize}"
                           Height="{StaticResource PaneTabItemFlareSize}"
                           Margin="0,0,-4,0"
-                          Data="M0,0 A4,4 0 0 1 4,4 L0,4 Z"
+                          Data="M0,0 A4,4 0 0 0 4,4 L0,4 Z"
                           Fill="{x:Bind Background, Mode=OneWay}"
                           Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
 
@@ -458,6 +468,27 @@
                                       Glyph="&#xE711;" />
                         </Button>
                     </Grid>
+
+                    <!--
+                        Slice 2a.3 follow-up (#54): the inter-tab separator, now a
+                        MODEL PROJECTION. Moved out of the container ControlTemplate
+                        (where it was drawn on every tab and left a stray trailing
+                        line) INTO the item DataTemplate so it can x:Bind the VM's
+                        ShowSeparator — Visible ONLY when this tab is NOT the last,
+                        NOT selected, and its right-neighbour is NOT selected (i.e.
+                        only between two consecutive UNSELECTED tabs, classic WT).
+                        ShowSeparator is computed by
+                        TerminalPage::_recomputePaneTabSeparators after every strip
+                        mutation. Right-aligned 1px divider, same Margin/brush as the
+                        old container-level Border. The old hover-fade is dropped
+                        (Slice 2b polish).
+                    -->
+                    <Border Width="1"
+                            Margin="0,8,0,8"
+                            HorizontalAlignment="Right"
+                            BorderBrush="{ThemeResource PaneTabSeparator}"
+                            BorderThickness="1"
+                            Visibility="{x:Bind local:PaneTabViewModel.ShowSeparatorToVisibility(ShowSeparator), Mode=OneWay}" />
                 </Grid>
             </DataTemplate>
         </ListView.ItemTemplate>

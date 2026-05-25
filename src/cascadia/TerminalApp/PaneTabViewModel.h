@@ -59,6 +59,16 @@ namespace winrt::TerminalApp::implementation
                             : winrt::Windows::UI::Xaml::Visibility::Visible;
         }
 
+        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility — Visible
+        // iff `show`. Mirrors ActiveToVisibility. ShowSeparator is a model
+        // projection (computed by TerminalPage::_recomputePaneTabSeparators) so the
+        // divider is drawn ONLY between two consecutive UNSELECTED tabs.
+        static winrt::Windows::UI::Xaml::Visibility ShowSeparatorToVisibility(bool show)
+        {
+            return show ? winrt::Windows::UI::Xaml::Visibility::Visible
+                        : winrt::Windows::UI::Xaml::Visibility::Collapsed;
+        }
+
         // Intent signals (Big-flip Slice C, #54). These only raise events; they
         // never mutate this VM's state and never touch the WorkspaceModel. The
         // page subscribes and dispatches the model action (selectTab / closeTab),
@@ -91,6 +101,17 @@ namespace winrt::TerminalApp::implementation
         // it (the Border then renders neutral/transparent, never the old inverted
         // floating fill).
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, Background, PropertyChanged.raise, nullptr);
+
+        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility, a model
+        // projection. true iff this tab is NOT last AND NOT selected AND its
+        // right-neighbour is NOT selected — so the divider shows ONLY between two
+        // consecutive UNSELECTED tabs (classic WT), never adjacent to the selected
+        // tab and never trailing. Computed by TerminalPage::_recomputePaneTabSeparators
+        // after every strip-membership / active-state mutation; the item template
+        // binds the separator Border to ShowSeparatorToVisibility(ShowSeparator).
+        // APPENDED LAST (after Background) — inserting mid-runtimeclass shifts
+        // vtable slots and trips the /RTCs "Stack around 'value' corrupted" trap.
+        WINRT_OBSERVABLE_PROPERTY(bool, ShowSeparator, PropertyChanged.raise, false);
     };
 }
 
