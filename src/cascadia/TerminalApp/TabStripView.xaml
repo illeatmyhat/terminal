@@ -130,6 +130,35 @@
             <Thickness x:Key="PaneTabItemHeaderPadding">8,3,4,3</Thickness>
 
             <!--
+                Tab corner radius: TOP corners only (the ControlCornerRadius
+                value of 4, applied to the top two corners; bottom two SHARP).
+                Classic WT tabs are sharp at the bottom and the selected tab's
+                fill runs straight down — square-cornered — flush into the
+                content below, so it reads as a connected "folder tab" rather
+                than a floating rounded pill. A uniform ControlCornerRadius
+                rounded the BOTTOM corners too, which detached the selected fill
+                from the content (the rounded bottom revealed the strip behind
+                each corner). Used by both the selected and pointer backgrounds
+                so every tab shape matches.
+            -->
+            <CornerRadius x:Key="PaneTabItemCornerRadius">4,4,0,0</CornerRadius>
+
+            <!--
+                Slice 2a.3 (#54): the manila-folder BOTTOM FLARE size. Classic
+                WT's WinUI 2.8 TabViewItem paints its selected fill with
+                SelectedBackgroundPath Margin="-4,0,-4,0" (Generic.xaml ~3047) —
+                the selected tab's fill flares OUTWARD 4px on each side at the
+                bottom, with a concave fillet connecting the tab's vertical side
+                down to the baseline (the browser/folder "foot"). A bare
+                ListViewItem has no TabViewTemplateSettings.TabGeometry to drive
+                that Path, so we reproduce the flare as two 4x4 corner fillets
+                (see the SelectedBackground siblings in the item template). 4 to
+                match the classic SelectedBackgroundPath margin and the top
+                corner radius.
+            -->
+            <x:Double x:Key="PaneTabItemFlareSize">4</x:Double>
+
+            <!--
                 Rest-state ListViewItem container style. This is where the
                 classic TabViewItem chrome lives: the rounded-top tab shape, the
                 rest / pointer-over / pressed backgrounds, the bottom border
@@ -222,15 +251,16 @@
                                         BorderThickness="1" />
 
                                 <!--
-                                    Pointer-over / pressed background. Rounded top
-                                    corners (ControlCornerRadius) to match the tab
-                                    shape. Transparent at rest; the CommonStates
-                                    setters above fill it on hover / press.
+                                    Pointer-over / pressed background. Rounded TOP
+                                    corners only (PaneTabItemCornerRadius) — square
+                                    at the bottom to match the classic tab shape.
+                                    Transparent at rest; the CommonStates setters
+                                    above fill it on hover / press.
                                 -->
                                 <Border x:Name="PointerBackground"
                                         Margin="0,1,0,0"
                                         Background="Transparent"
-                                        CornerRadius="{ThemeResource ControlCornerRadius}" />
+                                        CornerRadius="{StaticResource PaneTabItemCornerRadius}" />
 
                                 <!--  The item content (the IsActive-driven tab chrome + label + close).  -->
                                 <ContentPresenter x:Name="ContentPresenter"
@@ -304,9 +334,13 @@
                         very bottom of the row (only a 1px top inset for the
                         rounded top) so it OVERPAINTS the container template's
                         BottomBorderLine — the selected tab has no border line
-                        beneath it. Substitutes the TabViewItem's
-                        SelectedBackgroundPath (whose TabGeometry needs the TabView
-                        TemplateSettings we don't have on a bare ListViewItem).
+                        beneath it. Its corners are rounded on TOP only
+                        (PaneTabItemCornerRadius) and SQUARE at the bottom, so the
+                        fill runs straight down flush into the content and reads as
+                        a connected folder tab (classic), not a floating rounded
+                        pill. Substitutes the TabViewItem's SelectedBackgroundPath
+                        (whose TabGeometry needs the TabView TemplateSettings we
+                        don't have on a bare ListViewItem).
                         Pre-mount the Background binding is null (the tab not yet
                         mounted) and the Border renders transparent/neutral until
                         ContentMounted seeds it — immediate in practice for the
@@ -317,8 +351,59 @@
                     <Border x:Name="SelectedBackground"
                             Margin="0,1,0,0"
                             Background="{x:Bind Background, Mode=OneWay}"
-                            CornerRadius="{ThemeResource ControlCornerRadius}"
+                            CornerRadius="{StaticResource PaneTabItemCornerRadius}"
                             Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
+
+                    <!--
+                        Slice 2a.3 (#54): the manila-folder BOTTOM FLARE. The
+                        SelectedBackground border above is the tab BODY — rounded
+                        TOP (4,4,0,0), SQUARE bottom, full cell width. These two
+                        4x4 corner-fillet Paths add the OUTWARD flare at the two
+                        BOTTOM corners so the selected tab matches classic WT
+                        exactly: classic's WinUI 2.8 TabViewItem selected fill is
+                        SelectedBackgroundPath with Margin="-4,0,-4,0"
+                        (Generic.xaml ~3047) — the fill flares 4px outward each
+                        side at the bottom with a concave fillet hugging the
+                        baseline (the browser/folder foot). A bare ListViewItem
+                        has no TabViewTemplateSettings.TabGeometry to drive that
+                        Path, so we substitute two corner fillets here. Each:
+                          * Fill = the LIVE content background color (the SAME
+                            PaneTabViewModel.Background brush the body uses), so
+                            the foot MERGES SEAMLESSLY into both the body and the
+                            content area below — exactly how classic paints
+                            "tab.background = terminalBackground".
+                          * IsActive-gated via ActiveToVisibility(IsActive) — the
+                            identical pure-model projection the body uses, so ONLY
+                            the selected tab flares; this is NEVER the ListView
+                            click-selection.
+                          * VerticalAlignment=Bottom, 4x4, pinned to the bottom
+                            corner and extended FlareSize px outward beyond the
+                            cell (left flare Margin="-4,0,0,0", right
+                            Margin="0,0,-4,0").
+                        Geometry is a quarter-disk fillet: the dark fill is
+                        full-width at the baseline (bottom) and tapers to zero at
+                        the top of the 4px box, with the arc bulging toward the
+                        tab body (concave foot) so the dark region WIDENS toward
+                        the baseline like classic — not a rounded-in pill.
+                        Part of the transitional re-skin (fold back into the
+                        shared TabViewItem dictionary before the upstream PR).
+                    -->
+                    <Path HorizontalAlignment="Left"
+                          VerticalAlignment="Bottom"
+                          Width="{StaticResource PaneTabItemFlareSize}"
+                          Height="{StaticResource PaneTabItemFlareSize}"
+                          Margin="-4,0,0,0"
+                          Data="M4,0 A4,4 0 0 0 0,4 L4,4 Z"
+                          Fill="{x:Bind Background, Mode=OneWay}"
+                          Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
+                    <Path HorizontalAlignment="Right"
+                          VerticalAlignment="Bottom"
+                          Width="{StaticResource PaneTabItemFlareSize}"
+                          Height="{StaticResource PaneTabItemFlareSize}"
+                          Margin="0,0,-4,0"
+                          Data="M0,0 A4,4 0 0 1 4,4 L0,4 Z"
+                          Fill="{x:Bind Background, Mode=OneWay}"
+                          Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
 
                     <Grid Padding="{StaticResource PaneTabItemHeaderPadding}"
                           ColumnSpacing="6">
