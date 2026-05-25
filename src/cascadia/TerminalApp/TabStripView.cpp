@@ -169,6 +169,29 @@ namespace winrt::TerminalApp::implementation
                     {
                         strongThis->_syncSelectionFromModel();
                     }
+                    else if (prop == L"Pinned")
+                    {
+                        // Workspaces M5 (#54, ADR-001): the model projected a new
+                        // pinned state onto the VM (via the TabDecorationUpdated diff
+                        // arm → _setPaneTabPinnedForTab). Refresh THIS tab's
+                        // context-menu Pin/Unpin label so it tracks the model — a pure
+                        // downstream read, never a write-back. Re-resolve the matching
+                        // TabViewItem by VM identity (mirrors the chrome-refresh path
+                        // below). The full pinned-tab VISUALS (pin glyph, suppress
+                        // close, sort-to-front) are DEFERRED — only the label toggles.
+                        auto items = strongThis->TabView().TabItems();
+                        for (uint32_t i = 0; i < items.Size(); ++i)
+                        {
+                            if (const auto item = items.GetAt(i).try_as<MUXC::TabViewItem>())
+                            {
+                                if (TabStripView::_vmFromItem(item) == vm)
+                                {
+                                    strongThis->_applyContextMenuPinLabel(item, vm);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     else if (prop == L"Title" || prop == L"Icon" || prop == L"Background" || prop == L"BellIndicator")
                     {
                         // Workspaces M3 (#54, ADR-001): a BellIndicator flip rides
@@ -255,8 +278,143 @@ namespace winrt::TerminalApp::implementation
 
         item.Header(header);
 
+        // Workspaces M5 (#54, ADR-001): attach the per-tab right-click context
+        // menu. It mirrors classic Tab::_CreateContextMenu's CONSTRUCTION (a
+        // MenuFlyout set as the TabViewItem.ContextFlyout) but each item raises a
+        // TabId-scoped VM INTENT — never classic's _dispatch.DoAction(*this), which
+        // is the reconcile pattern the big-flip forbids. The flyout is owned by the
+        // item and released with it on the next _rebuildProjection (the items
+        // weak-capture the VM / header, so a click after teardown is a safe no-op).
+        item.ContextFlyout(_makeContextFlyout(vm, header));
+
         _applyChrome(item, vm);
+
+        // Seed the Pin/Unpin label from the VM's projected pinned state (a later
+        // Pinned PropertyChanged refreshes it via _applyContextMenuPinLabel).
+        _applyContextMenuPinLabel(item, vm);
         return item;
+    }
+
+    // Workspaces M5 (#54, ADR-001): build the per-tab context menu. Mirrors classic
+    // Tab::_CreateContextMenu's construction (MenuFlyoutItem + FontIcon glyph +
+    // tooltip), but routes every click as a model intent on the VM rather than
+    // classic's _dispatch.DoAction reconcile. Entries (model-ready only):
+    //   * Rename — reuses M2's path: calls the hosted TabHeaderControl's
+    //     BeginRename() (the SAME entry point the double-tap uses). Not a
+    //     reimplementation — the renamer commit still flows TitleChangeRequested →
+    //     RequestRename → setTabTitle.
+    //   * Close — the existing M1 RequestClose intent (→ closeTab).
+    //   * Pin / Unpin — the M5 RequestTogglePin intent (→ setTabPinned). The label
+    //     toggles from the VM's projected Pinned state; the click requests the
+    //     NEGATION, and the new state returns from the model (TabDecorationUpdated →
+    //     Pinned). The Pin/Unpin MenuFlyoutItem is tagged with this VM so
+    //     _applyContextMenuPinLabel can re-find it to refresh the label.
+    // DEFERRED (model gaps / other slices): Color… (M4 — a clear spot is left
+    // below), Duplicate / Close Other Tabs / Close Tabs to the Right (model gaps),
+    // Move to New Window (M8).
+    winrt::Windows::UI::Xaml::Controls::MenuFlyout TabStripView::_makeContextFlyout(const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header)
+    {
+        namespace WUXC = winrt::Windows::UI::Xaml::Controls;
+        namespace WUXMedia = winrt::Windows::UI::Xaml::Media;
+
+        const auto fluentFont = WUXMedia::FontFamily{ L"Segoe Fluent Icons, Segoe MDL2 Assets" };
+
+        WUXC::MenuFlyout flyout{};
+
+        // "Rename tab" — reuse M2's renamer (the double-tap path). Weak-capture the
+        // header so a late click on a torn-down tab is a safe no-op.
+        {
+            WUXC::MenuFlyoutItem renameItem{};
+            WUXC::FontIcon renameSymbol{};
+            renameSymbol.FontFamily(fluentFont);
+            renameSymbol.Glyph(L"\xE8AC"); // Rename (matches classic Tab::_CreateContextMenu)
+            renameItem.Icon(renameSymbol);
+            renameItem.Text(RS_(L"RenameTabText"));
+            renameItem.Click([weakHeader = winrt::make_weak(header)](auto&& /*s*/, auto&& /*e*/) {
+                if (auto h{ weakHeader.get() })
+                {
+                    h.BeginRename();
+                }
+            });
+            flyout.Items().Append(renameItem);
+        }
+
+        // DEFERRED — "Change tab color…" lands here in M4 (reuse ColorPickupFlyout,
+        // re-route ColorSelected/ColorCleared → setTabColor / reset). Left as a
+        // clear spot per the M5 brief.
+
+        // "Pin tab" / "Unpin tab" — the M5 RequestTogglePin intent. The label is set
+        // by _applyContextMenuPinLabel (seeded at build, refreshed on the Pinned
+        // PropertyChanged). Tag the item with the VM so that refresh can re-find it.
+        // Weak-capture the VM so a late click after re-projection is a safe no-op;
+        // the click requests the negation of the CURRENT projected Pinned state.
+        {
+            WUXC::MenuFlyoutItem pinItem{};
+            WUXC::FontIcon pinSymbol{};
+            pinSymbol.FontFamily(fluentFont);
+            pinSymbol.Glyph(L"\xE718"); // Pinned (Segoe Fluent Icons)
+            pinItem.Icon(pinSymbol);
+            pinItem.Tag(winrt::box_value(L"PaneTabPinItem"));
+            pinItem.Click([weakVm = winrt::make_weak(vm)](auto&& /*s*/, auto&& /*e*/) {
+                if (auto v{ weakVm.get() })
+                {
+                    // Request the NEGATION of the current projected state; the new
+                    // state returns from the model (no write-back here).
+                    v.RequestTogglePin(!v.Pinned());
+                }
+            });
+            flyout.Items().Append(pinItem);
+        }
+
+        flyout.Items().Append(WUXC::MenuFlyoutSeparator{});
+
+        // "Close tab" — the existing M1 RequestClose intent (→ closeTab). The
+        // single-tab "Close" only; the close SUB-MENU (Close other tabs / Close tabs
+        // to the right) is DEFERRED (model gaps). Weak-capture the VM.
+        {
+            WUXC::MenuFlyoutItem closeItem{};
+            closeItem.Text(L"Close tab");
+            closeItem.Click([weakVm = winrt::make_weak(vm)](auto&& /*s*/, auto&& /*e*/) {
+                if (auto v{ weakVm.get() })
+                {
+                    v.RequestClose();
+                }
+            });
+            flyout.Items().Append(closeItem);
+        }
+
+        return flyout;
+    }
+
+    // Workspaces M5 (#54, ADR-001): refresh the Pin/Unpin context-menu item's label
+    // from the VM's projected Pinned state. The label toggle comes BACK from the
+    // model (the TabDecorationUpdated diff arm → _setPaneTabPinnedForTab → Pinned),
+    // so this is a pure downstream read — never a write-back. Re-finds the tagged
+    // Pin item in the item's ContextFlyout (no stored handle to outlive the item).
+    // Mirrors WorkspaceViewModel::PinLabel's literal Pin/Unpin (the workspace
+    // sidebar's precedent). UI thread.
+    void TabStripView::_applyContextMenuPinLabel(const MUXC::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm)
+    {
+        namespace WUXC = winrt::Windows::UI::Xaml::Controls;
+
+        const auto flyout = item.ContextFlyout().try_as<WUXC::MenuFlyout>();
+        if (!flyout)
+        {
+            return;
+        }
+
+        const auto pinned = vm.Pinned();
+        for (const auto& menuItem : flyout.Items())
+        {
+            if (const auto flyoutItem = menuItem.try_as<WUXC::MenuFlyoutItem>())
+            {
+                if (winrt::unbox_value_or<winrt::hstring>(flyoutItem.Tag(), winrt::hstring{}) == L"PaneTabPinItem")
+                {
+                    flyoutItem.Text(pinned ? winrt::hstring{ L"Unpin tab" } : winrt::hstring{ L"Pin tab" });
+                    return;
+                }
+            }
+        }
     }
 
     // Refresh the native TabViewItem chrome (header title + icon + tooltip) from

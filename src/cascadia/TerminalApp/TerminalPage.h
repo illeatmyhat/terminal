@@ -899,6 +899,17 @@ namespace winrt::TerminalApp::implementation
         // (empty when none) so callers/tests can verify without a re-scan.
         winrt::TerminalApp::PaneTabViewModel _setPaneTabCustomTitleForTab(::WorkspaceModel::TabId tab, const winrt::hstring& customTitle);
 
+        // Workspaces M5 (#54, ADR-001): set the strip VM whose stable Id matches
+        // `tab` to carry the model's pinned state (the pin/unpin result), resolving
+        // the VM across ALL leaf strips by id (the TabDecorationUpdated diff arm that
+        // drives this carries a TabId directly). The strip's per-tab context menu
+        // reads Pinned to toggle its Pin/Unpin label. A pure downstream projection of
+        // the model — the new pinned state returns through here, NOT written directly
+        // on the view at the intent site. A no-op when no strip holds the tab.
+        // Returns the matching VM (empty when none) so callers/tests can verify
+        // without a re-scan.
+        winrt::TerminalApp::PaneTabViewModel _setPaneTabPinnedForTab(::WorkspaceModel::TabId tab, bool pinned);
+
         // Slice 2a.2 (#54): set the strip VM whose stable Id matches `tab` to
         // carry the content's background COLOR (resolving the VM across ALL leaf
         // strips by id, like _setPaneTabTitleForTab — the ContentMounted arm

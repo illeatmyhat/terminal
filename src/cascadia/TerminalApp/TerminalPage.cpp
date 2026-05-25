@@ -7383,6 +7383,33 @@ namespace winrt::TerminalApp::implementation
             page->_applyWorkspaceAction(std::move(next));
         });
 
+        // Workspaces M5 (#54, ADR-001): the pin/unpin intent. The per-tab context
+        // menu's Pin/Unpin item raises TogglePinRequested carrying the DESIRED
+        // pinned state (a boxed bool) → we dispatch setTabPinned for this tab's id.
+        // The resulting TabDecorationUpdated diff arm projects the new pinned state
+        // back onto the VM's Pinned (model-as-truth — the new state is NEVER written
+        // onto the view here; it returns via the projection). Mirrors the
+        // RenameRequested dispatch shape exactly.
+        vm.TogglePinRequested([weakThis = get_weak()](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& args) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            const auto pinned = winrt::unbox_value_or<bool>(args, false);
+            auto next = ::WorkspaceModel::setTabPinned(page->_workspaceModelState, id, pinned);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
         // Workspaces M1 (#54, ADR-001): the hover-highlight + separator hide are
         // now rendered natively by the MUX TabView, so the old hover-intent
         // subscriptions (HoverEnter/Exit → _recomputePaneTabSeparators) are gone.
@@ -7501,6 +7528,35 @@ namespace winrt::TerminalApp::implementation
                 if (vm.Id() == tab.v)
                 {
                     vm.CustomTitle(customTitle);
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Workspaces M5 (#54, ADR-001): set the strip VM whose stable Id matches `tab`
+    // to carry the model's pinned state (the pin/unpin result). Mirrors
+    // _setPaneTabCustomTitleForTab — resolve across ALL leaf strips by id identity
+    // (the TabDecorationUpdated diff arm carries a TabId directly) — but writes
+    // Pinned. The strip's per-tab context menu reads Pinned to toggle its Pin/Unpin
+    // label; M5 wires only that + the model action + this projection, deferring the
+    // full pinned-tab VISUALS. A pure downstream projection — the new pinned state
+    // returns through here, NOT written on the view at the intent site. Returns the
+    // matching VM (empty when none).
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabPinnedForTab(::WorkspaceModel::TabId tab, bool pinned)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.Pinned(pinned);
                     return vm;
                 }
             }

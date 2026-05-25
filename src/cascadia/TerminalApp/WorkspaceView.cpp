@@ -1085,8 +1085,10 @@ namespace winrt::TerminalApp::implementation
         // An unknown / stale id resolves to std::nullopt and we skip — no
         // positional cast, so a decoration can never land on the wrong tab.
         //
-        // Pinning is carried by the model but has no classic XAML
-        // surface yet — the dedicated pin glyph lands in Phase 2.
+        // Pinning is carried by the model and now projects onto the per-leaf strip
+        // VM (Workspaces M5 — see _setPaneTabPinnedForTab below), where it toggles
+        // the per-tab context menu's Pin/Unpin label. The classic tab row still has
+        // no pin glyph; the full pinned-tab VISUALS are DEFERRED.
         auto page = _page();
         if (!page)
         {
@@ -1103,6 +1105,17 @@ namespace winrt::TerminalApp::implementation
         // to resolve. (The color/pin still ride the classic path for now; M4
         // routes runtimeColor to the strip.)
         page->_setPaneTabCustomTitleForTab(c.id, winrt::hstring{ til::u8u16(c.customTitle) });
+
+        // Workspaces M5 (#54, ADR-001): project the pinned state (the pin/unpin
+        // result) onto the per-leaf strip VM, resolved by the change's TabId (c.id).
+        // This is the model→view return path for a pin toggle: the RequestTogglePin
+        // intent dispatched setTabPinned, and here the diff arm pushes the new pinned
+        // state onto the VM's Pinned (which toggles the context menu's Pin/Unpin
+        // label). Done UNCONDITIONALLY — before the classic-resolution gate below —
+        // so the flag-on strip updates even when there is no classic tab to resolve.
+        // M5 wires only the label + this projection; the full pinned-tab VISUALS
+        // (pin glyph, suppress close, sort-to-front) are DEFERRED.
+        page->_setPaneTabPinnedForTab(c.id, c.pinned);
 
         const auto resolved = _resolveClassicTabIndex(c.workspaceId);
         if (!resolved.has_value())

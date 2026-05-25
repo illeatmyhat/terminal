@@ -39,4 +39,15 @@ namespace winrt::TerminalApp::implementation
     {
         RenameRequested.raise(*this, winrt::box_value(newTitle));
     }
+
+    // Pin/unpin intent (Workspaces M5, #54, ADR-001). Raise TogglePinRequested
+    // carrying the DESIRED pinned state so the page dispatches setTabPinned(Id,
+    // pinned); the resulting TabDecorationUpdated diff arm projects the new pinned
+    // state back onto this VM's Pinned. The VM never touches the model. TabStripView
+    // raises this from the per-tab context menu's Pin/Unpin item (which reads the
+    // current Pinned state and requests its negation).
+    void PaneTabViewModel::RequestTogglePin(bool pinned)
+    {
+        TogglePinRequested.raise(*this, winrt::box_value(pinned));
+    }
 }

@@ -85,6 +85,20 @@ namespace winrt::TerminalApp::implementation
         // from `vm`. Used at build time and on the VM's Title/PropertyChanged.
         void _applyChrome(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
 
+        // Workspaces M5 (#54, ADR-001): build the per-tab right-click context menu
+        // (a MenuFlyout set as the TabViewItem.ContextFlyout) whose items raise
+        // TabId-scoped VM intents (NOT classic's _dispatch.DoAction reconcile). Owned
+        // by the item, released on _rebuildProjection (weak captures, no use-after-free
+        // on a torn-down tab). The `header` is captured so the Rename item reuses M2's
+        // BeginRename() path. UI thread.
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _makeContextFlyout(const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header);
+
+        // Refresh the Pin/Unpin context-menu item's label from the VM's projected
+        // Pinned state (the toggle text comes BACK from the model via the
+        // TabDecorationUpdated diff arm). Used at build time and on the VM's Pinned
+        // PropertyChanged. UI thread.
+        void _applyContextMenuPinLabel(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
+
         // Workspaces M1.2 (#54, ADR-001): apply / clear the classic selected-tab
         // color treatment (ported from Tab::_ApplyTabColorOnUIThread /
         // _ClearTabBackgroundColor) — local per-TabViewItem theme-dictionary

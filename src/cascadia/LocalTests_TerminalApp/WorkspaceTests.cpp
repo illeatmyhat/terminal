@@ -390,6 +390,20 @@ namespace TerminalAppLocalTests
         // existing SetTitle title raiser). The classic path is untouched.
         TEST_METHOD(StripM3_Bell_SetsIndicatorAndDismissesOnFocus);
 
+        // Workspaces M5 (#54, ADR-001): per-tab context menu. The right-click
+        // GESTURE + the MenuFlyout itself are NOT headless-testable (no layout), so
+        // this pins the menu's MODEL INTENTS at the VM/dispatch level — the same
+        // level the right-click click handlers raise them:
+        //  - Pin: raising the VM's RequestTogglePin(true) dispatches setTabPinned
+        //    through the model (intent → action → diff); the TabDecorationUpdated arm
+        //    projects the new pinned state back onto the VM's Pinned. Unpin
+        //    (RequestTogglePin(false)) round-trips it back. Pins the model-as-truth
+        //    pin toggle (the state is NOT written on the view at the intent site).
+        //  - Rename/Close menu items reuse M1/M2 intents (RequestRename / RequestClose),
+        //    already covered by StripM2_Rename… and the close test — the menu adds no
+        //    new dispatch path for them, only a new trigger.
+        TEST_METHOD(StripM5_ContextMenu_TogglePin_DispatchesSetTabPinned);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -4890,6 +4904,129 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(liveAgain.has_value());
             VERIFY_ARE_EQUAL(winrt::hstring{ L"Administrator: Command Prompt" }, *liveAgain,
                              L"with the custom title cleared, the VM Title falls back to the latest live title");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M5 (#54, ADR-001): per-tab context menu — pin/unpin, model-driven
+    // through setTabPinned, routed by a TabId intent (NOT classic's
+    // _dispatch.DoAction reconcile). The right-click gesture + the MenuFlyout are
+    // not headless-testable; this pins the menu's MODEL INTENT at the VM/dispatch
+    // level — exactly what the Pin/Unpin click handler raises:
+    //
+    //  1. At startup the root leaf's VM is unpinned (Pinned == false) and the
+    //     model's TabRecord.pinned is false.
+    //  2. Raising the VM's RequestTogglePin(true) — the negation the menu requests —
+    //     dispatches setTabPinned through the model (intent → action → diff); the
+    //     TabDecorationUpdated arm projects the new pinned state back onto the VM's
+    //     Pinned. The VM Pinned flips to true AND the model's TabRecord.pinned is
+    //     true (the toggle actually mutated the model, not just the view).
+    //  3. Raising RequestTogglePin(false) round-trips it back to unpinned, in the
+    //     model and on the VM.
+    //
+    // RED before M5: there is no pin intent / no Pinned projection. GREEN after:
+    // the pin toggle round-trips end to end through the model, no write-back at the
+    // intent site. The classic path is untouched.
+    void WorkspaceTests::StripM5_ContextMenu_TogglePin_DispatchesSetTabPinned()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xE100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId tab0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM (the first tab)");
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs.empty());
+            tab0 = leafPane->tabs[0].id;
+            VERIFY_IS_TRUE(tab0.valid());
+
+            // Startup: unpinned in the model AND on the VM.
+            VERIFY_IS_FALSE(leafPane->tabs[0].pinned,
+                            L"startup: the model's TabRecord.pinned is false");
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_IS_FALSE(vm.Pinned(),
+                            L"startup: the strip VM is unpinned");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Raise RequestTogglePin(true) — the context menu's Pin click. It must dispatch setTabPinned through the model.");
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            // The menu's Pin item requests the NEGATION of the current state
+            // (currently false → request true). Call the intent directly
+            // (dispatch-level — no synthetic right-click / flyout / layout).
+            vm.RequestTogglePin(true);
+
+            // The toggle mutated the MODEL (pinned is model-as-truth).
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_TRUE(leafPane->tabs[0].pinned,
+                           L"RequestTogglePin(true) must dispatch setTabPinned so the model's pinned flips true");
+
+            // And the diff projected the pinned state back onto the VM (the menu's
+            // label reads this to toggle Pin <-> Unpin).
+            const auto pinnedVm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(pinnedVm);
+            VERIFY_IS_TRUE(pinnedVm.Pinned(),
+                           L"the VM Pinned must surface the pinned state after the toggle round trip");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Raise RequestTogglePin(false) — the Unpin click. It round-trips the state back to unpinned.");
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            vm.RequestTogglePin(false);
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs[0].pinned,
+                            L"RequestTogglePin(false) must dispatch setTabPinned so the model's pinned flips back false");
+
+            const auto unpinnedVm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(unpinnedVm);
+            VERIFY_IS_FALSE(unpinnedVm.Pinned(),
+                            L"the VM Pinned must surface the unpinned state after the unpin round trip");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -45,6 +45,13 @@ namespace winrt::TerminalApp::implementation
         // back onto CustomTitle. The VM never touches the model.
         void RequestRename(const winrt::hstring& newTitle);
 
+        // Workspaces M5 (#54, ADR-001): pin/unpin intent. The per-tab context
+        // menu's Pin/Unpin item calls this with the DESIRED pinned state; the page
+        // dispatches setTabPinned(Id, pinned) and the resulting TabDecorationUpdated
+        // diff arm projects the new pinned state back onto Pinned. The VM never
+        // touches the model — mirrors RequestRename exactly.
+        void RequestTogglePin(bool pinned);
+
         til::property_changed_event PropertyChanged;
 
         // sender = *this (carries Id); args = null. The page resolves the tab
@@ -55,6 +62,11 @@ namespace winrt::TerminalApp::implementation
         // sender = *this (carries Id); args = the committed title (boxed hstring).
         // The page resolves the tab from the sender's Id and dispatches setTabTitle.
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> RenameRequested;
+
+        // Workspaces M5 (#54, ADR-001): pin/unpin intent. sender = *this (carries
+        // Id); args = the desired pinned state (a boxed bool). The page resolves
+        // the tab from the sender's Id and dispatches setTabPinned.
+        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> TogglePinRequested;
 
         // Stable identity (TabId.v); not observed.
         WINRT_PROPERTY(uint64_t, Id, 0);
@@ -139,6 +151,18 @@ namespace winrt::TerminalApp::implementation
         // WINRT_OBSERVABLE_PROPERTY setter already short-circuits on an unchanged
         // value, so re-setting the same state raises no spurious PropertyChanged.
         WINRT_OBSERVABLE_PROPERTY(bool, BellIndicator, PropertyChanged.raise, false);
+
+        // Workspaces M5 (#54, ADR-001): the model's TabRecord.pinned, projected
+        // onto the VM as a pure downstream read. The TabDecorationUpdated diff arm
+        // carries `pinned` and sets this through the page (_setPaneTabPinnedForTab);
+        // the per-tab context menu reads it to toggle its label Pin <-> Unpin via
+        // the PropertyChanged path (the same path Title/Icon/Background/BellIndicator
+        // ride). The VM never writes it back — the pin state always returns from the
+        // model. M5 wires the model action + label toggle + this projection; the
+        // full pinned-tab VISUALS (pin glyph, suppress close, sort-to-front) are
+        // DEFERRED. APPENDED LAST (after BellIndicator) for the vtable-slot reason
+        // (matches the .idl append). The setter short-circuits on an unchanged value.
+        WINRT_OBSERVABLE_PROPERTY(bool, Pinned, PropertyChanged.raise, false);
 
     private:
         // Workspaces M2 (#54, ADR-001): the two inputs to the computed Title (see

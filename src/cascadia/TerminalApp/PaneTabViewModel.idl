@@ -91,5 +91,26 @@ namespace TerminalApp
         // the same vtable-slot reason (inserting mid-runtimeclass trips the /RTCs
         // "Stack around 'value' corrupted" trap).
         Boolean BellIndicator { get; set; };
+
+        // Workspaces M5 (#54, ADR-001): the model's TabRecord.pinned — projected
+        // onto the VM as a pure downstream read (the TabDecorationUpdated diff arm
+        // carries `pinned` and sets it through the page). The per-tab context menu
+        // reads it to toggle its label Pin <-> Unpin; the VM never writes it back.
+        // M5 wires the model action + the label toggle + this projection; the full
+        // pinned-tab VISUALS (pin glyph, suppress close, sort-to-front) are DEFERRED.
+        // APPENDED LAST (after BellIndicator) for the vtable-slot reason.
+        Boolean Pinned { get; set; };
+
+        // Workspaces M5 (#54, ADR-001): pin/unpin INTENT. The per-tab context
+        // menu's Pin/Unpin item raises this with the DESIRED pinned state; the
+        // owning TerminalPage dispatches setTabPinned(Id, pinned) and the resulting
+        // TabDecorationUpdated diff arm projects the new pinned state back onto
+        // Pinned. The VM NEVER touches the model — mirrors RequestRename exactly.
+        // APPENDED LAST for the vtable-slot reason.
+        void RequestTogglePin(Boolean pinned);
+
+        // sender = the VM (carries Id); args = the desired pinned state (a boxed
+        // Boolean). APPENDED LAST for the vtable-slot reason.
+        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> TogglePinRequested;
     }
 }
