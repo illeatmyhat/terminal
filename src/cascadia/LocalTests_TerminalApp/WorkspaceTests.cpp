@@ -365,14 +365,14 @@ namespace TerminalAppLocalTests
         // ADR deviation — NOT a WorkspaceModel field). Pins the bell behaviour at
         // the VM/projection level (no real gestures/layout — the headless
         // std::clamp-resize trap):
-        //  - a content BellRequested with SendNotification==true sets the strip
-        //    VM's BellIndicator true AND the hosted header's
-        //    TerminalTabStatus.BellIndicator reflects it;
+        //  - a content BellRequested sets the strip VM's BellIndicator true AND the
+        //    hosted header's TerminalTabStatus.BellIndicator reflects it,
+        //    REGARDLESS of SendNotification (mirrors classic Tab.cpp:1160
+        //    ShowBellIndicator(true), which is unconditional) — including the
+        //    DEFAULT audible bell, which carries SendNotification==false;
         //  - making the tab active (the same _setActivePaneTabVm projection the
         //    real ActiveTabChanged arm drives) clears BellIndicator (dismiss on
-        //    focus);
-        //  - a BellRequested with SendNotification==false does NOT light the tab
-        //    (mirrors classic Tab.cpp's notification gate).
+        //    focus).
         // Driven against a minimal MockPaneContent.RaiseBell() raiser (mirrors the
         // existing SetTitle title raiser). The classic path is untouched.
         TEST_METHOD(StripM3_Bell_SetsIndicatorAndDismissesOnFocus);
@@ -500,9 +500,10 @@ namespace TerminalAppLocalTests
         // emitting a BEL. Raises BellRequested with a BellEventArgs carrying
         // (flashTaskbar, sendNotification) — mirroring how a real
         // TerminalPaneContent re-raises ControlCore's bell. The WorkspaceView's
-        // BellRequested subscription drives the strip VM's BellIndicator from this,
-        // gated on SendNotification() (classic Tab.cpp:1154). Mirrors SetTitle's
-        // raiser shape.
+        // BellRequested subscription drives the strip VM's BellIndicator from this
+        // UNCONDITIONALLY (classic Tab.cpp:1160 ShowBellIndicator(true)); the
+        // sendNotification flag gates only the (not-yet-wired) toast surface, not
+        // the indicator. Mirrors SetTitle's raiser shape.
         void RaiseBell(bool flashTaskbar, bool sendNotification)
         {
             BellRequested.raise(*this, winrt::make<winrt::TerminalApp::implementation::BellEventArgs>(flashTaskbar, sendNotification));
@@ -7464,11 +7465,15 @@ namespace TerminalAppLocalTests
     // We add a 2nd tab, resolve whichever tab is left INACTIVE (we don't assume an
     // ordering), and drive the bell on that inactive tab:
     //  1. Add a 2nd tab; resolve the INACTIVE tab (and its backing mock by index).
-    //  2. A BellRequested with SendNotification==false on the inactive tab does NOT
-    //     light it (mirrors classic Tab.cpp:1154's notification gate).
-    //  3. A BellRequested with SendNotification==true sets that VM's BellIndicator
-    //     true AND the hosted header's TerminalTabStatus.BellIndicator reflects it
-    //     (the chrome projection).
+    //  2. A BellRequested with SendNotification==false (the DEFAULT audible-bell
+    //     config, which never sets the Notification flag) on the inactive tab DOES
+    //     light it: the VM's BellIndicator goes true AND the hosted header's
+    //     TerminalTabStatus.BellIndicator reflects it. This mirrors classic
+    //     Tab.cpp:1160 ShowBellIndicator(true), which lights the indicator on every
+    //     bell regardless of the notification request (SendNotification gates only
+    //     the toast at Tab.cpp:1154, which the strip does not yet surface).
+    //  3. A BellRequested with SendNotification==true ALSO lights it (the flag does
+    //     not change the indicator either way) — re-asserting the chrome projection.
     //  4. Making that tab active (the same _setActivePaneTabVm projection the real
     //     ActiveTabChanged arm drives, via a RequestActivate intent) CLEARS the
     //     BellIndicator (dismiss-on-focus, mirroring Tab.cpp:328/1421), and the
@@ -7590,35 +7595,52 @@ namespace TerminalAppLocalTests
             return nullptr;
         };
 
-        Log::Comment(L"A bell WITHOUT a notification request must NOT light the tab (Tab.cpp:1154 gate).");
+        Log::Comment(L"A bell WITHOUT a notification request (the default audible config) MUST light the tab (Tab.cpp:1160 — unconditional ShowBellIndicator).");
         result = RunOnUIThread([&]() {
             // mocks[inactiveIdx] backs the inactive tab. Raise a bell with
-            // sendNotification == false.
+            // sendNotification == false — this is the DEFAULT BellStyle:audible
+            // case, which never sets the Notification flag. The indicator must
+            // still light: SendNotification does not gate it.
             (*mocks)[inactiveIdx]->RaiseBell(/*flashTaskbar*/ false, /*sendNotification*/ false);
 
             const auto vm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
             VERIFY_IS_NOT_NULL(vm);
             VERIFY_ARE_EQUAL(inactiveTabId, vm.Id());
-            VERIFY_IS_FALSE(vm.BellIndicator(),
-                            L"a bell with SendNotification==false must not set the indicator");
+            VERIFY_IS_TRUE(vm.BellIndicator(),
+                           L"a bell with SendNotification==false (default audible) must STILL set the indicator");
 
             const auto header = belledHeader();
             VERIFY_IS_NOT_NULL(header);
             VERIFY_IS_NOT_NULL(header.TabStatus());
-            VERIFY_IS_FALSE(header.TabStatus().BellIndicator(),
-                            L"the header status must stay un-belled for a no-notification bell");
+            VERIFY_IS_TRUE(header.TabStatus().BellIndicator(),
+                           L"the hosted header's TerminalTabStatus.BellIndicator must reflect the bell even without a notification request");
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"A bell WITH a notification request sets BellIndicator and the header reflects it.");
+        Log::Comment(L"Clear via focus, then a bell WITH a notification request ALSO lights it (the flag does not change the indicator).");
         result = RunOnUIThread([&]() {
+            // First clear the indicator by activating, then re-deactivate by
+            // activating the OTHER tab, so the next bell on inactiveIdx starts from
+            // a cleared state.
+            const auto otherIdx = inactiveIdx == 0 ? 1u : 0u;
+            const auto otherVm = page->_paneTabStripVmAtForTest(leaf0, otherIdx);
+            VERIFY_IS_NOT_NULL(otherVm);
+            const auto belledVm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
+            VERIFY_IS_NOT_NULL(belledVm);
+            // Activate the belled tab (clears it), then the other (so the belled
+            // tab is inactive again with a cleared indicator).
+            belledVm.RequestActivate();
+            VERIFY_IS_FALSE(belledVm.BellIndicator(), L"activating the belled tab clears it");
+            otherVm.RequestActivate();
+            VERIFY_IS_FALSE(belledVm.BellIndicator(), L"the now-inactive belled tab has a cleared indicator");
+
             (*mocks)[inactiveIdx]->RaiseBell(/*flashTaskbar*/ false, /*sendNotification*/ true);
 
             const auto vm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
             VERIFY_IS_NOT_NULL(vm);
             VERIFY_ARE_EQUAL(inactiveTabId, vm.Id());
             VERIFY_IS_TRUE(vm.BellIndicator(),
-                           L"a bell with SendNotification==true must set the VM's BellIndicator");
+                           L"a bell with SendNotification==true must also set the VM's BellIndicator");
 
             const auto header = belledHeader();
             VERIFY_IS_NOT_NULL(header);

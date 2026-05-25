@@ -7439,8 +7439,10 @@ namespace winrt::TerminalApp::implementation
             // which both call ShowBellIndicator(false) when the tab gains focus.
             // The BellIndicator setter short-circuits when already false, so this is
             // cheap for the common no-bell case. The per-tab dismiss TIMER is owned
-            // by the WorkspaceView (the bell-subscription owner); it observes the VM
-            // becoming active and stops the timer there.
+            // by the WorkspaceView (the bell-subscription owner) and is NOT stopped
+            // here — nothing observes the VM becoming active. The timer simply keeps
+            // running and, when it later ticks, clears the (already-cleared)
+            // indicator as an idempotent false→false no-op before stopping itself.
             if (active)
             {
                 vm.BellIndicator(false);

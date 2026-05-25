@@ -138,15 +138,21 @@ namespace winrt::TerminalApp::implementation
         // — mirroring the classic Tab's bell handler (Tab.cpp:1137, a
         // safe_void_coroutine that co_awaits wil::resume_foreground(dispatcher)).
         // The handler captures the page WEAKLY (never keeps it alive) and the TabId
-        // by value; it re-resolves the VM by id each fire. On bell, ONLY when
-        // args.SendNotification() (mirrors Tab.cpp:1154's notification gate) and the
-        // VM is not already showing a bell, we set BellIndicator(true) and
-        // start/restart the per-tab dismiss timer. The revoker overwrites any prior
+        // by value; it re-resolves the VM by id each fire. On bell, we set
+        // BellIndicator(true) UNCONDITIONALLY and start/restart the per-tab dismiss
+        // timer — mirroring classic Tab.cpp:1160 (ShowBellIndicator(true)), which
+        // lights the tab indicator on EVERY bell regardless of the notification
+        // request. (args.SendNotification() only gates the classic toast at
+        // Tab.cpp:1154 → TabToastNotificationRequested; the default audible bell
+        // does NOT set the Notification flag, so gating the indicator on it would
+        // hide the bell for the default config.) The revoker overwrites any prior
         // one for this tab (a re-mount auto-revokes the old subscription) and is
         // dropped by _unbindTabTitle on teardown, so the handler never fires after
         // the tab is gone. Note: the classic FlashTaskbar / toast-notification
         // bubbling is out of scope for the strip projection (no per-pane-tab toast
-        // surface yet) — only the in-strip indicator is wired here.
+        // surface yet) — only the in-strip indicator is wired here. When such a
+        // surface is added it would be gated on args.SendNotification(); the
+        // indicator must NOT be.
         //
         // LIFETIME: the handler captures `this` (the WorkspaceView) raw, guarded
         // by the weak page. The page OWNS the WorkspaceView, so a resolved
@@ -159,9 +165,11 @@ namespace winrt::TerminalApp::implementation
             winrt::auto_revoke,
             [this, weakPage = _owner, tabId](const winrt::TerminalApp::IPaneContent& /*sender*/, const winrt::TerminalApp::BellEventArgs& bellArgs) -> safe_void_coroutine {
                 // Read the args BEFORE the co_await (the args may not outlive a
-                // suspension).
+                // suspension). SendNotification is read only to document the future
+                // toast/taskbar gate — it does NOT gate the indicator (see below).
                 const auto weakPageCopy = weakPage;
                 const bool sendNotification = bellArgs ? bellArgs.SendNotification() : false;
+                (void)sendNotification;
 
                 auto strongPage = weakPageCopy.get();
                 if (!strongPage)
@@ -181,14 +189,11 @@ namespace winrt::TerminalApp::implementation
                     }
                 }
 
-                // Mirror classic Tab.cpp:1154 — only raise the indicator when the
-                // bell asked for a notification (an audible/visible bell without a
-                // notification request does not light the tab).
-                if (!sendNotification)
-                {
-                    co_return;
-                }
-
+                // Mirror classic Tab.cpp:1160 ShowBellIndicator(true) — light the
+                // indicator on EVERY bell, regardless of args.SendNotification().
+                // (SendNotification gates only the classic toast at Tab.cpp:1154,
+                // and the default audible bell never sets it.)
+                //
                 // Set the indicator (idempotent — the VM setter short-circuits if
                 // already showing) and (re)start the per-tab dismiss timer. A null
                 // VM means the tab's strip row is gone (pruned / never projected):
