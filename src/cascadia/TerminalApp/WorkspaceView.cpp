@@ -61,22 +61,33 @@ namespace winrt::TerminalApp::implementation
         _unbindTabTitle(tabId);
     }
 
-    // Live pane-tab title (#54): bind the strip VM for `tabId` to follow the
-    // mounted content's title. We push content.Title() into the VM NOW, then
-    // subscribe to content.TitleChanged so each later change re-pushes the
-    // content's current title — mirroring the classic Tab (Tab::_GetActiveTitle
-    // / _AttachEventHandlersToContent), which reads content.Title() directly and
+    // Live pane-tab chrome (#54): bind the strip VM for `tabId` to follow the
+    // mounted content's title AND background. We push content.Title() and
+    // content.BackgroundBrush() into the VM NOW, then subscribe to
+    // content.TitleChanged so each later change re-pushes the content's current
+    // title — mirroring the classic Tab (Tab::_GetActiveTitle /
+    // _AttachEventHandlersToContent), which reads content.Title() directly and
     // stores a TitleChanged auto-revoker per content.
+    //
+    // Slice 2a.2 (#54): the BACKGROUND piggybacks on the SAME TitleChanged
+    // subscription. IPaneContent exposes NO BackgroundBrushChanged event, and
+    // standing up a new event surface / revoker just for the bg is out of scope.
+    // The terminal background changes rarely (settings reload / OSC-11 / acrylic
+    // toggle) and the title-change cadence is more than frequent enough to
+    // re-pull it cheaply — so each TitleChanged fire also re-reads and re-pushes
+    // BackgroundBrush(). (A future refinement could hook content.TabColorChanged
+    // for a tighter signal; not needed here.) No new revoker map, no new event.
     //
     // Lifetime: the handler captures the page WEAKLY (it must never keep the
     // page alive) and the TabId by value; it re-resolves the VM by id each fire
-    // (TerminalPage::_setPaneTabTitleForTab) so it never holds a strong or
-    // dangling VM ref. The auto-revoker is stored in _tabTitleRevokers keyed by
-    // tabId; _removeContentForTab revokes it on teardown and clearing the map on
-    // view destruction revokes the rest, so no handler outlives its tab/view.
-    // Re-binding an already-bound tab (a re-mount of the same id) overwrites its
-    // revoker, auto-revoking the prior subscription — never a duplicate.
-    void WorkspaceView::_bindTabTitleToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content)
+    // (TerminalPage::_setPaneTab{Title,Background}ForTab) so it never holds a
+    // strong or dangling VM ref. The auto-revoker is stored in _tabTitleRevokers
+    // keyed by tabId; _removeContentForTab revokes it on teardown and clearing
+    // the map on view destruction revokes the rest, so no handler outlives its
+    // tab/view. Re-binding an already-bound tab (a re-mount of the same id)
+    // overwrites its revoker, auto-revoking the prior subscription — never a
+    // duplicate.
+    void WorkspaceView::_bindTabChromeToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content)
     {
         if (!tabId.valid() || !content)
         {
@@ -89,11 +100,13 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Seed the current title immediately (the content already has its
-        // initial title at mount; TitleChanged only fires on subsequent changes).
+        // Seed the current title + background immediately (the content already
+        // has both at mount; TitleChanged only fires on subsequent changes).
         page->_setPaneTabTitleForTab(tabId, content.Title());
+        page->_setPaneTabBackgroundForTab(tabId, content.BackgroundBrush());
 
         // Subscribe; overwrite any prior revoker for this tab (auto-revokes it).
+        // The bg piggybacks here — see the function comment for why.
         _tabTitleRevokers[tabId] = content.TitleChanged(
             winrt::auto_revoke,
             [weakPage = _owner, tabId](const winrt::TerminalApp::IPaneContent& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
@@ -103,6 +116,7 @@ namespace winrt::TerminalApp::implementation
                     return;
                 }
                 strongPage->_setPaneTabTitleForTab(tabId, sender.Title());
+                strongPage->_setPaneTabBackgroundForTab(tabId, sender.BackgroundBrush());
             });
     }
 
@@ -852,16 +866,18 @@ namespace winrt::TerminalApp::implementation
         {
             _contentByTab[c.tabId] = c.contentId;
 
-            // Live pane-tab title (#54): the TabAdded arm (which ran before this
+            // Live pane-tab chrome (#54): the TabAdded arm (which ran before this
             // ContentMounted) already appended this tab's strip VM, so the VM
-            // exists now. Bind its Title to the live content: seed it from
-            // content.Title() and subscribe to TitleChanged so the row label
-            // tracks the running terminal's title (the classic tab showed e.g.
-            // "Administrator: Command Prompt"; before this the strip showed the
-            // static "Tab" placeholder). The revoker is stored per tab and
-            // revoked on content teardown / view destruction — see
-            // _bindTabTitleToContent.
-            _bindTabTitleToContent(c.tabId, live);
+            // exists now. Bind its Title AND background to the live content: seed
+            // both from content.Title()/BackgroundBrush() and subscribe to
+            // TitleChanged so the row label tracks the running terminal's title
+            // (the classic tab showed e.g. "Administrator: Command Prompt";
+            // before this the strip showed the static "Tab" placeholder) and the
+            // selected tab's connected background tracks the live terminal bg
+            // (Slice 2a.2 — fixes the inverted selected tab). The revoker is
+            // stored per tab and revoked on content teardown / view destruction —
+            // see _bindTabChromeToContent.
+            _bindTabChromeToContent(c.tabId, live);
 
             // Big-flip Slice E (#54): record the workspace -> contents reverse
             // index so apply(WorkspaceRemoved) can tear down every content a

@@ -7414,6 +7414,49 @@ namespace winrt::TerminalApp::implementation
         return nullptr;
     }
 
+    // Slice 2a.2 (#54): set the strip VM whose stable Id matches `tab` to carry
+    // the content's background COLOR. Mirrors _setPaneTabTitleForTab exactly:
+    // resolve the VM across ALL leaf strips by id identity (the ContentMounted
+    // arm carries only a TabId), set the VM's Background, and return the matching
+    // VM (empty when none). The selected pane-tab's connected background x:Binds
+    // to this so the active tab merges into the terminal content the way the
+    // classic WT focused tab does ("tab.background = terminalBackground").
+    //
+    // We EXTRACT the color from `contentBrush` and build a FRESH SolidColorBrush
+    // — we never store/share the content's own brush, which may be acrylic
+    // (classic does the same, Tab.cpp: ColorFromBrush then a flat tab color —
+    // "we don't really want to have the tab items themselves be acrylic"). When
+    // `contentBrush` is null (no live brush yet) we set the VM Background to
+    // null (the Border renders neutral) — we must NOT call ColorFromBrush on a
+    // null brush (it dereferences the brush).
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabBackgroundForTab(::WorkspaceModel::TabId tab, const winrt::Windows::UI::Xaml::Media::Brush& contentBrush)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+
+        Media::Brush brush{ nullptr };
+        if (contentBrush != nullptr)
+        {
+            const til::color color{ ThemeColor::ColorFromBrush(contentBrush) };
+            brush = Media::SolidColorBrush{ static_cast<winrt::Windows::UI::Color>(color) };
+        }
+
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.Background(brush);
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     // Big-flip Slice C (#54): flip the strip's active row to the tab at model
     // index `idx` in `leaf`, and return the TabId now made active. The strip
     // holds one VM per model tab in declared order, so `idx` indexes it
@@ -7482,6 +7525,26 @@ namespace winrt::TerminalApp::implementation
             return std::nullopt;
         }
         return it->second.GetAt(0).Title();
+    }
+
+    // Slice 2a.2 (#54): the background COLOR of the first VM in `leaf`'s strip,
+    // or nullopt when the leaf has no strip / the VM's Background is unset (the
+    // pre-mount state). Extracts the color from the VM's projected
+    // SolidColorBrush so a test can assert the projection followed the content's
+    // bg (no rendering, no layout pass). Mirrors _paneTabStripFirstTitleForTest.
+    std::optional<til::color> TerminalPage::_paneTabStripFirstBackgroundForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end() || it->second.Size() == 0)
+        {
+            return std::nullopt;
+        }
+        const auto brush = it->second.GetAt(0).Background();
+        if (brush == nullptr)
+        {
+            return std::nullopt;
+        }
+        return til::color{ ThemeColor::ColorFromBrush(brush) };
     }
 
     // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane

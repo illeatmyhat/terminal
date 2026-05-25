@@ -214,6 +214,15 @@ namespace TerminalAppLocalTests
         // SetTitle() helper. The classic path is untouched.
         TEST_METHOD(LivePaneTabTitle_TracksContentTitleChanged);
 
+        // Slice 2a.2 (#54): the selected pane-tab's connected background tracks
+        // the mounted content's live background color (the faithful classic WT
+        // "tab.background = terminalBackground" behavior). On ContentMounted the
+        // VM's Background is seeded from content.BackgroundBrush(); a later
+        // content bg change is re-pulled on the NEXT TitleChanged (the bg
+        // piggybacks on the title subscription — IPaneContent has no bg-changed
+        // event). Proves both the mount-seed and the title-cadence refresh.
+        TEST_METHOD(LivePaneTabBackground_TracksContentBackground);
+
         // Big-flip Slice D (#54): the active workspace's SPLIT pane tree is
         // projected into nested XAML inside the still-Collapsed
         // WorkspaceContentHost — a split Grid (two star-sized cells along the
@@ -450,7 +459,18 @@ namespace TerminalAppLocalTests
         bool ReadOnly() { return false; }
         winrt::hstring Icon() { return {}; }
         winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> TabColor() const noexcept { return nullptr; }
-        winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush() { return nullptr; }
+
+        // Slice 2a.2 (#54): a settable background brush so a test can drive the
+        // selected pane-tab background projection. IPaneContent exposes NO
+        // background-changed event — the strip's bg refresh piggybacks on
+        // TitleChanged — so to simulate the live terminal bg changing, set this
+        // then call SetTitle() (which raises TitleChanged). Defaults to null
+        // (preserves existing tests that expect no bg).
+        winrt::Windows::UI::Xaml::Media::Brush BackgroundBrush() { return _backgroundBrush; }
+        void SetBackgroundBrush(winrt::Windows::UI::Xaml::Media::Brush brush)
+        {
+            _backgroundBrush = std::move(brush);
+        }
         winrt::Microsoft::Terminal::Settings::Model::INewContentArgs GetNewTerminalArgs(winrt::TerminalApp::BuildStartupKind) { return nullptr; }
         void Focus(winrt::Windows::UI::Xaml::FocusState) {}
         void Close() { ++_closeCount; }
@@ -460,6 +480,7 @@ namespace TerminalAppLocalTests
         int _closeCount{ 0 };
         winrt::Windows::UI::Xaml::Controls::Grid _root{ nullptr };
         winrt::hstring _title{ L"mock" };
+        winrt::Windows::UI::Xaml::Media::Brush _backgroundBrush{ nullptr };
     };
 
     // Mirror of TabTests::_initializeTerminalPage, but seeds the
@@ -4665,6 +4686,99 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(updated.has_value());
             VERIFY_ARE_EQUAL(winrt::hstring{ L"Administrator: Command Prompt" }, *updated,
                              L"the strip VM title must follow content.TitleChanged to the new live title");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 2a.2 (#54): the selected pane-tab's connected background tracks the
+    // mounted content's live background COLOR — the faithful classic WT behavior
+    // ("tab.background = terminalBackground", Tab::_RecalculateAndApplyTabColor)
+    // that fixes the inverted selected tab (Slice 2a.1 had bound a static brush
+    // that floated up at #333333 instead of merging down into the #0C0C0C
+    // content). The factory hands out a MockPaneContent; we set its
+    // BackgroundBrush to RED before the startup tab's content mounts during
+    // Create(), so the root leaf's first strip VM's Background must be seeded to
+    // RED at mount. We then change the mock's brush to BLUE and raise a title
+    // change (SetTitle) — the bg has no dedicated event, so it re-pulls on the
+    // TitleChanged subscription — and the VM's Background must follow to BLUE.
+    // The page extracts the COLOR and builds a FRESH SolidColorBrush, so the
+    // assertion compares colors (til::color), not brush identity.
+    //
+    // RED before the wiring: the VM's Background is null and never moves off it.
+    // GREEN after: it equals the content's bg color at mount and follows every
+    // TitleChanged-driven refresh. The classic path is untouched.
+    void WorkspaceTests::LivePaneTabBackground_TracksContentBackground()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        const winrt::Windows::UI::Color red{ 255, 255, 0, 0 };
+        const winrt::Windows::UI::Color blue{ 255, 0, 0, 255 };
+
+        // The factory sets each handed-out mock's bg to RED immediately, BEFORE
+        // it is returned to the registry's EnsureMounted — so the startup tab's
+        // content already carries RED at the moment the ContentMounted arm seeds
+        // the strip VM's Background from it.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks, red](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks, red](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xB000 + mocks->size()));
+                mock->SetBackgroundBrush(Media::SolidColorBrush{ red });
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf's strip has one VM (the first tab)");
+
+            // The startup tab's content mounted during Create(), so exactly one
+            // mock was handed out (and its bg was seeded into the VM at mount).
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"the startup tab's content must have mounted (one mock)");
+
+            const auto seeded = page->_paneTabStripFirstBackgroundForTest(leaf0);
+            VERIFY_IS_TRUE(seeded.has_value(),
+                           L"the strip VM Background must be seeded from content.BackgroundBrush() at mount (not null)");
+            VERIFY_ARE_EQUAL(til::color{ red }, *seeded,
+                             L"the strip VM Background color must equal the mock content's bg color (red) at mount");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Change the content bg to blue, then raise TitleChanged to drive the bg refresh");
+        result = RunOnUIThread([&]() {
+            (*mocks)[0]->SetBackgroundBrush(Media::SolidColorBrush{ blue });
+            // The bg has no dedicated event; the refresh piggybacks on the
+            // TitleChanged subscription. SetTitle raises TitleChanged.
+            (*mocks)[0]->SetTitle(L"x");
+
+            const auto updated = page->_paneTabStripFirstBackgroundForTest(leaf0);
+            VERIFY_IS_TRUE(updated.has_value());
+            VERIFY_ARE_EQUAL(til::color{ blue }, *updated,
+                             L"the strip VM Background color must follow the content's new bg (blue) on the TitleChanged-driven refresh");
         });
         VERIFY_SUCCEEDED(result);
     }

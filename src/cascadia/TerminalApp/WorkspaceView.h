@@ -129,19 +129,24 @@ namespace winrt::TerminalApp::implementation
         // removal arms. A no-op when the tab had no mounted content.
         void _removeContentForTab(::WorkspaceModel::TabId tabId);
 
-        // Live pane-tab title (#54): bind the strip VM for `tabId` to follow the
-        // mounted content's title. Sets the VM's Title to content.Title() now,
+        // Live pane-tab chrome (#54): bind the strip VM for `tabId` to follow the
+        // mounted content's title AND background. Sets the VM's Title to
+        // content.Title() and its Background to content.BackgroundBrush() now,
         // then subscribes to content.TitleChanged so every later title change
-        // re-pushes content.Title() into the VM — mirroring how the classic Tab
-        // derives its title from content.Title(). The TitleChanged revoker is
-        // stored in _tabTitleRevokers keyed by tabId and revoked by
-        // _unbindTabTitle (on TabRemoved / WorkspaceRemoved content teardown and
-        // page teardown), so the handler never fires after the tab is gone. The
-        // handler captures the page WEAKLY (never keeps the page alive) and
-        // re-resolves the VM by id each fire (never holds a strong/dangling VM
-        // ref); a re-mount of an already-bound tab replaces its revoker (auto-
-        // revoking the prior one) so the subscription is never duplicated.
-        void _bindTabTitleToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content);
+        // re-pushes BOTH content.Title() and content.BackgroundBrush() into the
+        // VM — mirroring how the classic Tab derives its title from
+        // content.Title(). Slice 2a.2 (#54): the background piggybacks on the
+        // TitleChanged subscription because IPaneContent has no
+        // BackgroundBrushChanged event and the bg changes rarely (a new event
+        // surface/revoker is out of scope). The TitleChanged revoker is stored in
+        // _tabTitleRevokers keyed by tabId and revoked by _unbindTabTitle (on
+        // TabRemoved / WorkspaceRemoved content teardown and page teardown), so
+        // the handler never fires after the tab is gone. The handler captures the
+        // page WEAKLY (never keeps the page alive) and re-resolves the VM by id
+        // each fire (never holds a strong/dangling VM ref); a re-mount of an
+        // already-bound tab replaces its revoker (auto-revoking the prior one) so
+        // the subscription is never duplicated.
+        void _bindTabChromeToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content);
 
         // Revoke + drop the TitleChanged subscription for `tabId` (if any). A
         // no-op when the tab had no live-title binding. Called by the content-

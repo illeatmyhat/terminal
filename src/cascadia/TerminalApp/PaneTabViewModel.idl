@@ -51,5 +51,15 @@ namespace TerminalApp
         // null (the intent carries no payload beyond Id).
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> ActivateRequested;
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> CloseRequested;
+
+        // Slice 2a.2 (#54): the live content background COLOR, projected as a
+        // fresh non-acrylic SolidColorBrush. The SELECTED pane-tab's connected
+        // background x:Binds to this (OneWay) so the active tab merges into the
+        // terminal content exactly like the classic WT focused tab (which sets
+        // "tab.background = terminalBackground"). A pure downstream projection of
+        // the mounted content — the VM never reads it back from the model.
+        // APPENDED LAST: inserting a property mid-runtimeclass shifts vtable
+        // slots and trips the /RTCs "Stack around 'value' corrupted" trap.
+        Windows.UI.Xaml.Media.Brush Background { get; set; };
     }
 }

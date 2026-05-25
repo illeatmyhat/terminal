@@ -79,6 +79,18 @@ namespace winrt::TerminalApp::implementation
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, IsActive, PropertyChanged.raise);
+
+        // Slice 2a.2 (#54): the live content background COLOR, carried as a FRESH
+        // non-acrylic SolidColorBrush (the page extracts the color from the
+        // mounted IPaneContent's BackgroundBrush() and builds this brush — it
+        // never shares the content's own brush, which may be acrylic). The
+        // SELECTED tab's connected background x:Binds to this OneWay, so the
+        // active pane-tab merges into the terminal content the way the classic WT
+        // focused tab does ("tab.background = terminalBackground"). A pure
+        // projection of the mounted content; nullptr until ContentMounted seeds
+        // it (the Border then renders neutral/transparent, never the old inverted
+        // floating fill).
+        WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, Background, PropertyChanged.raise, nullptr);
     };
 }
 

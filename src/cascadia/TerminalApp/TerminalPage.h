@@ -888,6 +888,20 @@ namespace winrt::TerminalApp::implementation
         // (empty when none) so the caller can verify the bind without a re-scan.
         winrt::TerminalApp::PaneTabViewModel _setPaneTabTitleForTab(::WorkspaceModel::TabId tab, const winrt::hstring& title);
 
+        // Slice 2a.2 (#54): set the strip VM whose stable Id matches `tab` to
+        // carry the content's background COLOR (resolving the VM across ALL leaf
+        // strips by id, like _setPaneTabTitleForTab — the ContentMounted arm
+        // carries only a TabId). EXTRACTS the color from `contentBrush` and
+        // builds a FRESH non-acrylic SolidColorBrush (never shares the content's
+        // own, possibly-acrylic brush — classic does the same in
+        // Tab::_RecalculateAndApplyTabColor). When `contentBrush` is null the VM
+        // Background is set to null (we must not call ColorFromBrush on null).
+        // The selected pane-tab's connected background x:Binds to this OneWay so
+        // the active tab merges into the terminal content like the classic WT
+        // focused tab ("tab.background = terminalBackground"). A no-op when no
+        // strip holds the tab. Returns the matching VM (empty when none).
+        winrt::TerminalApp::PaneTabViewModel _setPaneTabBackgroundForTab(::WorkspaceModel::TabId tab, const winrt::Windows::UI::Xaml::Media::Brush& contentBrush);
+
         // Big-flip Slice C (#54): flip the strip's active row to the tab at
         // model index `idx` in `leaf` (ActiveTabChanged carries the leaf + the
         // new activeTabIdx). The strip collection holds one VM per model tab in
@@ -911,6 +925,10 @@ namespace winrt::TerminalApp::implementation
         [[nodiscard]] uint32_t _paneTabStripSizeForTest(::WorkspaceModel::PaneId leaf) const;
         [[nodiscard]] std::optional<uint64_t> _activePaneTabIdForTest(::WorkspaceModel::PaneId leaf) const;
         [[nodiscard]] std::optional<winrt::hstring> _paneTabStripFirstTitleForTest(::WorkspaceModel::PaneId leaf) const;
+        // Slice 2a.2 (#54): the background COLOR of the first strip VM (nullopt
+        // when no strip / the VM's Background is unset). Lets a test assert the
+        // selected-tab background projection follows the mounted content's bg.
+        [[nodiscard]] std::optional<til::color> _paneTabStripFirstBackgroundForTest(::WorkspaceModel::PaneId leaf) const;
 
         // The per-leaf observable tab-strip view-models, keyed by the leaf's
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf

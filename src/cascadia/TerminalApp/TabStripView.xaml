@@ -12,13 +12,20 @@
     (packages\Microsoft.UI.Xaml.2.8.4 Generic.xaml +
     dev/TabView/TabView_themeresources.xaml).
 
-    Slice 2a.1 (#54) follow-up — match the CLASSIC WT tab strip exactly:
+    Slice 2a.1/2a.2 (#54) follow-up — match the CLASSIC WT tab strip exactly:
       (1) The selected tab is marked by a CONNECTED BACKGROUND SHAPE (a
-          rounded-top fill in the content/region layer color that merges into
-          the content area below), NOT a bottom accent bar. Slice 2a's bottom
-          accent underline was removed; the selected fill key was remapped from
-          a lighter floating fill to the classic connected region color
-          (LayerOnMicaBaseAltFillColorDefaultBrush — see the brush block below).
+          rounded-top fill that merges into the content area below), NOT a
+          bottom accent bar. Slice 2a's bottom accent underline was removed.
+          Slice 2a.2: that fill is the LIVE TERMINAL BACKGROUND COLOR, projected
+          per-tab through PaneTabViewModel.Background (x:Bind in the item
+          template) — exactly how the classic WT focused tab is painted
+          "tab.background = terminalBackground" (Tab::_RecalculateAndApplyTabColor).
+          Slice 2a.1 had bound a STATIC LayerOnMicaBaseAltFillColorDefaultBrush
+          here under the false premise that it equals the content surface; it
+          does NOT (measured: it floated up at #333333, lighter than the strip,
+          vs the classic #0C0C0C that merges down). A static theme brush can
+          never match an arbitrary profile's background, so the static
+          selected-fill key was removed from the brush block below.
       (2) Light-theme contrast fix: the foreground helper now resolves the
           theme-aware Text* brushes correctly (it had been falling through to a
           white fallback in BOTH themes — correct-by-accident in Dark, faint in
@@ -74,16 +81,14 @@
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
                     <!--
-                        Slice 2a.1 (#54): the CLASSIC selected-tab fill. The WinUI
-                        2.8 TabViewItem's TabViewItemHeaderBackgroundSelected maps
-                        to LayerOnMicaBaseAltFillColorDefaultBrush — the content /
-                        region layer color, the SAME surface the content area
-                        below the strip paints. That is what makes the selected
-                        tab read as a CONNECTED card merging into the content
-                        (vs. Slice-2a's SolidBackgroundFillColorTertiaryBrush,
-                        which was merely a lighter floating fill). No accent bar.
+                        Slice 2a.2 (#54): there is NO static selected-tab fill key
+                        anymore. The selected fill is the LIVE terminal background
+                        COLOR, projected per-tab through PaneTabViewModel.Background
+                        (x:Bind in the item template), the same way the classic WT
+                        focused tab is painted "tab.background = terminalBackground".
+                        A static theme brush can never match an arbitrary profile's
+                        background, so PaneTabHeaderBackgroundSelected was removed.
                     -->
-                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
@@ -93,8 +98,7 @@
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
-                    <!--  Slice 2a.1 (#54): classic connected selected fill (see Default).  -->
-                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
+                    <!--  Slice 2a.2 (#54): no static selected fill — it's the live content bg color via PaneTabViewModel.Background (see Default).  -->
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="DividerStrokeColorDefaultBrush" />
@@ -105,12 +109,14 @@
                     <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="SystemColorHighlightColorBrush" />
                     <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="SystemColorHighlightColorBrush" />
                     <!--
-                        Slice 2a.1 (#54): HighContrast selected fill = the window
-                        surface color (the content layer in HC), so the selected
-                        tab connects to content as in the themed cases. Foreground
-                        stays the window-text color for max contrast on it.
+                        Slice 2a.2 (#54): no static selected fill in HighContrast
+                        either. The selected tab's fill is the live content
+                        background color projected through PaneTabViewModel.Background
+                        (see Default) — in HC the terminal's own bg already tracks
+                        the HC scheme, so the selected tab still connects to the
+                        content. Foreground stays the window-text color for max
+                        contrast on it.
                     -->
-                    <StaticResource x:Key="PaneTabHeaderBackgroundSelected" ResourceKey="SystemColorWindowColorBrush" />
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="SystemColorGrayTextColorBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="SystemColorWindowTextColorBrush" />
                     <StaticResource x:Key="PaneTabSeparator" ResourceKey="SystemColorWindowTextColorBrush" />
@@ -277,26 +283,40 @@
                 <Grid MinHeight="{StaticResource PaneTabItemMinHeight}"
                       Tapped="{x:Bind RequestActivate}">
                     <!--
-                        Slice 2a.1 (#54): the CONNECTED selected-tab background —
-                        the rounded-top tab fill shown only when this VM IsActive.
-                        This IS the selected cue (the classic TabViewItem look);
-                        there is NO separate bottom accent bar. It paints the
-                        content/region layer color (PaneTabHeaderBackgroundSelected
-                        -> LayerOnMicaBaseAltFillColorDefaultBrush) so it reads as
-                        the same surface as the content area below, and it
-                        extends to the very bottom of the row (only a 1px top
-                        inset for the rounded top) so it OVERPAINTS the container
-                        template's BottomBorderLine — the selected tab therefore
-                        has no border line beneath it and visually MERGES into the
-                        content. Substitutes the TabViewItem's SelectedBackgroundPath
-                        (whose TabGeometry needs the TabView TemplateSettings we
-                        don't have on a bare ListViewItem). x:Name'd so headless
-                        TAEF can assert its presence + IsActive-driven visibility
-                        without a layout pass.
+                        Slice 2a.1/2a.2 (#54): the CONNECTED selected-tab
+                        background — the rounded-top tab fill shown only when this
+                        VM IsActive. This IS the selected cue (the classic
+                        TabViewItem look); there is NO separate bottom accent bar.
+                        Slice 2a.2: its fill is the LIVE TERMINAL BACKGROUND COLOR,
+                        projected through PaneTabViewModel.Background (a fresh
+                        non-acrylic SolidColorBrush the page extracts from the
+                        mounted content's BackgroundBrush(), refreshed via the
+                        title-cadence subscription). This is the faithful classic
+                        WT behavior — the focused tab is painted with
+                        "tab.background = terminalBackground"
+                        (Tab::_RecalculateAndApplyTabColor) — so the selected tab
+                        reads as the SAME surface as the content area below and
+                        merges DOWN into it. (Slice 2a.1 wrongly bound a STATIC
+                        LayerOnMicaBaseAltFillColorDefaultBrush here under the false
+                        premise that it equals the content surface; it does not —
+                        it floated UP, lighter than the strip. That static key is
+                        now dead for the selected fill.) The Border extends to the
+                        very bottom of the row (only a 1px top inset for the
+                        rounded top) so it OVERPAINTS the container template's
+                        BottomBorderLine — the selected tab has no border line
+                        beneath it. Substitutes the TabViewItem's
+                        SelectedBackgroundPath (whose TabGeometry needs the TabView
+                        TemplateSettings we don't have on a bare ListViewItem).
+                        Pre-mount the Background binding is null (the tab not yet
+                        mounted) and the Border renders transparent/neutral until
+                        ContentMounted seeds it — immediate in practice for the
+                        active tab, and NOT the old inverted floating look.
+                        x:Name'd so headless TAEF can assert its presence +
+                        IsActive-driven visibility without a layout pass.
                     -->
                     <Border x:Name="SelectedBackground"
                             Margin="0,1,0,0"
-                            Background="{ThemeResource PaneTabHeaderBackgroundSelected}"
+                            Background="{x:Bind Background, Mode=OneWay}"
                             CornerRadius="{ThemeResource ControlCornerRadius}"
                             Visibility="{x:Bind local:PaneTabViewModel.ActiveToVisibility(IsActive), Mode=OneWay}" />
 
