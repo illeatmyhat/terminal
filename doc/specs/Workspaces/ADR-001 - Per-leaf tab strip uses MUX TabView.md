@@ -107,7 +107,7 @@ These three claims are load-bearing for the slicing and were re-confirmed agains
    `{ id, description, mount (ContentId), customTitle, runtimeColor, pinned }`. `customTitle`
    (rename) and `runtimeColor` (color) **exist** → M2 / M4 are model-ready. There is **no
    bell/attention field** and **no tear-out/new-window action** in `WorkspaceModel` → M3 and M8
-   genuinely require model additions.
+   genuinely require model additions (M3 was later refined to VM-runtime — see the M3 row).
 
 ---
 
@@ -117,7 +117,7 @@ These three claims are load-bearing for the slicing and were re-confirmed agains
 |------|------|--------------|
 | **M1** | MUX `TabView` shell. Manual `TabItems` mirroring classic WT (empty-`Border` drag-identity bodge; on UI thread; **append** IDL rows). Imperative selection: push `SelectedItem` from the `ActiveTabChanged` diff; `SelectionChanged` → `ActivateRequested` intent + **reentrancy guard**; `TabCloseRequested` → `CloseRequested` intent. **Drag OFF** (`CanReorderTabs` / `CanDragTabs` / `AllowDropTabs` = false). Native chrome / icon / tooltip replace the bespoke re-skin (delete the "RECONCILE BEFORE UPSTREAM" brush block + the hand-built shape / hover / separator). **First action: revert the uncommitted 2a.5 + the CRLF churn.** Foundational. | ready |
 | **M2** | Rename — reuse `TabHeaderControl`; `TitleChangeRequested` → `setTabTitle`. | ready (`customTitle`) |
-| **M3** | Bell — **model gap**: add a `TabRecord` field + `setBellState` action + projection arm; hook `IPaneContent.BellRequested`; render via `TabStatus.BellIndicator`. | needs addition |
+| **M3** | Bell — **DONE, refined to VM-runtime (NOT a model field).** A bell is ephemeral content-emitted attention with no user override, so it is projected onto `PaneTabViewModel` directly (like M2's live title) rather than added to `TabRecord` + a `setBellState` action — putting a transient in the replayable model is a category error (independently reviewer-endorsed). Hook `IPaneContent.BellRequested` (off-thread → marshaled), per-tab dismiss timer + dismiss-on-focus, render via the header `TabStatus.BellIndicator`. Indicator lights unconditionally (`Tab.cpp:1160`); `SendNotification` gates only the (unwired) toast. | done — no model change |
 | **M4** | Color flyout — reuse `ColorPickupFlyout`; re-route `ColorSelected` / `ColorCleared` → `setTabColor` / reset (refactor the event wiring off `Tab::SetRuntimeTabColor`). | ready (`runtimeColor`) |
 | **M5** | Context menu — reuse the UI; route clicks by `TabId` intent instead of `_dispatch.DoAction(*this)`. | ready |
 | **M6** | Drag leaf↔leaf (same window) — wire `TabView` drag events → `moveTab` intent; rides the existing `moveTab` + `TabMoved`. Full drag state machine (avoid `0xc000027b`). | ready (`moveTab`) |
