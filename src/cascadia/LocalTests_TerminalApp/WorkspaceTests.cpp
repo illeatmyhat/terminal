@@ -232,6 +232,19 @@ namespace TerminalAppLocalTests
         // Background PropertyChanged, while a genuine color change still does.
         TEST_METHOD(LivePaneTabBackground_NoChurnOnUnchangedColor);
 
+        // Workspaces M1.2 (#54, ADR-001): the live content background COLOR the VM
+        // projects is now CONSUMED by TabStripView::_applyTabColor — a port of
+        // classic Tab::_RecalculateAndApplyTabColor — so the selected tab tracks
+        // the live terminal color (classic WT: the selected tab merges into its
+        // content). This pins the projection at the RESOURCE level (no layout — the
+        // headless std::clamp-resize trap): after the startup content mounts (bg
+        // seeded RED), the leaf's TabViewItem carries a TabViewItemHeaderBackgroundSelected
+        // theme-dictionary resource brush whose color == RED; after the content bg
+        // changes to BLUE (re-pulled on the TitleChanged cadence), the selected-bg
+        // resource brush follows to BLUE. This is the LIVE content color, NOT the
+        // M4 user/model override. The classic path is untouched.
+        TEST_METHOD(LivePaneTabBackground_AppliesSelectedTabColorResource);
+
         // Big-flip Slice D (#54): the active workspace's SPLIT pane tree is
         // projected into nested XAML inside the still-Collapsed
         // WorkspaceContentHost — a split Grid (two star-sized cells along the
@@ -6861,6 +6874,132 @@ namespace TerminalAppLocalTests
             // Cutover invariant: no classic Tab was built.
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"the strip extraction must not create a classic Tab (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M1.2 (#54, ADR-001): the live content color the VM projects is
+    // CONSUMED by TabStripView::_applyTabColor (a port of classic
+    // Tab::_RecalculateAndApplyTabColor) — the selected tab now tracks the live
+    // terminal color. Where LivePaneTabBackground_TracksContentBackground pins the
+    // VM-side projection, THIS test pins the view-side consumption at the resource
+    // level: the leaf's TabViewItem must carry a TabViewItemHeaderBackgroundSelected
+    // theme-dictionary brush whose color matches the live content bg — first RED at
+    // mount, then BLUE after a TitleChanged-driven refresh. RESOURCE level only,
+    // no layout (the headless std::clamp-resize trap). This is the LIVE content
+    // color, NOT the M4 user/model override. (Placed after the namespace-local
+    // _findLeafContainer / _leafTabStripView helper definitions so they are in
+    // scope.)
+    void WorkspaceTests::LivePaneTabBackground_AppliesSelectedTabColorResource()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        const winrt::Windows::UI::Color red{ 255, 255, 0, 0 };
+        const winrt::Windows::UI::Color blue{ 255, 0, 0, 255 };
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks, red](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks, red](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xB000 + mocks->size()));
+                mock->SetBackgroundBrush(Media::SolidColorBrush{ red });
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // Read the TabViewItemHeaderBackgroundSelected resource brush color the
+        // _applyTabColor port wrote into the leaf's first TabViewItem's theme
+        // dictionaries. Mirrors classic Tab::_ApplyTabColorOnUIThread, which writes
+        // the same key into TabViewItem().Resources().ThemeDictionaries() — we read
+        // it back from any present dictionary (all three carry the same selected
+        // brush).
+        const auto readSelectedBgColor = [&](::WorkspaceModel::PaneId leaf) -> std::optional<til::color> {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf);
+            if (!leafContainer)
+            {
+                return std::nullopt;
+            }
+            const auto strip = _leafTabStripView(leafContainer);
+            if (!strip)
+            {
+                return std::nullopt;
+            }
+            const auto tabView = strip.TabViewControl();
+            if (!tabView || tabView.TabItems().Size() == 0)
+            {
+                return std::nullopt;
+            }
+            const auto item = tabView.TabItems().GetAt(0).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+            if (!item)
+            {
+                return std::nullopt;
+            }
+            const auto themeDicts = item.Resources().ThemeDictionaries();
+            const auto key = winrt::box_value(winrt::hstring{ L"TabViewItemHeaderBackgroundSelected" });
+            for (const auto& entry : themeDicts)
+            {
+                if (const auto dict = entry.Value().try_as<winrt::Windows::UI::Xaml::ResourceDictionary>())
+                {
+                    if (dict.HasKey(key))
+                    {
+                        if (const auto brush = dict.Lookup(key).try_as<Media::SolidColorBrush>())
+                        {
+                            return til::color{ brush.Color() };
+                        }
+                    }
+                }
+            }
+            return std::nullopt;
+        };
+
+        result = RunOnUIThread([&]() {
+            VERIFY_ARE_EQUAL(static_cast<size_t>(1), mocks->size(),
+                             L"the startup tab's content must have mounted (one mock)");
+
+            const auto seeded = readSelectedBgColor(leaf0);
+            VERIFY_IS_TRUE(seeded.has_value(),
+                           L"the leaf's TabViewItem must carry a TabViewItemHeaderBackgroundSelected "
+                           L"resource brush (the _applyTabColor port consumed the seeded content bg)");
+            VERIFY_ARE_EQUAL(til::color{ red }, *seeded,
+                             L"the selected-tab background resource must equal the live content bg color (red) at mount");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Change the content bg to blue, then raise TitleChanged to drive the selected-bg resource refresh");
+        result = RunOnUIThread([&]() {
+            (*mocks)[0]->SetBackgroundBrush(Media::SolidColorBrush{ blue });
+            (*mocks)[0]->SetTitle(L"x");
+
+            const auto updated = readSelectedBgColor(leaf0);
+            VERIFY_IS_TRUE(updated.has_value());
+            VERIFY_ARE_EQUAL(til::color{ blue }, *updated,
+                             L"the selected-tab background resource must follow the content's new bg (blue) "
+                             L"on the TitleChanged-driven _applyTabColor refresh");
         });
         VERIFY_SUCCEEDED(result);
     }

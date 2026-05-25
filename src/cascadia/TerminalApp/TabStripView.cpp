@@ -8,6 +8,11 @@
 // (we construct one per TabViewItem to host the reused inline renamer).
 #include "winrt/TerminalApp.h"
 
+// Workspaces M1.2 (#54, ADR-001): luminance-based readable-foreground math for the
+// selected-tab color treatment, ported from classic Tab::_ApplyTabColorOnUIThread.
+// Mirrors Tab.cpp's explicit relative include of the types ColorFix.
+#include "../../types/inc/ColorFix.hpp"
+
 #include "TabStripView.g.cpp"
 
 using namespace winrt;
@@ -307,6 +312,239 @@ namespace winrt::TerminalApp::implementation
             // colored tab icon.
             item.IconSource(Microsoft::Terminal::UI::IconPathConverter::IconSourceMUX(iconPath, false));
         }
+
+        // Workspaces M1.2 (#54, ADR-001): tint the tab to track the LIVE terminal
+        // background color (classic WT: the selected tab background == the terminal
+        // background, so the selected tab merges into its content). vm.Background()
+        // is a FRESH non-acrylic SolidColorBrush projected from the mounted
+        // IPaneContent's BackgroundBrush() (seeded at ContentMounted, refreshed on
+        // TitleChanged); nullptr until seeded → fall back to the native theme.
+        //
+        // This is the LIVE CONTENT color (runtime, like the live Title), NOT a
+        // user-chosen override. A future slice (M4) adds the user-chosen tab color
+        // as a MODEL override (TabRecord.runtimeColor / setTabColor) which will
+        // take precedence here (like customTitle wins over liveTitle); when M4
+        // lands it layers on top of this — read the model override first, fall back
+        // to this live color. Only the live color is wired now.
+        if (const auto bgBrush = vm.Background().try_as<winrt::Windows::UI::Xaml::Media::SolidColorBrush>())
+        {
+            _applyTabColor(item, til::color{ bgBrush.Color() });
+        }
+        else
+        {
+            _clearTabColor(item);
+        }
+    }
+
+    // Workspaces M1.2 (#54, ADR-001): apply the classic color treatment to one
+    // TabViewItem from a runtime color. A FAITHFUL port of classic
+    // Tab::_ApplyTabColorOnUIThread (Tab.cpp ~line 2319): it computes the
+    // selected / deselected / hover / pressed background brushes and a
+    // luminance-based readable FOREGROUND, then writes them as local
+    // per-TabViewItem theme-dictionary resource overrides (the exact same keys
+    // classic sets). This runs on the UI thread — its only callers (_makeTabViewItem
+    // at build time, the PropertyChanged path in _rebuildProjection) are both on
+    // the UI thread; the off-thread content-color source already crossed the
+    // HasThreadAccess()-gated marshaling choke point before reaching here.
+    //
+    // Fidelity note vs classic: classic layers the runtime color over a separate
+    // _tabRowColor for its FONT-luminance decision (color.layer_over(_tabRowColor)).
+    // The per-leaf strip carries no distinct tab-row color, and the live content
+    // color is OPAQUE (extracted via ColorFromBrush → alpha 255), so for the
+    // SELECTED tab layer_over(<anything>) == the color itself — the selected font
+    // math is exact. For the DESELECTED tab classic layers the .3-alpha color over
+    // the tab row; with no tab-row color we layer it over the opaque selected color
+    // (the strip's own backdrop), which is the closest faithful analogue.
+    void TabStripView::_applyTabColor(const MUXC::TabViewItem& item, const til::color& color)
+    {
+        namespace WUXMedia = winrt::Windows::UI::Xaml::Media;
+        using winrt::Windows::UI::Xaml::ResourceDictionary;
+
+        constexpr auto lightnessThreshold = 0.6f;
+
+        WUXMedia::SolidColorBrush selectedTabBrush{};
+        WUXMedia::SolidColorBrush deselectedTabBrush{};
+        WUXMedia::SolidColorBrush fontBrush{};
+        WUXMedia::SolidColorBrush deselectedFontBrush{};
+        WUXMedia::SolidColorBrush secondaryFontBrush{};
+        WUXMedia::SolidColorBrush hoverTabBrush{};
+        WUXMedia::SolidColorBrush subtleFillColorSecondaryBrush{};
+        WUXMedia::SolidColorBrush subtleFillColorTertiaryBrush{};
+
+        // Luminance of the (selected) color picks the close-button fill (classic).
+        if (ColorFix::GetLightness(color) >= lightnessThreshold)
+        {
+            auto subtleFillColorSecondary = winrt::Windows::UI::Colors::Black();
+            subtleFillColorSecondary.A = 0x09;
+            subtleFillColorSecondaryBrush.Color(subtleFillColorSecondary);
+            auto subtleFillColorTertiary = winrt::Windows::UI::Colors::Black();
+            subtleFillColorTertiary.A = 0x06;
+            subtleFillColorTertiaryBrush.Color(subtleFillColorTertiary);
+        }
+        else
+        {
+            auto subtleFillColorSecondary = winrt::Windows::UI::Colors::White();
+            subtleFillColorSecondary.A = 0x0F;
+            subtleFillColorSecondaryBrush.Color(subtleFillColorSecondary);
+            auto subtleFillColorTertiary = winrt::Windows::UI::Colors::White();
+            subtleFillColorTertiary.A = 0x0A;
+            subtleFillColorTertiaryBrush.Color(subtleFillColorTertiary);
+        }
+
+        // The SELECTED-tab font is based on the luminance of the (opaque) color —
+        // classic layers it over _tabRowColor first, which is a no-op for an opaque
+        // color, so this matches classic exactly for the live-content case.
+        if (ColorFix::GetLightness(color) >= lightnessThreshold)
+        {
+            fontBrush.Color(winrt::Windows::UI::Colors::Black());
+            auto secondaryFontColor = winrt::Windows::UI::Colors::Black();
+            secondaryFontColor.A = 0x9E;
+            secondaryFontBrush.Color(secondaryFontColor);
+        }
+        else
+        {
+            fontBrush.Color(winrt::Windows::UI::Colors::White());
+            auto secondaryFontColor = winrt::Windows::UI::Colors::White();
+            secondaryFontColor.A = 0xC5;
+            secondaryFontBrush.Color(secondaryFontColor);
+        }
+
+        selectedTabBrush.Color(color);
+
+        // Deselected = the same color at Opacity .3 (classic: with_alpha(77)). No
+        // theme-override branch here — that path is the M4 user/theme override, not
+        // the live content color.
+        const auto deselectedTabColor = color.with_alpha(77); // 255 * .3
+        deselectedTabBrush.Color(deselectedTabColor.with_alpha(255));
+        deselectedTabBrush.Opacity(deselectedTabColor.a / 255.f);
+
+        hoverTabBrush.Color(color);
+        hoverTabBrush.Opacity(0.6);
+
+        // Deselected font: classic layers the .3 color over _tabRowColor; with no
+        // tab-row color we layer over the opaque selected color (the strip backdrop).
+        const auto deselectedActualColor = deselectedTabColor.layer_over(color);
+        if (ColorFix::GetLightness(deselectedActualColor) >= lightnessThreshold)
+        {
+            deselectedFontBrush.Color(winrt::Windows::UI::Colors::Black());
+        }
+        else
+        {
+            deselectedFontBrush.Color(winrt::Windows::UI::Colors::White());
+        }
+
+        // Empty theme dictionaries so HighContrast can carry its own adjustments
+        // (classic does the same; HC overrides a couple of foreground keys).
+        const auto& tabItemThemeResources{ item.Resources().ThemeDictionaries() };
+        ResourceDictionary lightThemeDictionary;
+        ResourceDictionary darkThemeDictionary;
+        ResourceDictionary highContrastThemeDictionary;
+        tabItemThemeResources.Insert(winrt::box_value(L"Light"), lightThemeDictionary);
+        tabItemThemeResources.Insert(winrt::box_value(L"Dark"), darkThemeDictionary);
+        tabItemThemeResources.Insert(winrt::box_value(L"HighContrast"), highContrastThemeDictionary);
+
+        // The unselected resting background (GH#11382: never null — kills hit test).
+        item.Background(deselectedTabBrush);
+
+        for (const auto& [k, v] : tabItemThemeResources)
+        {
+            const bool isHighContrast = winrt::unbox_value<hstring>(k) == L"HighContrast";
+            const auto& currentDictionary = v.as<ResourceDictionary>();
+
+            // TabViewItem.Background
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackground"), selectedTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundSelected"), selectedTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundPointerOver"), isHighContrast ? fontBrush : hoverTabBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderBackgroundPressed"), selectedTabBrush);
+
+            // TabViewItem.Foreground (aka text)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForeground"), deselectedFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundSelected"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundPointerOver"), isHighContrast ? selectedTabBrush : fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderForegroundPressed"), fontBrush);
+
+            // TabViewItem.CloseButton.Foreground (aka X)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForeground"), deselectedFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForegroundPressed"), isHighContrast ? deselectedFontBrush : secondaryFontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonForegroundPointerOver"), isHighContrast ? deselectedFontBrush : fontBrush);
+
+            // TabViewItem.CloseButton.Foreground _when_ interacting with the tab
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderPressedCloseButtonForeground"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderPointerOverCloseButtonForeground"), isHighContrast ? selectedTabBrush : fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderSelectedCloseButtonForeground"), fontBrush);
+
+            // TabViewItem.CloseButton.Background (aka X button)
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBackgroundPressed"), isHighContrast ? selectedTabBrush : subtleFillColorTertiaryBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBackgroundPointerOver"), isHighContrast ? selectedTabBrush : subtleFillColorSecondaryBrush);
+
+            // A few miscellaneous resources that WinUI said may be removed in the future
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundActiveTab"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundPressed"), fontBrush);
+            currentDictionary.Insert(winrt::box_value(L"TabViewButtonForegroundPointerOver"), fontBrush);
+
+            // BODGY (classic): Insert() throws if the key already exists, so only
+            // add the HC-only border keys in the HC dictionary.
+            if (isHighContrast)
+            {
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushPressed"), fontBrush);
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushPointerOver"), fontBrush);
+                currentDictionary.Insert(winrt::box_value(L"TabViewItemHeaderCloseButtonBorderBrushSelected"), fontBrush);
+            }
+        }
+    }
+
+    // Workspaces M1.2 (#54, ADR-001): clear any tab-color overrides, falling back
+    // to the native TabView theme. A port of classic Tab::_ClearTabBackgroundColor
+    // (Tab.cpp ~line 2501) — removes every key from each theme dictionary and
+    // resets the resting Background to Transparent (GH#11382: NOT null — a null
+    // background is not hit-testable; Transparent is). Used when the VM carries no
+    // content color yet (nullptr Background before ContentMounted seeds it).
+    void TabStripView::_clearTabColor(const MUXC::TabViewItem& item)
+    {
+        static const winrt::hstring keys[] = {
+            L"TabViewItemHeaderBackground",
+            L"TabViewItemHeaderBackgroundSelected",
+            L"TabViewItemHeaderBackgroundPointerOver",
+            L"TabViewItemHeaderBackgroundPressed",
+
+            L"TabViewItemHeaderForeground",
+            L"TabViewItemHeaderForegroundSelected",
+            L"TabViewItemHeaderForegroundPointerOver",
+            L"TabViewItemHeaderForegroundPressed",
+
+            L"TabViewItemHeaderCloseButtonForeground",
+            L"TabViewItemHeaderCloseButtonForegroundPointerOver",
+            L"TabViewItemHeaderCloseButtonForegroundPressed",
+
+            L"TabViewItemHeaderPressedCloseButtonForeground",
+            L"TabViewItemHeaderPointerOverCloseButtonForeground",
+            L"TabViewItemHeaderSelectedCloseButtonForeground",
+
+            L"TabViewItemHeaderCloseButtonBackgroundPressed",
+            L"TabViewItemHeaderCloseButtonBackgroundPointerOver",
+
+            L"TabViewButtonForegroundActiveTab",
+            L"TabViewButtonForegroundPressed",
+            L"TabViewButtonForegroundPointerOver",
+
+            L"TabViewItemHeaderCloseButtonBorderBrushPressed",
+            L"TabViewItemHeaderCloseButtonBorderBrushPointerOver",
+            L"TabViewItemHeaderCloseButtonBorderBrushSelected"
+        };
+
+        const auto& tabItemThemeResources{ item.Resources().ThemeDictionaries() };
+        for (const auto& keyString : keys)
+        {
+            const auto key = winrt::box_value(keyString);
+            for (const auto& [_, v] : tabItemThemeResources)
+            {
+                const auto& themeDictionary = v.as<winrt::Windows::UI::Xaml::ResourceDictionary>();
+                themeDictionary.Remove(key);
+            }
+        }
+
+        // GH#11382: Transparent, not null, so the tab stays hit-testable.
+        item.Background(winrt::Windows::UI::Xaml::Media::SolidColorBrush{ winrt::Windows::UI::Colors::Transparent() });
     }
 
     // Push the active VM into TabView.SelectedItem (model→control), guarded so the

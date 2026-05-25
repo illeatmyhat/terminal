@@ -109,10 +109,12 @@ namespace winrt::TerminalApp::implementation
         // IPaneContent's BackgroundBrush() and builds this brush — it never
         // shares the content's own brush, which may be acrylic). A pure
         // projection of the mounted content; nullptr until ContentMounted seeds
-        // it. (M1: the native MUX TabView themes its selected tab itself; wiring
-        // the selected-tab background to track this content color the classic way
-        // is a DEFERRED SHOULD per ADR-001 — the projection is kept running for
-        // when that lands.) APPENDED LAST — inserting a property mid-runtimeclass
+        // it. (M1.2: TabStripView::_applyTabColor now CONSUMES this — it ports the
+        // classic Tab::_RecalculateAndApplyTabColor treatment so the selected tab
+        // background tracks the live terminal color, computing selected/deselected/
+        // hover brushes + a luminance-based readable foreground as local
+        // TabViewItem theme-dictionary overrides. This is the LIVE content color,
+        // not the M4 user/model override.) APPENDED LAST — inserting a property mid-runtimeclass
         // shifts vtable slots and trips the /RTCs "Stack around 'value'
         // corrupted" trap.
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, Background, PropertyChanged.raise, nullptr);

@@ -81,9 +81,16 @@ namespace winrt::TerminalApp::implementation
         // empty-Border content). UI thread.
         winrt::Microsoft::UI::Xaml::Controls::TabViewItem _makeTabViewItem(const winrt::TerminalApp::PaneTabViewModel& vm);
 
-        // Refresh `item`'s native chrome (header text + icon + tooltip) from
-        // `vm`. Used at build time and on the VM's Title/PropertyChanged.
+        // Refresh `item`'s native chrome (header text + icon + tooltip + color)
+        // from `vm`. Used at build time and on the VM's Title/PropertyChanged.
         void _applyChrome(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
+
+        // Workspaces M1.2 (#54, ADR-001): apply / clear the classic selected-tab
+        // color treatment (ported from Tab::_ApplyTabColorOnUIThread /
+        // _ClearTabBackgroundColor) — local per-TabViewItem theme-dictionary
+        // resource overrides tracking the live terminal background color. UI thread.
+        void _applyTabColor(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const til::color& color);
+        void _clearTabColor(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);
 
         // Push the active VM (the one with IsActive) into TabView.SelectedItem,
         // guarded so the re-fired SelectionChanged is not treated as an intent.
