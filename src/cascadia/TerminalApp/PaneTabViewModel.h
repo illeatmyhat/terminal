@@ -125,6 +125,19 @@ namespace winrt::TerminalApp::implementation
         // reason.
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);
 
+        // Workspaces M3 (#54, ADR-001): the tab BELL/attention indicator —
+        // VM-RUNTIME state, NOT a WorkspaceModel field (an ADR deviation; see the
+        // .idl). The WorkspaceView's IPaneContent.BellRequested subscription sets
+        // this true (off-thread, marshaled to the UI thread via the page);
+        // _setActivePaneTabVm clears it on focus, and a per-tab DispatcherTimer
+        // auto-dismisses it after the classic 2s interval. TabStripView pushes it
+        // onto the hosted TabHeaderControl's TerminalTabStatus.BellIndicator via the
+        // same PropertyChanged path Title/Icon/Background ride. APPENDED LAST for
+        // the vtable-slot reason (matches the .idl append). The
+        // WINRT_OBSERVABLE_PROPERTY setter already short-circuits on an unchanged
+        // value, so re-setting the same state raises no spurious PropertyChanged.
+        WINRT_OBSERVABLE_PROPERTY(bool, BellIndicator, PropertyChanged.raise, false);
+
     private:
         // Workspaces M2 (#54, ADR-001): the two inputs to the computed Title (see
         // the Title()/CustomTitle() accessors above). _liveTitle is the live shell

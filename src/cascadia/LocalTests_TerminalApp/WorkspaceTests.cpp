@@ -10,6 +10,7 @@
 #include "../TerminalApp/ContentManager.h"
 #include "../TerminalApp/ContentRegistry.h"
 #include "../TerminalApp/BasicPaneEvents.h"
+#include "../TerminalApp/TerminalPaneContent.h"
 #include "../TerminalApp/WorkspaceView.h"
 #include "../TerminalApp/WorkspaceViewModel.h"
 #include "../TerminalApp/PaneTabViewModel.h"
@@ -360,6 +361,22 @@ namespace TerminalAppLocalTests
         //    custom title (rename to empty) lets the live title take over again.
         TEST_METHOD(StripM2_Rename_DispatchesSetTabTitle_CustomTitleWins);
 
+        // Workspaces M3 (#54, ADR-001): tab bell/attention as VM-RUNTIME state (an
+        // ADR deviation — NOT a WorkspaceModel field). Pins the bell behaviour at
+        // the VM/projection level (no real gestures/layout — the headless
+        // std::clamp-resize trap):
+        //  - a content BellRequested with SendNotification==true sets the strip
+        //    VM's BellIndicator true AND the hosted header's
+        //    TerminalTabStatus.BellIndicator reflects it;
+        //  - making the tab active (the same _setActivePaneTabVm projection the
+        //    real ActiveTabChanged arm drives) clears BellIndicator (dismiss on
+        //    focus);
+        //  - a BellRequested with SendNotification==false does NOT light the tab
+        //    (mirrors classic Tab.cpp's notification gate).
+        // Driven against a minimal MockPaneContent.RaiseBell() raiser (mirrors the
+        // existing SetTitle title raiser). The classic path is untouched.
+        TEST_METHOD(StripM3_Bell_SetsIndicatorAndDismissesOnFocus);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -477,6 +494,18 @@ namespace TerminalAppLocalTests
         {
             _title = std::move(title);
             TitleChanged.raise(*this, nullptr);
+        }
+
+        // Workspaces M3 (#54): test helper to simulate the running terminal
+        // emitting a BEL. Raises BellRequested with a BellEventArgs carrying
+        // (flashTaskbar, sendNotification) — mirroring how a real
+        // TerminalPaneContent re-raises ControlCore's bell. The WorkspaceView's
+        // BellRequested subscription drives the strip VM's BellIndicator from this,
+        // gated on SendNotification() (classic Tab.cpp:1154). Mirrors SetTitle's
+        // raiser shape.
+        void RaiseBell(bool flashTaskbar, bool sendNotification)
+        {
+            BellRequested.raise(*this, winrt::make<winrt::TerminalApp::implementation::BellEventArgs>(flashTaskbar, sendNotification));
         }
         uint64_t TaskbarState() { return 0; }
         uint64_t TaskbarProgress() { return 0; }
@@ -7418,6 +7447,209 @@ namespace TerminalAppLocalTests
             vm.Icon(L"");
             VERIFY_IS_NULL(item.IconSource(),
                            L"an empty VM Icon must clear the native TabViewItem.IconSource");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M3 (#54, ADR-001): tab bell/attention as VM-RUNTIME state (an ADR
+    // deviation — NOT a WorkspaceModel field; a bell is ephemeral content-emitted
+    // attention auto-dismissed on focus / a timer, the same category M2 pushes onto
+    // the VM directly like the live shell title). Placed here (after the M1 chrome
+    // tests) so the namespace-local _leafTabStripView / _findLeafContainer helpers
+    // it uses to reach the hosted header are in scope.
+    //
+    // This pins the bell behaviour at the VM/projection level (no real gestures /
+    // layout — the headless std::clamp-resize trap), using a minimal
+    // MockPaneContent.RaiseBell() raiser (mirrors the existing SetTitle raiser).
+    // We add a 2nd tab, resolve whichever tab is left INACTIVE (we don't assume an
+    // ordering), and drive the bell on that inactive tab:
+    //  1. Add a 2nd tab; resolve the INACTIVE tab (and its backing mock by index).
+    //  2. A BellRequested with SendNotification==false on the inactive tab does NOT
+    //     light it (mirrors classic Tab.cpp:1154's notification gate).
+    //  3. A BellRequested with SendNotification==true sets that VM's BellIndicator
+    //     true AND the hosted header's TerminalTabStatus.BellIndicator reflects it
+    //     (the chrome projection).
+    //  4. Making that tab active (the same _setActivePaneTabVm projection the real
+    //     ActiveTabChanged arm drives, via a RequestActivate intent) CLEARS the
+    //     BellIndicator (dismiss-on-focus, mirroring Tab.cpp:328/1421), and the
+    //     header reflects the cleared state.
+    //
+    // In a headless test the BellRequested handler's HasThreadAccess()-gated
+    // dispatcher hop is a no-op (already on the UI thread), so the VM is updated
+    // synchronously. The classic path is untouched.
+    void WorkspaceTests::StripM3_Bell_SetsIndicatorAndDismissesOnFocus()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // The factory records every MockPaneContent it hands out so the test can
+        // raise a bell from a specific tab's content after the fact.
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xE200 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        // The strip index of the INACTIVE tab (the one we bell), and its model id.
+        // The mounted-content factory hands out mocks in strip-index order, so
+        // mocks[inactiveIdx] backs the inactive tab's content.
+        uint32_t inactiveIdx{ 0 };
+        uint64_t inactiveTabId{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a second tab; one of the two tabs is now INACTIVE — that is the one we bell.");
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"both tabs' content must have mounted (two mocks)");
+
+            // Resolve the inactive tab by querying IsActive — robust to which tab
+            // the model leaves active after the add (don't assume an ordering).
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+
+            bool foundInactive = false;
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                const auto vm = page->_paneTabStripVmAtForTest(leaf0, i);
+                VERIFY_IS_NOT_NULL(vm);
+                if (!vm.IsActive())
+                {
+                    inactiveIdx = i;
+                    inactiveTabId = vm.Id();
+                    foundInactive = true;
+                    VERIFY_IS_FALSE(vm.BellIndicator(), L"no bell on the inactive tab yet");
+                    break;
+                }
+            }
+            VERIFY_IS_TRUE(foundInactive, L"with two tabs there must be exactly one inactive tab to bell");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // A small helper: the TabHeaderControl hosting the INACTIVE tab's header,
+        // so the test can read its TerminalTabStatus.BellIndicator (the chrome the
+        // bell drives). Resolved by Tag identity, like the M1/M2 chrome tests.
+        const auto belledHeader = [&]() -> winrt::TerminalApp::TabHeaderControl {
+            const auto leafContainer = _findLeafContainer(page->_workspacePaneTreeRootChildForTest(), leaf0);
+            const auto strip = _leafTabStripView(leafContainer);
+            if (!strip)
+            {
+                return nullptr;
+            }
+            const auto tabView = strip.TabViewControl();
+            if (!tabView)
+            {
+                return nullptr;
+            }
+            for (uint32_t i = 0; i < tabView.TabItems().Size(); ++i)
+            {
+                const auto item = tabView.TabItems().GetAt(i).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+                if (!item)
+                {
+                    continue;
+                }
+                const auto vm = item.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
+                if (vm && vm.Id() == inactiveTabId)
+                {
+                    return item.Header().try_as<winrt::TerminalApp::TabHeaderControl>();
+                }
+            }
+            return nullptr;
+        };
+
+        Log::Comment(L"A bell WITHOUT a notification request must NOT light the tab (Tab.cpp:1154 gate).");
+        result = RunOnUIThread([&]() {
+            // mocks[inactiveIdx] backs the inactive tab. Raise a bell with
+            // sendNotification == false.
+            (*mocks)[inactiveIdx]->RaiseBell(/*flashTaskbar*/ false, /*sendNotification*/ false);
+
+            const auto vm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_ARE_EQUAL(inactiveTabId, vm.Id());
+            VERIFY_IS_FALSE(vm.BellIndicator(),
+                            L"a bell with SendNotification==false must not set the indicator");
+
+            const auto header = belledHeader();
+            VERIFY_IS_NOT_NULL(header);
+            VERIFY_IS_NOT_NULL(header.TabStatus());
+            VERIFY_IS_FALSE(header.TabStatus().BellIndicator(),
+                            L"the header status must stay un-belled for a no-notification bell");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"A bell WITH a notification request sets BellIndicator and the header reflects it.");
+        result = RunOnUIThread([&]() {
+            (*mocks)[inactiveIdx]->RaiseBell(/*flashTaskbar*/ false, /*sendNotification*/ true);
+
+            const auto vm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_ARE_EQUAL(inactiveTabId, vm.Id());
+            VERIFY_IS_TRUE(vm.BellIndicator(),
+                           L"a bell with SendNotification==true must set the VM's BellIndicator");
+
+            const auto header = belledHeader();
+            VERIFY_IS_NOT_NULL(header);
+            VERIFY_IS_NOT_NULL(header.TabStatus());
+            VERIFY_IS_TRUE(header.TabStatus().BellIndicator(),
+                           L"the hosted header's TerminalTabStatus.BellIndicator must reflect the VM bell");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Making the belled tab active (dismiss-on-focus) clears the indicator (Tab.cpp:328/1421).");
+        result = RunOnUIThread([&]() {
+            // Activate the belled (inactive) tab via the same RequestActivate intent
+            // a tab tap would raise — it dispatches selectTab; the ActiveTabChanged
+            // arm flips the active row through _setActivePaneTabVm, which clears the
+            // bell.
+            const auto vm = page->_paneTabStripVmAtForTest(leaf0, inactiveIdx);
+            VERIFY_IS_NOT_NULL(vm);
+            vm.RequestActivate();
+
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(inactiveTabId, *activeId,
+                             L"RequestActivate must make the belled tab active");
+            VERIFY_IS_FALSE(vm.BellIndicator(),
+                            L"becoming active must clear the bell (dismiss-on-focus)");
+
+            const auto header = belledHeader();
+            VERIFY_IS_NOT_NULL(header);
+            VERIFY_IS_NOT_NULL(header.TabStatus());
+            VERIFY_IS_FALSE(header.TabStatus().BellIndicator(),
+                            L"the header status must reflect the dismissed bell");
         });
         VERIFY_SUCCEEDED(result);
     }

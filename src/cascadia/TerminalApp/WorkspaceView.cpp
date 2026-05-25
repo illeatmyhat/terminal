@@ -4,6 +4,7 @@
 #include "pch.h"
 
 #include <algorithm>
+#include <chrono>
 
 #include "WorkspaceView.h"
 #include "TerminalPage.h"
@@ -129,14 +130,131 @@ namespace winrt::TerminalApp::implementation
                 }
                 strongPage->_setPaneTabBackgroundForTab(tabId, sender.BackgroundBrush());
             });
+
+        // Workspaces M3 (#54, ADR-001): bell/attention. Subscribe to the content's
+        // BellRequested at the SAME site as TitleChanged. BellRequested originates
+        // from ControlCore on the terminal OUTPUT thread (like TitleChanged), so we
+        // marshal to the UI dispatcher before touching the VM / starting the timer
+        // — mirroring the classic Tab's bell handler (Tab.cpp:1137, a
+        // safe_void_coroutine that co_awaits wil::resume_foreground(dispatcher)).
+        // The handler captures the page WEAKLY (never keeps it alive) and the TabId
+        // by value; it re-resolves the VM by id each fire. On bell, ONLY when
+        // args.SendNotification() (mirrors Tab.cpp:1154's notification gate) and the
+        // VM is not already showing a bell, we set BellIndicator(true) and
+        // start/restart the per-tab dismiss timer. The revoker overwrites any prior
+        // one for this tab (a re-mount auto-revokes the old subscription) and is
+        // dropped by _unbindTabTitle on teardown, so the handler never fires after
+        // the tab is gone. Note: the classic FlashTaskbar / toast-notification
+        // bubbling is out of scope for the strip projection (no per-pane-tab toast
+        // surface yet) — only the in-strip indicator is wired here.
+        //
+        // LIFETIME: the handler captures `this` (the WorkspaceView) raw, guarded
+        // by the weak page. The page OWNS the WorkspaceView, so a resolved
+        // `strongPage` proves `this` is still alive — there is no path where the
+        // page outlives or predeceases the view. The auto_revoker is stored in
+        // _tabBellRevokers (this view), so it is revoked synchronously when the
+        // view is destroyed; the weak-page re-check after the co_await covers the
+        // narrow window where the view is torn down while a resume is suspended.
+        _tabBellRevokers[tabId] = content.BellRequested(
+            winrt::auto_revoke,
+            [this, weakPage = _owner, tabId](const winrt::TerminalApp::IPaneContent& /*sender*/, const winrt::TerminalApp::BellEventArgs& bellArgs) -> safe_void_coroutine {
+                // Read the args BEFORE the co_await (the args may not outlive a
+                // suspension).
+                const auto weakPageCopy = weakPage;
+                const bool sendNotification = bellArgs ? bellArgs.SendNotification() : false;
+
+                auto strongPage = weakPageCopy.get();
+                if (!strongPage)
+                {
+                    co_return;
+                }
+                // Marshal to the UI thread before any VM/UIElement/timer work — the
+                // bell originates off the connection output thread.
+                if (!strongPage->Dispatcher().HasThreadAccess())
+                {
+                    co_await wil::resume_foreground(strongPage->Dispatcher());
+                    strongPage = weakPageCopy.get();
+                    if (!strongPage)
+                    {
+                        // Page (and therefore this view) torn down while suspended.
+                        co_return;
+                    }
+                }
+
+                // Mirror classic Tab.cpp:1154 — only raise the indicator when the
+                // bell asked for a notification (an audible/visible bell without a
+                // notification request does not light the tab).
+                if (!sendNotification)
+                {
+                    co_return;
+                }
+
+                // Set the indicator (idempotent — the VM setter short-circuits if
+                // already showing) and (re)start the per-tab dismiss timer. A null
+                // VM means the tab's strip row is gone (pruned / never projected):
+                // nothing to show and nothing to time out.
+                if (strongPage->_setPaneTabBellForTab(tabId, true))
+                {
+                    // `this` is valid: strongPage (the view's owner) is alive.
+                    _startBellDismissTimer(tabId);
+                }
+            });
+    }
+
+    // Workspaces M3 (#54, ADR-001): start (or restart) the per-tab bell dismiss
+    // timer. Mirrors classic Tab::ActivateBellIndicatorTimer (2000ms) +
+    // _BellIndicatorTimerTick (clear the indicator + stop). The Tick handler
+    // weak-captures the page and carries the TabId by value; it clears the VM's
+    // BellIndicator via the page and stops the timer. Stored per tab so a re-bell
+    // restarts the SAME timer; stopped + erased on teardown by _unbindTabTitle. UI
+    // thread only (the caller marshals there).
+    void WorkspaceView::_startBellDismissTimer(::WorkspaceModel::TabId tabId)
+    {
+        auto& timer = _tabBellTimers[tabId];
+        if (!timer)
+        {
+            timer = winrt::Windows::UI::Xaml::DispatcherTimer{};
+            timer.Interval(std::chrono::milliseconds(2000));
+            timer.Tick([weakPage = _owner, tabId](const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::IInspectable& /*e*/) {
+                // Stop first so a destroyed page (whose timer somehow still ticks)
+                // is a one-shot no-op. The DispatcherTimer is single-shot in intent;
+                // stopping here makes it so.
+                if (const auto t = sender.try_as<winrt::Windows::UI::Xaml::DispatcherTimer>())
+                {
+                    t.Stop();
+                }
+                if (auto strongPage = weakPage.get())
+                {
+                    strongPage->_setPaneTabBellForTab(tabId, false);
+                }
+            });
+        }
+        // (Re)start: a fresh BEL while already belled resets the dismiss window,
+        // matching classic ActivateBellIndicatorTimer's Start() semantics.
+        timer.Start();
     }
 
     // Live pane-tab title (#54): revoke + drop the TitleChanged subscription for
     // `tabId`. Erasing the auto-revoker fires it, detaching the handler from the
     // content. A no-op when the tab had no live-title binding.
+    //
+    // Workspaces M3 (#54, ADR-001): ALSO revoke the BellRequested subscription and
+    // stop + erase the bell dismiss timer for this tab. Stopping the timer before
+    // erasing it guarantees no queued tick can fire on a torn-down tab; erasing the
+    // revoker detaches the bell handler the same way. So a removed/torn-down tab
+    // never lights a bell or runs a dismiss timer.
     void WorkspaceView::_unbindTabTitle(::WorkspaceModel::TabId tabId)
     {
         _tabTitleRevokers.erase(tabId);
+        _tabBellRevokers.erase(tabId);
+        if (const auto it = _tabBellTimers.find(tabId); it != _tabBellTimers.end())
+        {
+            if (it->second)
+            {
+                it->second.Stop();
+            }
+            _tabBellTimers.erase(it);
+        }
     }
 
     // Big-flip Slice B (#54): parent the ACTIVE workspace's mounted content

@@ -77,5 +77,19 @@ namespace TerminalApp
         // sender = the VM (carries Id); args = the committed title (a boxed
         // String). APPENDED LAST for the vtable-slot reason.
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> RenameRequested;
+
+        // Workspaces M3 (#54, ADR-001): the tab BELL/attention indicator. This is
+        // VM-RUNTIME state, NOT a WorkspaceModel field — an ADR deviation. A bell
+        // is ephemeral content-emitted attention (auto-dismissed on focus / a
+        // timer) with no user-authored override, exactly the category M2 already
+        // pushes onto the VM directly (the live shell title) rather than into the
+        // replayable model. The WorkspaceView's BellRequested subscription sets it
+        // true (off-thread, marshaled to the UI thread); the active-tab projection
+        // (_setActivePaneTabVm) and a per-tab DispatcherTimer clear it. TabStripView
+        // drives the hosted TabHeaderControl's TerminalTabStatus.BellIndicator from
+        // it via the PropertyChanged path. APPENDED LAST (after RenameRequested) for
+        // the same vtable-slot reason (inserting mid-runtimeclass trips the /RTCs
+        // "Stack around 'value' corrupted" trap).
+        Boolean BellIndicator { get; set; };
     }
 }

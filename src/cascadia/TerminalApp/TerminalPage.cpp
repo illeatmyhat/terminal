@@ -7430,7 +7430,21 @@ namespace winrt::TerminalApp::implementation
         }
         for (const auto& vm : it->second)
         {
-            vm.IsActive(tab.valid() && vm.Id() == tab.v);
+            const bool active = tab.valid() && vm.Id() == tab.v;
+            vm.IsActive(active);
+
+            // Workspaces M3 (#54, ADR-001): dismiss-on-focus. When a tab becomes
+            // active, clear any bell/attention indicator on it — mirroring classic
+            // Tab::Focus (Tab.cpp:328) / the pane GotFocus handler (Tab.cpp:1421),
+            // which both call ShowBellIndicator(false) when the tab gains focus.
+            // The BellIndicator setter short-circuits when already false, so this is
+            // cheap for the common no-bell case. The per-tab dismiss TIMER is owned
+            // by the WorkspaceView (the bell-subscription owner); it observes the VM
+            // becoming active and stops the timer there.
+            if (active)
+            {
+                vm.BellIndicator(false);
+            }
         }
     }
 
@@ -7550,6 +7564,36 @@ namespace winrt::TerminalApp::implementation
                         }
                     }
                     vm.Background(Media::SolidColorBrush{ static_cast<winrt::Windows::UI::Color>(newColor) });
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Workspaces M3 (#54, ADR-001): set the BELL/attention indicator on the strip
+    // VM whose stable Id matches `tab`. Resolves the VM across ALL leaf strips by
+    // id identity (the WorkspaceView's BellRequested subscription carries only a
+    // TabId), like _setPaneTabTitleForTab. VM-RUNTIME state — NOT a WorkspaceModel
+    // field (an ADR deviation; a bell is ephemeral content-emitted attention with
+    // no user-authored override, like the live shell title). The VM's
+    // BellIndicator setter short-circuits on an unchanged value, so repeated BEL
+    // characters do not churn the bound chrome. Returns the matching VM (empty when
+    // none) so the caller can key its per-tab dismiss timer by that identity. A
+    // no-op when no strip holds the tab.
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabBellForTab(::WorkspaceModel::TabId tab, bool show)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.BellIndicator(show);
                     return vm;
                 }
             }

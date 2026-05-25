@@ -113,6 +113,28 @@ namespace winrt::TerminalApp::implementation
         // ContentMounted arm carries a TabId and the content is 1:1 with it.
         std::unordered_map<::WorkspaceModel::TabId, winrt::TerminalApp::IPaneContent::TitleChanged_revoker> _tabTitleRevokers;
 
+        // Workspaces M3 (#54, ADR-001): per-tab BellRequested revoker, keyed by
+        // TabId, parallel to _tabTitleRevokers. Subscribed in _bindTabChromeToContent
+        // (the same site as TitleChanged) so the strip's bell/attention indicator
+        // tracks the content's BEL. auto_revoke fires on erase/destroy, so dropping
+        // an entry (in _unbindTabTitle, on content teardown) detaches the handler;
+        // clearing the whole map on view teardown detaches all of them. A bell
+        // handler can never outlive the tab/content it belongs to.
+        std::unordered_map<::WorkspaceModel::TabId, winrt::TerminalApp::IPaneContent::BellRequested_revoker> _tabBellRevokers;
+
+        // Workspaces M3 (#54, ADR-001): per-tab bell dismiss TIMER, keyed by TabId.
+        // A bell sets the VM's BellIndicator true and starts (or restarts) this
+        // timer; on Tick it clears the indicator and stops itself, mirroring the
+        // classic Tab::_BellIndicatorTimerTick / ActivateBellIndicatorTimer pair
+        // (Tab.cpp:120/449, 2000ms interval). The Tick handler weak-captures the
+        // page and carries the TabId by value (never holds a strong page/VM ref).
+        // The timer is stopped + erased on tab/content teardown (the same sites that
+        // revoke _tabTitleRevokers) so no timer fires on a dead tab; clearing the
+        // map on view destruction stops the rest. Focus-dismiss is handled
+        // independently by _setActivePaneTabVm clearing the indicator — a later
+        // tick on an already-cleared bell is a harmless idempotent no-op.
+        std::unordered_map<::WorkspaceModel::TabId, winrt::Windows::UI::Xaml::DispatcherTimer> _tabBellTimers;
+
         // Big-flip Slice E (#54): workspace -> contents reverse index,
         // populated by the ContentMounted arm (keyed by the arm's
         // owningWorkspace). A whole-workspace close emits WorkspaceRemoved —
@@ -148,10 +170,21 @@ namespace winrt::TerminalApp::implementation
         // the subscription is never duplicated.
         void _bindTabChromeToContent(::WorkspaceModel::TabId tabId, const winrt::TerminalApp::IPaneContent& content);
 
-        // Revoke + drop the TitleChanged subscription for `tabId` (if any). A
-        // no-op when the tab had no live-title binding. Called by the content-
-        // teardown path so a removed/torn-down tab's handler can never fire.
+        // Revoke + drop the TitleChanged subscription for `tabId` (if any), AND
+        // (Workspaces M3, #54) revoke its BellRequested subscription and stop +
+        // erase its bell dismiss timer. A no-op for whichever bindings the tab
+        // lacks. Called by the content-teardown path so a removed/torn-down tab's
+        // handlers/timer can never fire after the tab is gone.
         void _unbindTabTitle(::WorkspaceModel::TabId tabId);
+
+        // Workspaces M3 (#54, ADR-001): start (or restart) the per-tab bell dismiss
+        // timer for `tabId`. Creates the DispatcherTimer on first use (2000ms, the
+        // classic Tab interval), (re)Start()s it, and on Tick clears the VM's
+        // BellIndicator (via the page) and stops itself. The Tick handler
+        // weak-captures the page and carries the TabId by value. MUST be called on
+        // the UI thread (DispatcherTimer has thread affinity); the BellRequested
+        // handler marshals there before calling this.
+        void _startBellDismissTimer(::WorkspaceModel::TabId tabId);
 
         // Big-flip Slice B (#54): parent the ACTIVE workspace's mounted content
         // into the page's (collapsed) WorkspaceContentHost. Resolves the single

@@ -164,8 +164,16 @@ namespace winrt::TerminalApp::implementation
                     {
                         strongThis->_syncSelectionFromModel();
                     }
-                    else if (prop == L"Title" || prop == L"Icon" || prop == L"Background")
+                    else if (prop == L"Title" || prop == L"Icon" || prop == L"Background" || prop == L"BellIndicator")
                     {
+                        // Workspaces M3 (#54, ADR-001): a BellIndicator flip rides
+                        // the SAME chrome-refresh path as Title/Icon/Background —
+                        // _applyChrome pushes the new state onto the header's
+                        // TerminalTabStatus.BellIndicator. The off-thread origin of
+                        // a bell (IPaneContent.BellRequested on the connection
+                        // output thread) is already marshaled to the UI thread above
+                        // (the HasThreadAccess-gated dispatcher hop), so this
+                        // UIElement write is on the UI thread.
                         // Refresh this VM's native chrome in place.
                         auto items = strongThis->TabView().TabItems();
                         for (uint32_t i = 0; i < items.Size(); ++i)
@@ -209,6 +217,15 @@ namespace winrt::TerminalApp::implementation
         // renamer's TitleChangeRequested becomes the VM's RequestRename intent.
         winrt::TerminalApp::TabHeaderControl header{};
 
+        // Workspaces M3 (#54, ADR-001): give the header a TerminalTabStatus so its
+        // bound indicators (the BellIndicator FontIcon, etc. — see
+        // TabHeaderControl.xaml) have a backing object to render from. Classic WT
+        // builds one TerminalTabStatus per Tab (Tab.h _tabStatus) and the header
+        // x:Binds its glyphs to it; mirror that here. _applyChrome drives its
+        // BellIndicator from the VM each refresh. The header owns the status for the
+        // life of the item.
+        header.TabStatus(winrt::TerminalApp::TerminalTabStatus{});
+
         // Double-tap the tab → BeginRename() (mirrors classic Tab::_MakeTabViewItem
         // ~line 158: TabViewItem().DoubleTapped → ActivateTabRenamer). Weak-capture
         // the header so a late double-tap on a torn-down tab is a safe no-op.
@@ -251,11 +268,33 @@ namespace winrt::TerminalApp::implementation
         if (const auto header = item.Header().try_as<winrt::TerminalApp::TabHeaderControl>())
         {
             header.Title(title);
+
+            // Workspaces M3 (#54, ADR-001): drive the header's bell/attention
+            // indicator from the VM's runtime BellIndicator state. The header's
+            // TerminalTabStatus.BellIndicator is x:Bind'd to a FontIcon's
+            // Visibility (TabHeaderControl.xaml), so flipping it shows/hides the
+            // bell glyph — mirroring classic Tab::ShowBellIndicator, which sets
+            // _tabStatus.BellIndicator(show). The TerminalTabStatus was seeded in
+            // _makeTabViewItem; guard defensively in case it is absent.
+            if (const auto status = header.TabStatus())
+            {
+                status.BellIndicator(vm.BellIndicator());
+            }
         }
 
         // Native tooltip (classic uses ToolTipService.SetToolTip on the
         // TabViewItem). Mirror the title.
         winrt::Windows::UI::Xaml::Controls::ToolTipService::SetToolTip(item, winrt::box_value(title));
+
+        // Workspaces M3 (#54, ADR-001) a11y fix: M2 swapped the TabViewItem's
+        // Header from a plain string to a hosted TabHeaderControl, which left the
+        // item's UIA automation Name empty (screen readers announced an unnamed
+        // tab). Restore an accessible name by setting AutomationProperties.Name to
+        // the effective (custom-wins) title — mirroring classic WT, which names its
+        // tab via AutomationProperties::SetName(TabViewItem(), title) in
+        // TabBase::UpdateTabHeader. Kept in sync here because _applyChrome runs both
+        // at build time and on every Title PropertyChanged.
+        winrt::Windows::UI::Xaml::Automation::AutomationProperties::SetName(item, title);
 
         const auto iconPath = vm.Icon();
         if (iconPath.empty())

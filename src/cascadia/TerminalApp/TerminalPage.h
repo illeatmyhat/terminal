@@ -913,6 +913,16 @@ namespace winrt::TerminalApp::implementation
         // strip holds the tab. Returns the matching VM (empty when none).
         winrt::TerminalApp::PaneTabViewModel _setPaneTabBackgroundForTab(::WorkspaceModel::TabId tab, const winrt::Windows::UI::Xaml::Media::Brush& contentBrush);
 
+        // Workspaces M3 (#54, ADR-001): set the BELL/attention indicator on the
+        // strip VM whose stable Id matches `tab`, resolving the VM across ALL leaf
+        // strips by id (the WorkspaceView's BellRequested subscription carries a
+        // TabId). VM-RUNTIME state — NOT a WorkspaceModel field (an ADR deviation;
+        // a bell is ephemeral content-emitted attention auto-dismissed on focus / a
+        // timer, exactly like the live shell title). Returns the matching VM (empty
+        // when none) so the caller can start/stop its dismiss timer keyed by that
+        // identity without a re-scan. A no-op when no strip holds the tab.
+        winrt::TerminalApp::PaneTabViewModel _setPaneTabBellForTab(::WorkspaceModel::TabId tab, bool show);
+
         // Big-flip Slice C (#54): flip the strip's active row to the tab at
         // model index `idx` in `leaf` (ActiveTabChanged carries the leaf + the
         // new activeTabIdx). The strip collection holds one VM per model tab in
