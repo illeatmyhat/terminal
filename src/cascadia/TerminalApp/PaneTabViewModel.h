@@ -8,15 +8,16 @@
 // arms (TabAdded / TabRemoved / ActiveTabChanged) routed through
 // TerminalPage; the strip is a pure downstream projection of the model.
 //
-// Modeled on WorkspaceViewModel: a thin INotifyPropertyChanged runtimeclass of
-// WINRT_OBSERVABLE_PROPERTYs. `Id` is the stable TabId.v identity and is not
-// observed. The VM NEVER touches the WorkspaceModel; it raises intent events
-// that the owning page dispatches as model actions.
+// Workspaces M1 (#54, ADR-001): the strip is now the real MUX TabView. The VM
+// shrank to the bits the native control consumes — Id / Title / IsActive /
+// Background / Icon and the activate/close intents. The bespoke re-skin's
+// projection helpers (ActiveToVisibility / RestToVisibility / ActiveToFontWeight
+// / ShowSeparatorToVisibility / HoverToVisibility) and the hover state
+// (ShowSeparator / IsHovered + the hover intents) are GONE — native TabViewItem
+// chrome renders the selection visual, the separators and the hover highlight.
 //
-// INVISIBLE this slice: the strip ListView this VM feeds lives inside the
-// still-Collapsed WorkspaceContentHost, so nothing this VM drives is on screen
-// (the classic tab stays the only visible thing). Production wiring of the
-// visible triggers is deferred to Slice F.
+// The VM NEVER touches the WorkspaceModel; it raises intent events that the
+// owning page dispatches as model actions.
 
 #pragma once
 
@@ -28,75 +29,14 @@ namespace winrt::TerminalApp::implementation
     {
         PaneTabViewModel() = default;
 
-        // The active row's font weight: Bold when active, Normal otherwise.
-        // Re-evaluated by x:Bind whenever IsActive raises PropertyChanged.
-        static winrt::Windows::UI::Text::FontWeight ActiveToFontWeight(bool isActive)
-        {
-            return isActive ? winrt::Windows::UI::Text::FontWeights::Bold()
-                            : winrt::Windows::UI::Text::FontWeights::Normal();
-        }
-
-        // Slice 2a (#54): tab-chrome projection helpers, ALL keyed off IsActive
-        // (OneWay) so the SELECTED look is a pure projection of the model — never
-        // the ListView's click-selection. Re-evaluated by x:Bind whenever
-        // IsActive raises PropertyChanged.
-        //
-        // ActiveToVisibility gates the connected selected-tab background AND the
-        // selected (primary) foreground label: Visible when active, Collapsed
-        // otherwise. RestToVisibility is its inverse and gates the rest
-        // (secondary) foreground label. Both labels carry theme-aware
-        // {ThemeResource} foreground brushes in the template (Slice 2a.1), so the
-        // foreground is theme-correct without an imperative brush lookup.
-        static winrt::Windows::UI::Xaml::Visibility ActiveToVisibility(bool isActive)
-        {
-            return isActive ? winrt::Windows::UI::Xaml::Visibility::Visible
-                            : winrt::Windows::UI::Xaml::Visibility::Collapsed;
-        }
-
-        static winrt::Windows::UI::Xaml::Visibility RestToVisibility(bool isActive)
-        {
-            return isActive ? winrt::Windows::UI::Xaml::Visibility::Collapsed
-                            : winrt::Windows::UI::Xaml::Visibility::Visible;
-        }
-
-        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility — Visible
-        // iff `show`. Mirrors ActiveToVisibility. ShowSeparator is a model
-        // projection (computed by TerminalPage::_recomputePaneTabSeparators) so the
-        // divider is drawn ONLY between two consecutive UNSELECTED tabs.
-        static winrt::Windows::UI::Xaml::Visibility ShowSeparatorToVisibility(bool show)
-        {
-            return show ? winrt::Windows::UI::Xaml::Visibility::Visible
-                        : winrt::Windows::UI::Xaml::Visibility::Collapsed;
-        }
-
-        // Slice 2a.4 follow-up (#54): the hover-highlight visibility — Visible iff
-        // the tab is hovered AND NOT active. The hover highlight shows only on a
-        // hovered UNSELECTED tab; the selected tab keeps its connected selected
-        // look, so the selected background and the hover highlight are mutually
-        // exclusive (they never both show). Mirrors ActiveToVisibility but takes
-        // two args (multi-arg x:Bind function binding). Re-evaluated by x:Bind
-        // whenever IsHovered OR IsActive raises PropertyChanged.
-        static winrt::Windows::UI::Xaml::Visibility HoverToVisibility(bool isHovered, bool isActive)
-        {
-            return (isHovered && !isActive) ? winrt::Windows::UI::Xaml::Visibility::Visible
-                                            : winrt::Windows::UI::Xaml::Visibility::Collapsed;
-        }
-
         // Intent signals (Big-flip Slice C, #54). These only raise events; they
         // never mutate this VM's state and never touch the WorkspaceModel. The
         // page subscribes and dispatches the model action (selectTab / closeTab),
-        // then the resulting diff re-projects the strip. Production wiring of the
-        // visible triggers (row tap / close button) lands in Slice F.
+        // then the resulting diff re-projects the strip. TabStripView raises
+        // RequestActivate from TabView.SelectionChanged (user intent) and
+        // RequestClose from TabView.TabCloseRequested.
         void RequestActivate();
         void RequestClose();
-
-        // Slice 2a.4 (#54): hover intent. Like RequestActivate/RequestClose these
-        // only raise events; they never mutate this VM and never touch the
-        // WorkspaceModel. The page tracks the hovered tab id (pure view state) and
-        // recomputes ShowSeparator to hide the dividers on both sides of the
-        // hovered tab. The item template's PointerEntered/PointerExited bind here.
-        void RequestHoverEnter();
-        void RequestHoverExit();
 
         til::property_changed_event PropertyChanged;
 
@@ -105,52 +45,32 @@ namespace winrt::TerminalApp::implementation
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> ActivateRequested;
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> CloseRequested;
 
-        // Slice 2a.4 (#54): hover intent events. sender = *this (carries Id);
-        // args = null. The page sets/clears its transient hovered tab id from the
-        // sender's Id and recomputes the leaf's separators — pure view state,
-        // never written to the model.
-        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> HoverEnterRequested;
-        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> HoverExitRequested;
-
         // Stable identity (TabId.v); not observed.
         WINRT_PROPERTY(uint64_t, Id, 0);
 
         WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Title, PropertyChanged.raise);
         WINRT_OBSERVABLE_PROPERTY(bool, IsActive, PropertyChanged.raise);
 
-        // Slice 2a.2 (#54): the live content background COLOR, carried as a FRESH
-        // non-acrylic SolidColorBrush (the page extracts the color from the
-        // mounted IPaneContent's BackgroundBrush() and builds this brush — it
-        // never shares the content's own brush, which may be acrylic). The
-        // SELECTED tab's connected background x:Binds to this OneWay, so the
-        // active pane-tab merges into the terminal content the way the classic WT
-        // focused tab does ("tab.background = terminalBackground"). A pure
+        // The live content background COLOR, carried as a FRESH non-acrylic
+        // SolidColorBrush (the page extracts the color from the mounted
+        // IPaneContent's BackgroundBrush() and builds this brush — it never
+        // shares the content's own brush, which may be acrylic). A pure
         // projection of the mounted content; nullptr until ContentMounted seeds
-        // it (the Border then renders neutral/transparent, never the old inverted
-        // floating fill).
+        // it. (M1: the native MUX TabView themes its selected tab itself; wiring
+        // the selected-tab background to track this content color the classic way
+        // is a DEFERRED SHOULD per ADR-001 — the projection is kept running for
+        // when that lands.) APPENDED LAST — inserting a property mid-runtimeclass
+        // shifts vtable slots and trips the /RTCs "Stack around 'value'
+        // corrupted" trap.
         WINRT_OBSERVABLE_PROPERTY(winrt::Windows::UI::Xaml::Media::Brush, Background, PropertyChanged.raise, nullptr);
 
-        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility, a model
-        // projection. true iff this tab is NOT last AND NOT selected AND its
-        // right-neighbour is NOT selected — so the divider shows ONLY between two
-        // consecutive UNSELECTED tabs (classic WT), never adjacent to the selected
-        // tab and never trailing. Computed by TerminalPage::_recomputePaneTabSeparators
-        // after every strip-membership / active-state mutation; the item template
-        // binds the separator Border to ShowSeparatorToVisibility(ShowSeparator).
-        // APPENDED LAST (after Background) — inserting mid-runtimeclass shifts
-        // vtable slots and trips the /RTCs "Stack around 'value' corrupted" trap.
-        WINRT_OBSERVABLE_PROPERTY(bool, ShowSeparator, PropertyChanged.raise, false);
-
-        // Slice 2a.4 follow-up (#54): the hover-highlight projection, set by
-        // TerminalPage::_recomputePaneTabSeparators in the SAME pass as
-        // ShowSeparator (both driven by the same hover enter/exit event), so the
-        // hover highlight (HoverToVisibility(IsHovered, IsActive) gates a hover
-        // Border in the item template) and the separator hide update in lockstep —
-        // the desync between the old container PointerOver VSM and the page-driven
-        // separator hide is eliminated. PURE VIEW STATE — never written to the
-        // WorkspaceModel. APPENDED LAST (after ShowSeparator) — inserting
-        // mid-runtimeclass shifts vtable slots and trips the /RTCs trap.
-        WINRT_OBSERVABLE_PROPERTY(bool, IsHovered, PropertyChanged.raise, false);
+        // Workspaces M1 (#54, ADR-001): the tab icon PATH, projected from the
+        // mounted IPaneContent's Icon(). TabStripView resolves it to a MUX
+        // IconSource (IconPathConverter::IconSourceMUX) on the native
+        // TabViewItem.IconSource. A pure downstream projection of the mounted
+        // content. APPENDED LAST (after Background) for the same vtable-slot
+        // reason.
+        WINRT_OBSERVABLE_PROPERTY(winrt::hstring, Icon, PropertyChanged.raise);
     };
 }
 

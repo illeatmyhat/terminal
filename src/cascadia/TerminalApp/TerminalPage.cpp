@@ -7340,43 +7340,11 @@ namespace winrt::TerminalApp::implementation
             page->_applyWorkspaceAction(std::move(next));
         });
 
-        // Slice 2a.4 (#54): hover intent → transient hovered-id tracking. The VM
-        // raises HoverEnter/HoverExit (it never touches the model); the page
-        // records/clears the hovered tab id (PURE view state) and recomputes this
-        // leaf's separators so the dividers on BOTH sides of the hovered tab hide
-        // (classic WinUI TabViewItem PointerOver: TabSeparator.Opacity = 0). The
-        // hovered id is captured by VALUE on the leaf so the recompute targets the
-        // right strip; it is NEVER written to the WorkspaceModel.
-        vm.HoverEnterRequested([weakThis = get_weak(), leaf](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
-            auto page{ weakThis.get() };
-            if (!page)
-            {
-                return;
-            }
-            page->_hoveredPaneTabId = sender.Id();
-            page->_recomputePaneTabSeparators(leaf);
-        });
-
-        vm.HoverExitRequested([weakThis = get_weak(), leaf](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
-            auto page{ weakThis.get() };
-            if (!page)
-            {
-                return;
-            }
-            // Only clear if WE are the hovered tab (a stale exit from a tab that
-            // isn't the current hovered one must not wipe a newer enter).
-            if (page->_hoveredPaneTabId == sender.Id())
-            {
-                page->_hoveredPaneTabId = std::nullopt;
-            }
-            page->_recomputePaneTabSeparators(leaf);
-        });
+        // Workspaces M1 (#54, ADR-001): the hover-highlight + separator hide are
+        // now rendered natively by the MUX TabView, so the old hover-intent
+        // subscriptions (HoverEnter/Exit → _recomputePaneTabSeparators) are gone.
 
         strip.Append(vm);
-
-        // The strip membership changed — re-derive which dividers show (classic
-        // WT: only between two consecutive unselected tabs).
-        _recomputePaneTabSeparators(leaf);
     }
 
     // Remove the strip view-model that backs a removed tab, located by its
@@ -7401,9 +7369,6 @@ namespace winrt::TerminalApp::implementation
             if (strip.GetAt(i).Id() == tab.v)
             {
                 strip.RemoveAt(i);
-                // The strip membership changed — re-derive which dividers show
-                // (classic WT: only between two consecutive unselected tabs).
-                _recomputePaneTabSeparators(leaf);
                 return;
             }
         }
@@ -7423,71 +7388,6 @@ namespace winrt::TerminalApp::implementation
         for (const auto& vm : it->second)
         {
             vm.IsActive(tab.valid() && vm.Id() == tab.v);
-        }
-        // The active-state changed for this leaf's rows — re-derive which
-        // dividers show (classic WT: only between two consecutive unselected
-        // tabs). The leaf is already in hand here.
-        _recomputePaneTabSeparators(leaf);
-    }
-
-    // Slice 2a.3 follow-up (#54): recompute every strip VM's ShowSeparator for
-    // `leaf`. Walk the leaf's strip collection IN ORDER and set each VM's
-    // ShowSeparator = (i < count-1) && !vm[i].IsActive() && !vm[i+1].IsActive()
-    // — so a divider shows ONLY between two consecutive UNSELECTED tabs (classic
-    // WT), never adjacent to the selected tab, never trailing after the last
-    // tab, and a single selected tab shows no divider. The separator is thus a
-    // pure model projection (MVVM-consistent with the rest of the strip — the
-    // item template binds the separator Border to
-    // ShowSeparatorToVisibility(ShowSeparator)), recomputed after every mutation
-    // of a leaf's strip membership or active state. O(n) per call, n tiny.
-    //
-    // Slice 2a.4 follow-up (#54): this SAME pass also projects the hover HIGHLIGHT
-    // (each VM's IsHovered) — because it already runs on every hover enter/exit and
-    // knows _hoveredPaneTabId, setting IsHovered here guarantees the highlight and
-    // the separator hide are recomputed together, triggered by the same hover event,
-    // so they update in lockstep (eliminating the old desync where the highlight
-    // rode a separate container PointerOver VSM). Hover stays a pure view projection;
-    // never written to the WorkspaceModel.
-    void TerminalPage::_recomputePaneTabSeparators(::WorkspaceModel::PaneId leaf)
-    {
-        const auto it = _paneTabStrips.find(leaf);
-        if (it == _paneTabStrips.end())
-        {
-            return;
-        }
-        auto& strip = it->second;
-        const uint32_t count = strip.Size();
-        for (uint32_t i = 0; i < count; ++i)
-        {
-            const auto vm = strip.GetAt(i);
-            const auto nextVm = (i + 1 < count) ? strip.GetAt(i + 1) : nullptr;
-            // Slice 2a.4 follow-up (#54): project the hover HIGHLIGHT in the SAME
-            // pass as the separator hide, driven by the SAME hover enter/exit event,
-            // so the highlight (IsHovered) and the dividers (ShowSeparator) update in
-            // lockstep — eliminating the old desync where the highlight rode the
-            // container ControlTemplate's PointerOver VSM (a different pointer
-            // mechanism that fired a step out of sync with this page recompute). The
-            // item template's hover Border binds HoverToVisibility(IsHovered, IsActive)
-            // so the highlight shows only on a hovered UNSELECTED tab. Pure view
-            // state — never written to the WorkspaceModel.
-            vm.IsHovered(_hoveredPaneTabId.has_value() && vm.Id() == *_hoveredPaneTabId);
-            // Slice 2a.4 (#54): hover-aware. The divider between tab[i] and
-            // tab[i+1] (separator[i]) shows ONLY between two consecutive UNSELECTED
-            // tabs (the model rule) AND only when NEITHER of those two tabs is the
-            // hovered one — so hovering tab[i] hides separator[i] (its right
-            // divider) AND separator[i-1] (the divider with its LEFT neighbour),
-            // matching classic WinUI TabViewItem PointerOver (TabSeparator.Opacity
-            // = 0 on both sides). Hover is a view concern; ShowSeparator now
-            // combines model state + hover but remains a pure downstream
-            // projection — it is never written back to the model.
-            const bool hoveringEither = _hoveredPaneTabId.has_value() &&
-                                        (vm.Id() == *_hoveredPaneTabId ||
-                                         (nextVm != nullptr && nextVm.Id() == *_hoveredPaneTabId));
-            const bool show = (nextVm != nullptr) &&
-                              !vm.IsActive() &&
-                              !nextVm.IsActive() &&
-                              !hoveringEither;
-            vm.ShowSeparator(show);
         }
     }
 
@@ -7688,25 +7588,9 @@ namespace winrt::TerminalApp::implementation
         return it->second.GetAt(0);
     }
 
-    // Slice 2a.3 follow-up (#54): the ShowSeparator of the strip VM at `index` in
-    // `leaf` (nullopt when the leaf has no strip or `index` is out of range).
-    // Lets a headless test assert _recomputePaneTabSeparators applied the classic
-    // "divider only between two consecutive unselected tabs" rule per VM, with no
-    // layout pass.
-    std::optional<bool> TerminalPage::_paneTabStripShowSeparatorForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const
-    {
-        const auto it = _paneTabStrips.find(leaf);
-        if (it == _paneTabStrips.end() || index >= it->second.Size())
-        {
-            return std::nullopt;
-        }
-        return it->second.GetAt(index).ShowSeparator();
-    }
-
-    // Slice 2a.4 (#54): the strip VM at `index` in `leaf` (nullptr when no strip
-    // / index out of range). Lets a headless test raise the VM's hover intent
-    // (RequestHoverEnter/Exit) — the production wiring path — and assert the
-    // hover-aware ShowSeparator recompute hides the adjacent dividers.
+    // The strip VM at `index` in `leaf` (nullptr when no strip / index out of
+    // range). Lets a headless test read a row's projected state (Id / IsActive /
+    // Title) without a layout pass.
     winrt::TerminalApp::PaneTabViewModel TerminalPage::_paneTabStripVmAtForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const
     {
         const auto it = _paneTabStrips.find(leaf);

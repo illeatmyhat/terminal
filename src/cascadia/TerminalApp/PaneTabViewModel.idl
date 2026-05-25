@@ -10,113 +10,45 @@ namespace TerminalApp
         // Stable identity (the model's TabId.v); not observed.
         UInt64 Id { get; set; };
 
-        // Observable display state. Title drives the row label; IsActive drives
-        // the active-tab highlight / SelectedItem in the strip ListView.
+        // Observable display state. Title drives the native TabViewItem header /
+        // tooltip; IsActive drives TabView.SelectedItem (a one-way model→control
+        // selection projection — TabStripView pushes SelectedItem when IsActive
+        // flips). A user SelectionChanged is an intent only and never writes
+        // IsActive back from the control.
         String Title { get; set; };
         Boolean IsActive { get; set; };
 
-        // Intent signals (Big-flip Slice C, #54). The VM NEVER touches the
-        // WorkspaceModel; it raises these so the owning TerminalPage can
-        // dispatch the model action (selectTab / closeTab / newTab) and let the
-        // resulting diff re-project the strip. Production wiring of the visible
-        // triggers (the strip's row tap / close button / +) is deferred to
-        // Slice F, when the strip becomes visible; this slice only builds the
-        // signals + their projection arms.
+        // Intent signals. The VM NEVER touches the WorkspaceModel; it raises
+        // these so the owning TerminalPage can dispatch the model action
+        // (selectTab / closeTab) and let the resulting diff re-project the strip.
+        // TabStripView raises RequestActivate from TabView.SelectionChanged (user
+        // intent) and RequestClose from TabView.TabCloseRequested.
         void RequestActivate();
         void RequestClose();
-
-        // Converter-free x:Bind function-binding helpers, mirroring
-        // WorkspaceViewModel. They re-evaluate whenever their observable input
-        // raises PropertyChanged.
-        static Windows.UI.Text.FontWeight ActiveToFontWeight(Boolean isActive);
-
-        // Slice 2a (#54) / 2a.1 tab-chrome projection helpers — all driven by
-        // IsActive (OneWay), so the SELECTED look is a pure projection of the
-        // model, NOT the ListView's click-selection.
-        //
-        // ActiveToVisibility (Visible iff active) gates BOTH the connected
-        // selected-tab background AND the selected (primary) foreground label.
-        // RestToVisibility (Visible iff NOT active) gates the rest (secondary)
-        // foreground label. The two label TextBlocks carry theme-aware
-        // {ThemeResource} foreground brushes (PaneTabHeaderForegroundSelected /
-        // PaneTabHeaderForeground), so the framework resolves them per the
-        // strip's effective theme — dark text on Light, light on Dark. This
-        // replaces the Slice-2a imperative ActiveToForeground brush, which
-        // snapshotted the Application theme (WT does not switch it for
-        // "theme":"light") and so rendered light-grey text on the Light strip.
-        static Windows.UI.Xaml.Visibility ActiveToVisibility(Boolean isActive);
-        static Windows.UI.Xaml.Visibility RestToVisibility(Boolean isActive);
-
-        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility helper —
-        // Visible iff `show`. Mirrors ActiveToVisibility/RestToVisibility. The
-        // separator is now a model projection (ShowSeparator, computed by
-        // TerminalPage::_recomputePaneTabSeparators) shown ONLY between two
-        // consecutive UNSELECTED tabs — never adjacent to the selected tab,
-        // never trailing after the last tab. See ShowSeparator below.
-        static Windows.UI.Xaml.Visibility ShowSeparatorToVisibility(Boolean show);
 
         // sender = the VM (carries Id so the page resolves the tab); args =
         // null (the intent carries no payload beyond Id).
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> ActivateRequested;
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> CloseRequested;
 
-        // Slice 2a.2 (#54): the live content background COLOR, projected as a
-        // fresh non-acrylic SolidColorBrush. The SELECTED pane-tab's connected
-        // background x:Binds to this (OneWay) so the active tab merges into the
-        // terminal content exactly like the classic WT focused tab (which sets
-        // "tab.background = terminalBackground"). A pure downstream projection of
-        // the mounted content — the VM never reads it back from the model.
-        // APPENDED LAST: inserting a property mid-runtimeclass shifts vtable
-        // slots and trips the /RTCs "Stack around 'value' corrupted" trap.
+        // The live content background COLOR, projected as a fresh non-acrylic
+        // SolidColorBrush (TerminalPage extracts the color from the mounted
+        // IPaneContent's BackgroundBrush()). A pure downstream projection of the
+        // mounted content — the VM never reads it back from the model. (M1 keeps
+        // this projection running but the native MUX TabView themes its selected
+        // tab itself; wiring the selected-tab background to track this content
+        // color the classic way — Tab::_RecalculateAndApplyTabColor — is a
+        // DEFERRED SHOULD per ADR-001.) APPENDED LAST: inserting a property
+        // mid-runtimeclass shifts vtable slots and trips the /RTCs "Stack around
+        // 'value' corrupted" trap.
         Windows.UI.Xaml.Media.Brush Background { get; set; };
 
-        // Slice 2a.3 follow-up (#54): the inter-tab separator visibility, a model
-        // projection computed by TerminalPage::_recomputePaneTabSeparators after
-        // every strip-membership / active-state mutation. true iff this tab is
-        // NOT the last tab AND this tab is NOT selected AND its right-neighbour
-        // tab is NOT selected — i.e. a divider shows ONLY between two consecutive
-        // UNSELECTED tabs (classic WT), never adjacent to the selected tab and
-        // never trailing after the last tab. The item template binds the
-        // separator Border's Visibility to ShowSeparatorToVisibility(ShowSeparator).
-        // APPENDED LAST (after Background) for the same vtable-slot reason.
-        Boolean ShowSeparator { get; set; };
-
-        // Slice 2a.4 (#54): hover INTENT signals, mirroring RequestActivate /
-        // RequestClose. The item template's PointerEntered/PointerExited bind to
-        // these; they raise HoverEnterRequested / HoverExitRequested (sender = the
-        // VM, carrying Id) so the owning TerminalPage can track the hovered tab id
-        // (PURE view state — NEVER written to the WorkspaceModel) and recompute
-        // ShowSeparator to hide the dividers on BOTH sides of the hovered tab
-        // (classic WinUI TabViewItem PointerOver sets TabSeparator.Opacity = 0).
-        // The VM never touches the model. APPENDED LAST (after ShowSeparator) —
-        // inserting mid-runtimeclass shifts vtable slots and trips the /RTCs
-        // "Stack around 'value' corrupted" trap.
-        void RequestHoverEnter();
-        void RequestHoverExit();
-        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> HoverEnterRequested;
-        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> HoverExitRequested;
-
-        // Slice 2a.4 follow-up (#54): the hover-highlight projection. IsHovered is
-        // set by TerminalPage::_recomputePaneTabSeparators in the SAME pass that
-        // recomputes ShowSeparator (both triggered by the same hover enter/exit
-        // event), so the hover HIGHLIGHT and the separator HIDE update in lockstep
-        // — they no longer desync (the old container ControlTemplate PointerOver
-        // VSM fast-path that fired on a different pointer mechanism is removed).
-        // PURE VIEW STATE — never written to the WorkspaceModel.
-        //
-        // HoverToVisibility gates the hover-highlight Border: Visible iff the tab
-        // is hovered AND NOT active (the selected tab keeps its connected selected
-        // look; the hover highlight shows only on a hovered UNSELECTED tab, so the
-        // selected background and the hover highlight are mutually exclusive).
-        // The highlight fill is the CONTENT color at 0.6 opacity (PaneTabViewModel
-        // .Background @ Opacity 0.6 in the template), matching the authoritative
-        // classic-WT hover color (Tab.cpp: hoverTabBrush.Color(color);
-        // hoverTabBrush.Opacity(0.6) where color is the terminal background),
-        // NOT the old static black overlay. Multi-arg x:Bind function binding.
-        // APPENDED LAST (after the hover events) — inserting mid-runtimeclass
-        // shifts vtable slots and trips the /RTCs "Stack around 'value' corrupted"
-        // trap.
-        Boolean IsHovered { get; set; };
-        static Windows.UI.Xaml.Visibility HoverToVisibility(Boolean isHovered, Boolean isActive);
+        // Workspaces M1 (#54, ADR-001): the tab icon PATH, projected from the
+        // mounted IPaneContent's Icon(). TabStripView resolves it to a MUX
+        // IconSource via IconPathConverter::IconSourceMUX and sets it on the
+        // native TabViewItem.IconSource (mirroring classic Tab::UpdateIcon). A
+        // pure downstream projection of the mounted content. APPENDED LAST (after
+        // Background) for the same vtable-slot reason.
+        String Icon { get; set; };
     }
 }

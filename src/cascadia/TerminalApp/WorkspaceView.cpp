@@ -100,9 +100,17 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        // Seed the current title + background immediately (the content already
-        // has both at mount; TitleChanged only fires on subsequent changes).
-        page->_setPaneTabTitleForTab(tabId, content.Title());
+        // Seed the current title + background + icon immediately (the content
+        // already has them at mount; TitleChanged only fires on subsequent
+        // changes). Workspaces M1 (#54, ADR-001): the icon piggybacks on the
+        // TitleChanged cadence like the background — set it on the VM that
+        // _setPaneTabTitleForTab resolves (no separate icon-change event surface;
+        // the icon changes rarely, like the bg). TabStripView resolves the icon
+        // path to a native MUX TabViewItem.IconSource.
+        if (const auto vm = page->_setPaneTabTitleForTab(tabId, content.Title()))
+        {
+            vm.Icon(content.Icon());
+        }
         page->_setPaneTabBackgroundForTab(tabId, content.BackgroundBrush());
 
         // Subscribe; overwrite any prior revoker for this tab (auto-revokes it).
@@ -115,7 +123,10 @@ namespace winrt::TerminalApp::implementation
                 {
                     return;
                 }
-                strongPage->_setPaneTabTitleForTab(tabId, sender.Title());
+                if (const auto vm = strongPage->_setPaneTabTitleForTab(tabId, sender.Title()))
+                {
+                    vm.Icon(sender.Icon());
+                }
                 strongPage->_setPaneTabBackgroundForTab(tabId, sender.BackgroundBrush());
             });
     }

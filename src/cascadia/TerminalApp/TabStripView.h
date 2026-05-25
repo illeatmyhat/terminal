@@ -1,22 +1,34 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT license.
 //
-// TabStripView — the per-leaf pane tab strip, extracted from the inline
-// TerminalPage.xaml `PaneTabStrip` ListView into a real UserControl (big-flip
-// per-pane strip Slice 1, #54).
+// TabStripView — the per-leaf pane tab strip. Workspaces M1 (#54, ADR-001)
+// rewrote it from a re-skinned WUX ListView into the REAL MUX TabView
+// (Microsoft.UI.Xaml.Controls.TabView — the same control the classic per-window
+// tab row uses), driven by WorkspaceModel as the single source of truth via
+// MANUAL TabView.TabItems() projection (NOT TabItemsSource data-binding).
 //
-// The programmatic per-leaf strip in `_projectLeafContainer` used to hand-build
-// a bare ListView and clone only the inline strip's ItemTemplate + Background,
-// OMITTING its ItemsPanel (horizontal StackPanel), ScrollViewer settings, and
-// SelectionMode="Single" — so multiple tabs in a leaf stacked VERTICALLY. This
-// control carries ALL of those, so `_projectLeafContainer` just instantiates it
-// and binds ItemsSource. The orientation/scroll/selection now live in one place.
+// The page sets ItemsSource to the leaf's PaneTabViewModel collection. The
+// control subscribes to that vector's VectorChanged and, on the UI thread,
+// projects each VM into a TabViewItem appended to TabView.TabItems() (mirroring
+// classic WT's manual-TabItems shape: each TabViewItem.Content is a throwaway
+// empty Border — the drag-identity bodge — and the real terminal is hosted
+// separately in the page's leafContentHost, never inside the strip).
 //
-// Selection is a PURE PROJECTION of the model: the active-row highlight comes
-// from PaneTabViewModel.IsActive (FontWeight binding); the inner ListView's
-// SelectedItem is never bound as a source of truth and never writes back to the
-// model. A user tap raises the VM's RequestActivate intent; the close Button
-// raises RequestClose. The page dispatches the action; the diff re-projects.
+// Selection is a ONE-WAY projection of the model:
+//   * The active tab is pushed into TabView.SelectedItem from each VM's
+//     IsActive (we subscribe to every VM's PropertyChanged), so the
+//     ActiveTabChanged diff arm drives the control.
+//   * TabView.SelectionChanged is a USER INTENT only → it raises the selected
+//     VM's RequestActivate (→ selectTab model action). The control never writes
+//     model state. A reentrancy guard (_pushingSelection) suppresses the
+//     SelectionChanged that the programmatic SelectedItem push re-fires, so the
+//     push never loops back into an intent (this is crash-avoidance — a
+//     re-entrant mutation inside a TabView callback is a 0xc000027b corner).
+//   * TabCloseRequested → the VM's RequestClose (→ closeTab model action).
+//
+// Drag is OFF (CanReorderTabs / CanDragTabs / AllowDropTabs = false, set in
+// XAML); M6 wires the full drag state machine. Native TabViewItem chrome / icon
+// / tooltip replace the old bespoke re-skin.
 
 #pragma once
 
@@ -28,16 +40,59 @@ namespace winrt::TerminalApp::implementation
     {
         TabStripView();
 
-        // Projects onto the inner ListView's ItemsSource. Stored as a plain
-        // IInspectable; the inner ListView holds the live reference, so the
-        // getter reads it straight back off the ListView. (Non-const: the
-        // generated x:Name accessor TabsList() is non-const.)
+        // The leaf's PaneTabViewModel collection. The setter rebuilds the
+        // TabView.TabItems() projection and (re-)subscribes the VectorChanged +
+        // per-VM PropertyChanged handlers. The getter returns the stored source.
         winrt::Windows::Foundation::IInspectable ItemsSource();
         void ItemsSource(const winrt::Windows::Foundation::IInspectable& value);
 
-        // Test-only structural accessor (see the .idl). The inner ListView so
-        // headless TAEF can assert orientation / SelectionMode / items.
-        winrt::Windows::UI::Xaml::Controls::ListView TabsListView();
+        // Test-only structural accessor (see the .idl): the inner MUX TabView so
+        // headless TAEF can assert TabItems / SelectedItem / drag flags.
+        winrt::Microsoft::UI::Xaml::Controls::TabView TabViewControl();
+
+    private:
+        // The source VM collection the page set, and the live subscription to its
+        // membership changes. Each membership change re-projects the TabItems.
+        winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel> _source{ nullptr };
+        winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>::VectorChanged_revoker _sourceChangedRevoker{};
+
+        // Per-VM PropertyChanged subscriptions, parallel to _source's order, so a
+        // VM's IsActive flip pushes TabView.SelectedItem (the model→control
+        // selection projection). Rebuilt whenever the projection is rebuilt.
+        std::vector<winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker> _vmPropertyChangedRevokers;
+
+        // Reentrancy guard. True while we programmatically push SelectedItem from
+        // the model; suppresses the SelectionChanged the control re-fires so the
+        // model push never loops back into a RequestActivate intent.
+        bool _pushingSelection{ false };
+
+        // Tear down + rebuild the whole TabView.TabItems() projection from
+        // _source (append every VM as a TabViewItem; re-subscribe each VM's
+        // PropertyChanged), then sync SelectedItem to the active VM. UI thread.
+        void _rebuildProjection();
+
+        // Build one TabViewItem for `vm` (header / icon / tooltip / Tag = vm /
+        // empty-Border content). UI thread.
+        winrt::Microsoft::UI::Xaml::Controls::TabViewItem _makeTabViewItem(const winrt::TerminalApp::PaneTabViewModel& vm);
+
+        // Refresh `item`'s native chrome (header text + icon + tooltip) from
+        // `vm`. Used at build time and on the VM's Title/PropertyChanged.
+        void _applyChrome(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
+
+        // Push the active VM (the one with IsActive) into TabView.SelectedItem,
+        // guarded so the re-fired SelectionChanged is not treated as an intent.
+        void _syncSelectionFromModel();
+
+        // The TabView's SelectionChanged handler: a user intent only. Resolves
+        // the selected TabViewItem's Tag VM and raises its RequestActivate
+        // (unless we are mid programmatic push). Never writes model state.
+        void _onSelectionChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::Controls::SelectionChangedEventArgs& args);
+
+        // TabCloseRequested → the VM's RequestClose intent (→ closeTab).
+        void _onTabCloseRequested(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs& args);
+
+        // Resolve the VM carried in a TabViewItem's Tag (nullptr if none).
+        static winrt::TerminalApp::PaneTabViewModel _vmFromItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);
     };
 }
 
