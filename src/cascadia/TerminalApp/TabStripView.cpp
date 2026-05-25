@@ -73,8 +73,11 @@ namespace winrt::TerminalApp::implementation
     {
         // Guard the rebuild so the SelectedItem churn it causes (clearing then
         // re-adding items resets SelectedItem) is never treated as a user intent.
-        _pushingSelection = true;
-        auto restore = wil::scope_exit([this]() { _pushingSelection = false; });
+        // Depth counter: this guard nests with the one _syncSelectionFromModel
+        // (called at the end of this method) raises, so the inner scope_exit must
+        // not clear the guard the outer rebuild still relies on.
+        _selectionPushDepth++;
+        auto restore = wil::scope_exit([this]() { _selectionPushDepth--; });
 
         _vmPropertyChangedRevokers.clear();
 
@@ -94,30 +97,80 @@ namespace winrt::TerminalApp::implementation
             // model→control selection projection) and a Title/Icon/Background
             // change refreshes the native chrome. The VM carries its stable Id,
             // so we resolve the matching TabViewItem by Tag identity each fire.
+            //
+            // Workspaces M1 (#54, ADR-001) thread affinity: this handler mutates
+            // live MUX UIElements (TabViewItem.Header/IconSource via _applyChrome,
+            // and TabView.SelectedItem via _syncSelectionFromModel), which have
+            // UI-thread affinity. The driving PropertyChanged is NOT guaranteed to
+            // arrive on the UI thread: the chrome-push path
+            // (WorkspaceView::_bindTabChromeToContent) rides IPaneContent.TitleChanged,
+            // which TerminalPaneContent re-raises synchronously off ControlCore's
+            // TitleChanged — raised on the connection OUTPUT thread (see
+            // ControlCore::_terminalTitleChanged: "this can only ever be triggered
+            // by output from the connection ... the Terminal already has the write
+            // lock"). The classic Tab marshals exactly this hazard (Tab.cpp
+            // ~line 1061: TitleChanged via a ThrottledFunc bound to the dispatcher;
+            // sibling content events via co_await wil::resume_foreground). We mirror
+            // that here at the choke point closest to the UIElement writes so EVERY
+            // property source (Title/Icon/Background AND IsActive) is covered, not
+            // just TitleChanged. Hop to the UI dispatcher ONLY when we are not
+            // already on it (TerminalPage::_SetFocusedTab's HasThreadAccess pattern)
+            // — the model-driven IsActive push already runs on the UI thread and
+            // stays synchronous, while the off-thread TitleChanged path marshals. A
+            // weak `this` (get_weak) makes a late resume on a torn-down strip a safe
+            // no-op, and we re-resolve the weak VM after a hop.
             const auto inpc = vm.as<INotifyPropertyChanged>();
             _vmPropertyChangedRevokers.push_back(
-                inpc.PropertyChanged(winrt::auto_revoke, [this, weakVm = winrt::make_weak(vm)](const IInspectable& /*sender*/, const PropertyChangedEventArgs& e) {
-                    const auto vm = weakVm.get();
+                inpc.PropertyChanged(winrt::auto_revoke, [weakThis = get_weak(), weakVm = winrt::make_weak(vm)](const IInspectable& /*sender*/, const PropertyChangedEventArgs& e) -> safe_void_coroutine {
+                    // Read everything off the (possibly soon-destroyed) closure
+                    // BEFORE any co_await — revoking the auto_revoker during
+                    // suspension can free the lambda object out from under us, so
+                    // the weak refs + property name live in the coroutine frame as
+                    // locals (mirrors Tab::_AttachEventHandlersToContent's
+                    // weakThisCopy dance).
+                    const auto weakThisCopy = weakThis;
+                    const auto weakVmCopy = weakVm;
+                    const auto prop = e.PropertyName();
+
+                    auto strongThis = weakThisCopy.get();
+                    if (!strongThis)
+                    {
+                        co_return;
+                    }
+                    if (!strongThis->Dispatcher().HasThreadAccess())
+                    {
+                        co_await wil::resume_foreground(strongThis->Dispatcher());
+
+                        // Re-acquire after the dispatcher hop — the strip may have
+                        // been torn down while suspended.
+                        strongThis = weakThisCopy.get();
+                        if (!strongThis)
+                        {
+                            co_return;
+                        }
+                    }
+
+                    const auto vm = weakVmCopy.get();
                     if (!vm)
                     {
-                        return;
+                        co_return;
                     }
-                    const auto prop = e.PropertyName();
+
                     if (prop == L"IsActive")
                     {
-                        _syncSelectionFromModel();
+                        strongThis->_syncSelectionFromModel();
                     }
                     else if (prop == L"Title" || prop == L"Icon" || prop == L"Background")
                     {
                         // Refresh this VM's native chrome in place.
-                        auto items = TabView().TabItems();
+                        auto items = strongThis->TabView().TabItems();
                         for (uint32_t i = 0; i < items.Size(); ++i)
                         {
                             if (const auto item = items.GetAt(i).try_as<MUXC::TabViewItem>())
                             {
-                                if (_vmFromItem(item) == vm)
+                                if (TabStripView::_vmFromItem(item) == vm)
                                 {
-                                    _applyChrome(item, vm);
+                                    strongThis->_applyChrome(item, vm);
                                     break;
                                 }
                             }
@@ -219,8 +272,8 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        _pushingSelection = true;
-        auto restore = wil::scope_exit([this]() { _pushingSelection = false; });
+        _selectionPushDepth++;
+        auto restore = wil::scope_exit([this]() { _selectionPushDepth--; });
         TabView().SelectedItem(activeItem);
     }
 
@@ -233,7 +286,7 @@ namespace winrt::TerminalApp::implementation
     // TabView mutation is a 0xc000027b failfast corner).
     void TabStripView::_onSelectionChanged(const IInspectable& /*sender*/, const SelectionChangedEventArgs& /*args*/)
     {
-        if (_pushingSelection)
+        if (_selectionPushDepth > 0)
         {
             return;
         }

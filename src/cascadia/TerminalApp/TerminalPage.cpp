@@ -8036,17 +8036,18 @@ namespace winrt::TerminalApp::implementation
         // freshly-split sibling leaf (whose strip the TabAdded arm now appends)
         // projects its row here.
         //
-        // Big-flip per-pane strip Slice 1 (#54): this is now the TabStripView
-        // UserControl, NOT a hand-built ListView cloning the inline PaneTabStrip.
-        // TabStripView carries the row ItemTemplate, the horizontal ItemsPanel,
-        // the ScrollViewer settings, SelectionMode="Single", and the
-        // {ThemeResource TabViewBackground} background INTERNALLY — so the
-        // previous clone's omission of ItemsPanel/scroll/SelectionMode (which
-        // stacked tabs vertically) is fixed by construction. Selection stays a
-        // pure projection of the model: the row highlight derives from each VM's
-        // IsActive; the activate/close intents are still raised by the VM
-        // (RequestActivate/RequestClose, wired in _appendPaneTabVm) and the page
-        // dispatches the model action.
+        // Workspaces M1 (#54, ADR-001): this is the TabStripView UserControl,
+        // which hosts the REAL MUX TabView (Microsoft.UI.Xaml.Controls.TabView —
+        // the same control the classic per-window tab row uses), NOT a re-skinned
+        // WUX ListView. The TabView renders the tab chrome (rounded top / flare /
+        // hover / between-tab separators), header text/icon/tooltip, horizontal
+        // layout, scroll overflow, and single-selection NATIVELY — none of that is
+        // hand-built here anymore. TabStripView projects the leaf's
+        // PaneTabViewModel collection into TabView.TabItems() manually (not via
+        // TabItemsSource binding). Selection stays a pure projection of the model:
+        // SelectedItem is pushed from each VM's IsActive; the activate/close
+        // intents are still raised by the VM (RequestActivate/RequestClose, wired
+        // in _appendPaneTabVm) and the page dispatches the model action.
         winrt::TerminalApp::TabStripView strip{};
         strip.ItemsSource(_paneTabStripForLeaf(leaf));
         Controls::Grid::SetRow(strip, 0);

@@ -20,10 +20,11 @@
 //     ActiveTabChanged diff arm drives the control.
 //   * TabView.SelectionChanged is a USER INTENT only → it raises the selected
 //     VM's RequestActivate (→ selectTab model action). The control never writes
-//     model state. A reentrancy guard (_pushingSelection) suppresses the
-//     SelectionChanged that the programmatic SelectedItem push re-fires, so the
-//     push never loops back into an intent (this is crash-avoidance — a
-//     re-entrant mutation inside a TabView callback is a 0xc000027b corner).
+//     model state. A reentrancy guard (_selectionPushDepth, a depth counter)
+//     suppresses the SelectionChanged that the programmatic SelectedItem push
+//     re-fires, so the push never loops back into an intent (this is
+//     crash-avoidance — a re-entrant mutation inside a TabView callback is a
+//     0xc000027b corner).
 //   * TabCloseRequested → the VM's RequestClose (→ closeTab model action).
 //
 // Drag is OFF (CanReorderTabs / CanDragTabs / AllowDropTabs = false, set in
@@ -61,10 +62,15 @@ namespace winrt::TerminalApp::implementation
         // selection projection). Rebuilt whenever the projection is rebuilt.
         std::vector<winrt::Windows::UI::Xaml::Data::INotifyPropertyChanged::PropertyChanged_revoker> _vmPropertyChangedRevokers;
 
-        // Reentrancy guard. True while we programmatically push SelectedItem from
-        // the model; suppresses the SelectionChanged the control re-fires so the
-        // model push never loops back into a RequestActivate intent.
-        bool _pushingSelection{ false };
+        // Reentrancy guard, a DEPTH COUNTER (not a bare bool). Non-zero while we
+        // programmatically push SelectedItem from the model; suppresses the
+        // SelectionChanged the control re-fires so the model push never loops back
+        // into a RequestActivate intent. A counter (++ on entry / -- on scope_exit)
+        // composes regardless of nesting order: _rebuildProjection guards the whole
+        // rebuild AND calls _syncSelectionFromModel, which guards again — with a
+        // bool the inner scope_exit would clear the outer guard early; the counter
+        // keeps it raised until the OUTERMOST scope unwinds.
+        int _selectionPushDepth{ 0 };
 
         // Tear down + rebuild the whole TabView.TabItems() projection from
         // _source (append every VM as a TabViewItem; re-subscribe each VM's
