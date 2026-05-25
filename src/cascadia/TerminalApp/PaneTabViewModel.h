@@ -69,6 +69,19 @@ namespace winrt::TerminalApp::implementation
                         : winrt::Windows::UI::Xaml::Visibility::Collapsed;
         }
 
+        // Slice 2a.4 follow-up (#54): the hover-highlight visibility — Visible iff
+        // the tab is hovered AND NOT active. The hover highlight shows only on a
+        // hovered UNSELECTED tab; the selected tab keeps its connected selected
+        // look, so the selected background and the hover highlight are mutually
+        // exclusive (they never both show). Mirrors ActiveToVisibility but takes
+        // two args (multi-arg x:Bind function binding). Re-evaluated by x:Bind
+        // whenever IsHovered OR IsActive raises PropertyChanged.
+        static winrt::Windows::UI::Xaml::Visibility HoverToVisibility(bool isHovered, bool isActive)
+        {
+            return (isHovered && !isActive) ? winrt::Windows::UI::Xaml::Visibility::Visible
+                                            : winrt::Windows::UI::Xaml::Visibility::Collapsed;
+        }
+
         // Intent signals (Big-flip Slice C, #54). These only raise events; they
         // never mutate this VM's state and never touch the WorkspaceModel. The
         // page subscribes and dispatches the model action (selectTab / closeTab),
@@ -127,6 +140,17 @@ namespace winrt::TerminalApp::implementation
         // APPENDED LAST (after Background) — inserting mid-runtimeclass shifts
         // vtable slots and trips the /RTCs "Stack around 'value' corrupted" trap.
         WINRT_OBSERVABLE_PROPERTY(bool, ShowSeparator, PropertyChanged.raise, false);
+
+        // Slice 2a.4 follow-up (#54): the hover-highlight projection, set by
+        // TerminalPage::_recomputePaneTabSeparators in the SAME pass as
+        // ShowSeparator (both driven by the same hover enter/exit event), so the
+        // hover highlight (HoverToVisibility(IsHovered, IsActive) gates a hover
+        // Border in the item template) and the separator hide update in lockstep —
+        // the desync between the old container PointerOver VSM and the page-driven
+        // separator hide is eliminated. PURE VIEW STATE — never written to the
+        // WorkspaceModel. APPENDED LAST (after ShowSeparator) — inserting
+        // mid-runtimeclass shifts vtable slots and trips the /RTCs trap.
+        WINRT_OBSERVABLE_PROPERTY(bool, IsHovered, PropertyChanged.raise, false);
     };
 }
 

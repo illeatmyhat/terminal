@@ -7575,8 +7575,32 @@ namespace TerminalAppLocalTests
     // restores sep(1)/sep(2). Pure VM/accessor assertions, NO layout/resize (the
     // headless std::clamp-resize trap). RED before the hover-aware recompute,
     // GREEN after.
+    //
+    // Slice 2a.4 follow-up (#54): the hover HIGHLIGHT (IsHovered) and the
+    // separator hide must change at the SAME instant — both are now projected in
+    // the SAME _recomputePaneTabSeparators pass, triggered by the SAME hover
+    // event. So in the SAME RunOnUIThread block that drives the hover we also
+    // assert the hovered VM's IsHovered is true and every other VM's IsHovered is
+    // false (and that exit clears it) — proving the highlight and the separators
+    // are set together. We also pin the HoverToVisibility helper mapping:
+    // (true,false)=Visible (hovered unselected → highlight), (true,true)=Collapsed
+    // (hovered selected → no highlight, the selected look wins), (false,false)=Collapsed.
     void WorkspaceTests::StripSlice2a4_HoverHidesAdjacentSeparators()
     {
+        using V = winrt::Windows::UI::Xaml::Visibility;
+
+        // The HoverToVisibility helper is a pure (isHovered && !isActive)
+        // projection — verify independent of any container (mirrors
+        // ActiveToVisibility / ShowSeparatorToVisibility coverage).
+        VERIFY_ARE_EQUAL(V::Visible, winrt::TerminalApp::PaneTabViewModel::HoverToVisibility(true, false),
+                         L"HoverToVisibility(hovered, unselected) must be Visible (the hover highlight shows)");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::HoverToVisibility(true, true),
+                         L"HoverToVisibility(hovered, selected) must be Collapsed (the selected look wins; no hover highlight)");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::HoverToVisibility(false, false),
+                         L"HoverToVisibility(not-hovered, unselected) must be Collapsed");
+        VERIFY_ARE_EQUAL(V::Collapsed, winrt::TerminalApp::PaneTabViewModel::HoverToVisibility(false, true),
+                         L"HoverToVisibility(not-hovered, selected) must be Collapsed");
+
         static constexpr std::wstring_view settingsJson{ LR"(
         {
             "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
@@ -7647,31 +7671,54 @@ namespace TerminalAppLocalTests
             return *v;
         };
 
-        Log::Comment(L"Baseline (no hover): tab0 selected -> [false, true, true, true, false].");
+        // Slice 2a.4 follow-up (#54): read a tab's IsHovered through the VM
+        // accessor (the same projection the item template's hover Border binds via
+        // HoverToVisibility(IsHovered, IsActive)).
+        const auto hov = [&](uint32_t i) {
+            const auto vm = page->_paneTabStripVmAtForTest(leaf0, i);
+            VERIFY_IS_NOT_NULL(vm, L"index in range");
+            return vm.IsHovered();
+        };
+
+        Log::Comment(L"Baseline (no hover): tab0 selected -> separators [false, true, true, true, false]; NO tab hovered.");
         result = RunOnUIThread([&]() {
             VERIFY_IS_FALSE(sep(0), L"sep0: tab0 selected -> no divider");
             VERIFY_IS_TRUE(sep(1), L"sep1: tab1|tab2 both unselected -> divider");
             VERIFY_IS_TRUE(sep(2), L"sep2: tab2|tab3 both unselected -> divider");
             VERIFY_IS_TRUE(sep(3), L"sep3: tab3|tab4 both unselected -> divider");
             VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
+
+            // No hover yet → every tab's highlight is off.
+            for (uint32_t i = 0; i < 5; ++i)
+            {
+                VERIFY_IS_FALSE(hov(i), L"baseline: no tab is hovered");
+            }
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Hover tab2 (RequestHoverEnter): sep1 (left divider) AND sep2 (right divider) hide; sep3 (non-adjacent) keeps its model value.");
+        Log::Comment(L"Hover tab2 (RequestHoverEnter): in the SAME recompute, the HIGHLIGHT lights on tab2 (only) AND sep1/sep2 hide — proving they are set together.");
         result = RunOnUIThread([&]() {
             const auto tab2Vm = page->_paneTabStripVmAtForTest(leaf0, 2);
             VERIFY_IS_NOT_NULL(tab2Vm);
             tab2Vm.RequestHoverEnter();
 
+            // Separators hide on both sides of the hovered tab.
             VERIFY_IS_FALSE(sep(0), L"sep0: still no divider (tab0 selected)");
             VERIFY_IS_FALSE(sep(1), L"sep1: tab2 hovered hides its LEFT divider (tab1|tab2)");
             VERIFY_IS_FALSE(sep(2), L"sep2: tab2 hovered hides its RIGHT divider (tab2|tab3)");
             VERIFY_IS_TRUE(sep(3), L"sep3: tab3|tab4 NOT adjacent to hovered tab2 -> keeps model value (divider)");
             VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
+
+            // The highlight — set in the SAME recompute pass — is on tab2 ONLY.
+            VERIFY_IS_FALSE(hov(0), L"tab0 not hovered");
+            VERIFY_IS_FALSE(hov(1), L"tab1 not hovered");
+            VERIFY_IS_TRUE(hov(2), L"tab2 IS hovered (highlight on, in lockstep with the separator hide)");
+            VERIFY_IS_FALSE(hov(3), L"tab3 not hovered");
+            VERIFY_IS_FALSE(hov(4), L"tab4 not hovered");
         });
         VERIFY_SUCCEEDED(result);
 
-        Log::Comment(L"Un-hover tab2 (RequestHoverExit): the adjacent dividers restore.");
+        Log::Comment(L"Un-hover tab2 (RequestHoverExit): the highlight clears AND the adjacent dividers restore — again in lockstep.");
         result = RunOnUIThread([&]() {
             const auto tab2Vm = page->_paneTabStripVmAtForTest(leaf0, 2);
             VERIFY_IS_NOT_NULL(tab2Vm);
@@ -7682,6 +7729,12 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(sep(2), L"sep2: restored after un-hover");
             VERIFY_IS_TRUE(sep(3), L"sep3: unchanged");
             VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
+
+            // Highlight cleared everywhere.
+            for (uint32_t i = 0; i < 5; ++i)
+            {
+                VERIFY_IS_FALSE(hov(i), L"after un-hover: no tab is hovered");
+            }
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -886,6 +886,9 @@ namespace winrt::TerminalApp::implementation
         // or active state (end of _appendPaneTabVm / _removePaneTabVm /
         // _setActivePaneTabVm). O(n) per call, n tiny. The separator is therefore
         // a pure model projection, MVVM-consistent with the rest of the strip.
+        // Slice 2a.4 follow-up (#54): this same pass also projects each VM's
+        // IsHovered (the hover highlight), so the highlight and the separator hide
+        // are recomputed together by the same hover event and update in lockstep.
         void _recomputePaneTabSeparators(::WorkspaceModel::PaneId leaf);
 
         // Live pane-tab title. Set the strip view-model whose stable Id matches

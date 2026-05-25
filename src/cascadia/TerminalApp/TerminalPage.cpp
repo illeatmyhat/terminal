@@ -7440,6 +7440,14 @@ namespace winrt::TerminalApp::implementation
     // item template binds the separator Border to
     // ShowSeparatorToVisibility(ShowSeparator)), recomputed after every mutation
     // of a leaf's strip membership or active state. O(n) per call, n tiny.
+    //
+    // Slice 2a.4 follow-up (#54): this SAME pass also projects the hover HIGHLIGHT
+    // (each VM's IsHovered) — because it already runs on every hover enter/exit and
+    // knows _hoveredPaneTabId, setting IsHovered here guarantees the highlight and
+    // the separator hide are recomputed together, triggered by the same hover event,
+    // so they update in lockstep (eliminating the old desync where the highlight
+    // rode a separate container PointerOver VSM). Hover stays a pure view projection;
+    // never written to the WorkspaceModel.
     void TerminalPage::_recomputePaneTabSeparators(::WorkspaceModel::PaneId leaf)
     {
         const auto it = _paneTabStrips.find(leaf);
@@ -7453,6 +7461,16 @@ namespace winrt::TerminalApp::implementation
         {
             const auto vm = strip.GetAt(i);
             const auto nextVm = (i + 1 < count) ? strip.GetAt(i + 1) : nullptr;
+            // Slice 2a.4 follow-up (#54): project the hover HIGHLIGHT in the SAME
+            // pass as the separator hide, driven by the SAME hover enter/exit event,
+            // so the highlight (IsHovered) and the dividers (ShowSeparator) update in
+            // lockstep — eliminating the old desync where the highlight rode the
+            // container ControlTemplate's PointerOver VSM (a different pointer
+            // mechanism that fired a step out of sync with this page recompute). The
+            // item template's hover Border binds HoverToVisibility(IsHovered, IsActive)
+            // so the highlight shows only on a hovered UNSELECTED tab. Pure view
+            // state — never written to the WorkspaceModel.
+            vm.IsHovered(_hoveredPaneTabId.has_value() && vm.Id() == *_hoveredPaneTabId);
             // Slice 2a.4 (#54): hover-aware. The divider between tab[i] and
             // tab[i+1] (separator[i]) shows ONLY between two consecutive UNSELECTED
             // tabs (the model rule) AND only when NEITHER of those two tabs is the

@@ -95,5 +95,28 @@ namespace TerminalApp
         void RequestHoverExit();
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> HoverEnterRequested;
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> HoverExitRequested;
+
+        // Slice 2a.4 follow-up (#54): the hover-highlight projection. IsHovered is
+        // set by TerminalPage::_recomputePaneTabSeparators in the SAME pass that
+        // recomputes ShowSeparator (both triggered by the same hover enter/exit
+        // event), so the hover HIGHLIGHT and the separator HIDE update in lockstep
+        // — they no longer desync (the old container ControlTemplate PointerOver
+        // VSM fast-path that fired on a different pointer mechanism is removed).
+        // PURE VIEW STATE — never written to the WorkspaceModel.
+        //
+        // HoverToVisibility gates the hover-highlight Border: Visible iff the tab
+        // is hovered AND NOT active (the selected tab keeps its connected selected
+        // look; the hover highlight shows only on a hovered UNSELECTED tab, so the
+        // selected background and the hover highlight are mutually exclusive).
+        // The highlight fill is the CONTENT color at 0.6 opacity (PaneTabViewModel
+        // .Background @ Opacity 0.6 in the template), matching the authoritative
+        // classic-WT hover color (Tab.cpp: hoverTabBrush.Color(color);
+        // hoverTabBrush.Opacity(0.6) where color is the terminal background),
+        // NOT the old static black overlay. Multi-arg x:Bind function binding.
+        // APPENDED LAST (after the hover events) — inserting mid-runtimeclass
+        // shifts vtable slots and trips the /RTCs "Stack around 'value' corrupted"
+        // trap.
+        Boolean IsHovered { get; set; };
+        static Windows.UI.Xaml.Visibility HoverToVisibility(Boolean isHovered, Boolean isActive);
     }
 }
