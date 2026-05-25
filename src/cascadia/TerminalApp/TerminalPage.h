@@ -949,6 +949,11 @@ namespace winrt::TerminalApp::implementation
         // headless test assert _recomputePaneTabSeparators applied the classic
         // "divider only between two consecutive unselected tabs" rule per VM.
         [[nodiscard]] std::optional<bool> _paneTabStripShowSeparatorForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const;
+        // Slice 2a.4 (#54): the strip VM at `index` in `leaf` (nullptr when no
+        // strip / index out of range). Lets a headless test raise the VM's hover
+        // intent (RequestHoverEnter/Exit) — the production wiring path — and assert
+        // the hover-aware ShowSeparator recompute hides the adjacent dividers.
+        [[nodiscard]] winrt::TerminalApp::PaneTabViewModel _paneTabStripVmAtForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const;
 
         // The per-leaf observable tab-strip view-models, keyed by the leaf's
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf
@@ -957,6 +962,19 @@ namespace winrt::TerminalApp::implementation
         // here). Each projected leaf's TabStripView (built in
         // _projectLeafContainer) binds its ItemsSource to THAT leaf's collection.
         std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::Foundation::Collections::IObservableVector<winrt::TerminalApp::PaneTabViewModel>> _paneTabStrips;
+
+        // Slice 2a.4 (#54): the transient hovered pane-tab id (the VM's stable
+        // TabId.v), or std::nullopt when no tab is hovered. PURE VIEW STATE — set
+        // from a row's RequestHoverEnter intent and cleared on RequestHoverExit
+        // (wired in _appendPaneTabVm), NEVER written to the WorkspaceModel. A
+        // single id (not per-leaf) suffices: only one strip is pointer-interactive
+        // at a time and tab ids are globally unique, so the hovered id matches at
+        // most one VM across all leaves. _recomputePaneTabSeparators reads it to
+        // hide the dividers on BOTH sides of the hovered tab (classic WinUI
+        // TabViewItem PointerOver sets TabSeparator.Opacity = 0). ShowSeparator
+        // thus combines model state + hover, but stays a pure downstream
+        // projection — it is never read back into the model.
+        std::optional<uint64_t> _hoveredPaneTabId{ std::nullopt };
 
         // Big-flip Slice F-0 (#54): the per-leaf content host Grids, keyed by the
         // leaf's PaneId. _projectLeafContainer creates one host per leaf in the

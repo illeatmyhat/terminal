@@ -77,12 +77,27 @@ namespace winrt::TerminalApp::implementation
         void RequestActivate();
         void RequestClose();
 
+        // Slice 2a.4 (#54): hover intent. Like RequestActivate/RequestClose these
+        // only raise events; they never mutate this VM and never touch the
+        // WorkspaceModel. The page tracks the hovered tab id (pure view state) and
+        // recomputes ShowSeparator to hide the dividers on both sides of the
+        // hovered tab. The item template's PointerEntered/PointerExited bind here.
+        void RequestHoverEnter();
+        void RequestHoverExit();
+
         til::property_changed_event PropertyChanged;
 
         // sender = *this (carries Id); args = null. The page resolves the tab
         // from the sender's Id and dispatches the model action.
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> ActivateRequested;
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> CloseRequested;
+
+        // Slice 2a.4 (#54): hover intent events. sender = *this (carries Id);
+        // args = null. The page sets/clears its transient hovered tab id from the
+        // sender's Id and recomputes the leaf's separators — pure view state,
+        // never written to the model.
+        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> HoverEnterRequested;
+        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> HoverExitRequested;
 
         // Stable identity (TabId.v); not observed.
         WINRT_PROPERTY(uint64_t, Id, 0);

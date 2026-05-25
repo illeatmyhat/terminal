@@ -354,6 +354,18 @@ namespace TerminalAppLocalTests
         // active positions.
         TEST_METHOD(StripSlice2a3_SeparatorShownOnlyBetweenUnselectedTabs);
 
+        // Slice 2a.4 (#54): hovering a pane-tab hides the dividers on BOTH sides
+        // of it (its own right divider AND the divider with its LEFT neighbour) —
+        // classic WinUI TabViewItem PointerOver sets TabSeparator.Opacity = 0.
+        // Drives a 3-tab strip to a config with two model-visible dividers, raises
+        // the middle tab's hover INTENT (RequestHoverEnter, the production path),
+        // and asserts both adjacent dividers hide while separators NOT adjacent to
+        // the hovered tab keep their model value; then un-hover (RequestHoverExit)
+        // restores them. Pure VM/accessor assertions, NO layout (the headless
+        // std::clamp-resize trap). RED before the hover-aware recompute, GREEN
+        // after.
+        TEST_METHOD(StripSlice2a4_HoverHidesAdjacentSeparators);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -7545,6 +7557,131 @@ namespace TerminalAppLocalTests
             VERIFY_IS_FALSE(sep(0), L"tab0: right-neighbour tab1 is selected -> no separator");
             VERIFY_IS_FALSE(sep(1), L"tab1: selected -> no separator");
             VERIFY_IS_FALSE(sep(2), L"tab2: last tab -> no separator");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 2a.4 (#54): hovering a pane-tab hides the dividers on BOTH sides of
+    // it (the hovered tab's own right divider AND the divider with its LEFT
+    // neighbour) — classic WinUI TabViewItem PointerOver sets
+    // TabSeparator.Opacity = 0. We build a 5-tab strip with tab0 SELECTED, so the
+    // model-derived dividers are [false, true, true, true, n/a]: sep(0) hidden
+    // (tab0 selected), sep(1)=tab1|tab2, sep(2)=tab2|tab3, sep(3)=tab3|tab4 all
+    // shown (consecutive unselected), sep(4) n/a (last). We raise tab2's hover
+    // INTENT (RequestHoverEnter — the production wiring path, not a direct field
+    // poke) and assert sep(1) (tab1|tab2, tab2 is the right tab) AND sep(2)
+    // (tab2|tab3, tab2 is the left tab) BOTH hide, while sep(3) (tab3|tab4, NOT
+    // adjacent to tab2) keeps its model value (true). Then RequestHoverExit
+    // restores sep(1)/sep(2). Pure VM/accessor assertions, NO layout/resize (the
+    // headless std::clamp-resize trap). RED before the hover-aware recompute,
+    // GREEN after.
+    void WorkspaceTests::StripSlice2a4_HoverHidesAdjacentSeparators()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x5A00 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId tab0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            ws0 = page->_workspaceModelState->workspaces_view()[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(&page->_workspaceModelState->workspaces_view()[0].root);
+            VERIFY_IS_NOT_NULL(leaf);
+            tab0 = leaf->tabs[0].id;
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Grow the strip to [tab0..tab4] then SELECT tab0.");
+        result = RunOnUIThread([&]() {
+            for (int i = 0; i < 4; ++i)
+            {
+                auto a = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ ::WorkspaceModel::TerminalSpec{} });
+                VERIFY_IS_TRUE(a.id.valid());
+                page->_applyWorkspaceAction(std::move(a.state));
+            }
+            VERIFY_ARE_EQUAL(5u, page->_paneTabStripSizeForTest(leaf0));
+
+            // Select tab0 so the trailing four tabs are all unselected and adjacent
+            // (the model dividers between them all show).
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, tab0);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+
+            const auto activeId = page->_activePaneTabIdForTest(leaf0);
+            VERIFY_IS_TRUE(activeId.has_value());
+            VERIFY_ARE_EQUAL(tab0.v, *activeId);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        const auto sep = [&](uint32_t i) {
+            const auto v = page->_paneTabStripShowSeparatorForTest(leaf0, i);
+            VERIFY_IS_TRUE(v.has_value(), L"index in range");
+            return *v;
+        };
+
+        Log::Comment(L"Baseline (no hover): tab0 selected -> [false, true, true, true, false].");
+        result = RunOnUIThread([&]() {
+            VERIFY_IS_FALSE(sep(0), L"sep0: tab0 selected -> no divider");
+            VERIFY_IS_TRUE(sep(1), L"sep1: tab1|tab2 both unselected -> divider");
+            VERIFY_IS_TRUE(sep(2), L"sep2: tab2|tab3 both unselected -> divider");
+            VERIFY_IS_TRUE(sep(3), L"sep3: tab3|tab4 both unselected -> divider");
+            VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Hover tab2 (RequestHoverEnter): sep1 (left divider) AND sep2 (right divider) hide; sep3 (non-adjacent) keeps its model value.");
+        result = RunOnUIThread([&]() {
+            const auto tab2Vm = page->_paneTabStripVmAtForTest(leaf0, 2);
+            VERIFY_IS_NOT_NULL(tab2Vm);
+            tab2Vm.RequestHoverEnter();
+
+            VERIFY_IS_FALSE(sep(0), L"sep0: still no divider (tab0 selected)");
+            VERIFY_IS_FALSE(sep(1), L"sep1: tab2 hovered hides its LEFT divider (tab1|tab2)");
+            VERIFY_IS_FALSE(sep(2), L"sep2: tab2 hovered hides its RIGHT divider (tab2|tab3)");
+            VERIFY_IS_TRUE(sep(3), L"sep3: tab3|tab4 NOT adjacent to hovered tab2 -> keeps model value (divider)");
+            VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Un-hover tab2 (RequestHoverExit): the adjacent dividers restore.");
+        result = RunOnUIThread([&]() {
+            const auto tab2Vm = page->_paneTabStripVmAtForTest(leaf0, 2);
+            VERIFY_IS_NOT_NULL(tab2Vm);
+            tab2Vm.RequestHoverExit();
+
+            VERIFY_IS_FALSE(sep(0), L"sep0: still no divider (tab0 selected)");
+            VERIFY_IS_TRUE(sep(1), L"sep1: restored after un-hover");
+            VERIFY_IS_TRUE(sep(2), L"sep2: restored after un-hover");
+            VERIFY_IS_TRUE(sep(3), L"sep3: unchanged");
+            VERIFY_IS_FALSE(sep(4), L"sep4: last tab -> no divider");
         });
         VERIFY_SUCCEEDED(result);
     }

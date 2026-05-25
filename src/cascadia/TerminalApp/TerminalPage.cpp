@@ -7340,6 +7340,38 @@ namespace winrt::TerminalApp::implementation
             page->_applyWorkspaceAction(std::move(next));
         });
 
+        // Slice 2a.4 (#54): hover intent → transient hovered-id tracking. The VM
+        // raises HoverEnter/HoverExit (it never touches the model); the page
+        // records/clears the hovered tab id (PURE view state) and recomputes this
+        // leaf's separators so the dividers on BOTH sides of the hovered tab hide
+        // (classic WinUI TabViewItem PointerOver: TabSeparator.Opacity = 0). The
+        // hovered id is captured by VALUE on the leaf so the recompute targets the
+        // right strip; it is NEVER written to the WorkspaceModel.
+        vm.HoverEnterRequested([weakThis = get_weak(), leaf](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            page->_hoveredPaneTabId = sender.Id();
+            page->_recomputePaneTabSeparators(leaf);
+        });
+
+        vm.HoverExitRequested([weakThis = get_weak(), leaf](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& /*args*/) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            // Only clear if WE are the hovered tab (a stale exit from a tab that
+            // isn't the current hovered one must not wipe a newer enter).
+            if (page->_hoveredPaneTabId == sender.Id())
+            {
+                page->_hoveredPaneTabId = std::nullopt;
+            }
+            page->_recomputePaneTabSeparators(leaf);
+        });
+
         strip.Append(vm);
 
         // The strip membership changed — re-derive which dividers show (classic
@@ -7420,9 +7452,23 @@ namespace winrt::TerminalApp::implementation
         for (uint32_t i = 0; i < count; ++i)
         {
             const auto vm = strip.GetAt(i);
-            const bool show = (i + 1 < count) &&
+            const auto nextVm = (i + 1 < count) ? strip.GetAt(i + 1) : nullptr;
+            // Slice 2a.4 (#54): hover-aware. The divider between tab[i] and
+            // tab[i+1] (separator[i]) shows ONLY between two consecutive UNSELECTED
+            // tabs (the model rule) AND only when NEITHER of those two tabs is the
+            // hovered one — so hovering tab[i] hides separator[i] (its right
+            // divider) AND separator[i-1] (the divider with its LEFT neighbour),
+            // matching classic WinUI TabViewItem PointerOver (TabSeparator.Opacity
+            // = 0 on both sides). Hover is a view concern; ShowSeparator now
+            // combines model state + hover but remains a pure downstream
+            // projection — it is never written back to the model.
+            const bool hoveringEither = _hoveredPaneTabId.has_value() &&
+                                        (vm.Id() == *_hoveredPaneTabId ||
+                                         (nextVm != nullptr && nextVm.Id() == *_hoveredPaneTabId));
+            const bool show = (nextVm != nullptr) &&
                               !vm.IsActive() &&
-                              !strip.GetAt(i + 1).IsActive();
+                              !nextVm.IsActive() &&
+                              !hoveringEither;
             vm.ShowSeparator(show);
         }
     }
@@ -7637,6 +7683,20 @@ namespace winrt::TerminalApp::implementation
             return std::nullopt;
         }
         return it->second.GetAt(index).ShowSeparator();
+    }
+
+    // Slice 2a.4 (#54): the strip VM at `index` in `leaf` (nullptr when no strip
+    // / index out of range). Lets a headless test raise the VM's hover intent
+    // (RequestHoverEnter/Exit) — the production wiring path — and assert the
+    // hover-aware ShowSeparator recompute hides the adjacent dividers.
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_paneTabStripVmAtForTest(::WorkspaceModel::PaneId leaf, uint32_t index) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end() || index >= it->second.Size())
+        {
+            return nullptr;
+        }
+        return it->second.GetAt(index);
     }
 
     // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane

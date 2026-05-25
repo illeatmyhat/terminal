@@ -30,4 +30,20 @@ namespace winrt::TerminalApp::implementation
     {
         CloseRequested.raise(*this, nullptr);
     }
+
+    // Slice 2a.4 (#54): hover intent. Like RequestActivate/RequestClose these
+    // only raise events — they never mutate this VM and never touch the
+    // WorkspaceModel. The page tracks the hovered tab id (transient view state)
+    // and recomputes ShowSeparator so hovering a tab hides the dividers on both
+    // of its sides (classic WinUI TabViewItem PointerOver sets the separator's
+    // opacity to 0). Bound to the item template's PointerEntered/PointerExited.
+    void PaneTabViewModel::RequestHoverEnter()
+    {
+        HoverEnterRequested.raise(*this, nullptr);
+    }
+
+    void PaneTabViewModel::RequestHoverExit()
+    {
+        HoverExitRequested.raise(*this, nullptr);
+    }
 }

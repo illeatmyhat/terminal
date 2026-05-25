@@ -78,8 +78,21 @@
             <ResourceDictionary.ThemeDictionaries>
                 <ResourceDictionary x:Key="Default">
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
+                    <!--
+                        Slice 2a.4 (#54): the hovered/pressed tab fill INTENTIONALLY
+                        DARKENS. Classic WinUI 2.8 TabViewItem PointerOver sets
+                        TabContainer.Background = TabViewItemHeaderBackgroundPointerOver
+                        (a translucent LayerOnMicaBaseAlt* MICA overlay). That mica
+                        overlay is designed to sit over a Mica/acrylic backdrop and is
+                        nearly INVISIBLE over our SOLID #2E2E2E (TabViewBackground)
+                        strip — the re-skin had mapped to it and hover read as ~nothing.
+                        We instead overlay a semi-transparent BLACK so the hovered tab
+                        visibly darkens TOWARD the content shade (the user, in dark
+                        theme, asked for a clear dark highlight). Opacities are STARTING
+                        values, tunable live — Pressed a touch darker than PointerOver.
+                    -->
+                    <SolidColorBrush x:Key="PaneTabHeaderBackgroundPointerOver" Color="Black" Opacity="0.18" />
+                    <SolidColorBrush x:Key="PaneTabHeaderBackgroundPressed" Color="Black" Opacity="0.28" />
                     <!--
                         Slice 2a.2 (#54): there is NO static selected-tab fill key
                         anymore. The selected fill is the LIVE terminal background
@@ -96,8 +109,9 @@
                 </ResourceDictionary>
                 <ResourceDictionary x:Key="Light">
                     <StaticResource x:Key="PaneTabHeaderBackground" ResourceKey="LayerOnMicaBaseAltFillColorTransparentBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundPointerOver" ResourceKey="LayerOnMicaBaseAltFillColorSecondaryBrush" />
-                    <StaticResource x:Key="PaneTabHeaderBackgroundPressed" ResourceKey="LayerOnMicaBaseAltFillColorDefaultBrush" />
+                    <!--  Slice 2a.4 (#54): same darkening black overlay as Default — the invisible mica overlay is replaced by a visible darken (see Default).  -->
+                    <SolidColorBrush x:Key="PaneTabHeaderBackgroundPointerOver" Color="Black" Opacity="0.18" />
+                    <SolidColorBrush x:Key="PaneTabHeaderBackgroundPressed" Color="Black" Opacity="0.28" />
                     <!--  Slice 2a.2 (#54): no static selected fill — it's the live content bg color via PaneTabViewModel.Background (see Default).  -->
                     <StaticResource x:Key="PaneTabHeaderForeground" ResourceKey="TextFillColorSecondaryBrush" />
                     <StaticResource x:Key="PaneTabHeaderForegroundSelected" ResourceKey="TextFillColorPrimaryBrush" />
@@ -306,7 +320,19 @@
                     PaneTabViewModel — a pure projection of the model, never the
                     ListView's click-selection. A tap raises RequestActivate.
                 -->
+                <!--
+                    Slice 2a.4 (#54): PointerEntered/Exited raise the VM's hover
+                    INTENT (RequestHoverEnter/Exit), mirroring how Tapped binds to
+                    RequestActivate. The page tracks the hovered tab id (pure view
+                    state, NEVER written to WorkspaceModel) and recomputes
+                    ShowSeparator so hovering a tab hides the dividers on BOTH sides
+                    of it — classic WinUI TabViewItem PointerOver sets
+                    TabSeparator.Opacity = 0. Bound function-call form (no args), like
+                    RequestActivate, so the PointerRoutedEventArgs is ignored.
+                -->
                 <Grid MinHeight="{StaticResource PaneTabItemMinHeight}"
+                      PointerEntered="{x:Bind RequestHoverEnter}"
+                      PointerExited="{x:Bind RequestHoverExit}"
                       Tapped="{x:Bind RequestActivate}">
                     <!--
                         Slice 2a.1/2a.2 (#54): the CONNECTED selected-tab
