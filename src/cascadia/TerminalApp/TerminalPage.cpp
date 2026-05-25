@@ -7429,18 +7429,20 @@ namespace winrt::TerminalApp::implementation
     // `contentBrush` is null (no live brush yet) we set the VM Background to
     // null (the Border renders neutral) — we must NOT call ColorFromBrush on a
     // null brush (it dereferences the brush).
+    //
+    // Slice 2a.2 follow-up: we short-circuit on color equality. This runs on the
+    // content's TitleChanged (per-prompt for many shells), and WINRT_OBSERVABLE_PROPERTY's
+    // setter guards Background only by REFERENCE identity — a fresh SolidColorBrush
+    // is never reference-equal to the stored one, so without this check we'd
+    // re-allocate a brush and raise PropertyChanged(Background) on every refresh
+    // even when the color is unchanged, churning the bound Border re-eval. So we
+    // only push a new brush when the resolved color actually differs from what the
+    // VM already carries. This does NOT change the rendered color.
     winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabBackgroundForTab(::WorkspaceModel::TabId tab, const winrt::Windows::UI::Xaml::Media::Brush& contentBrush)
     {
         if (!tab.valid())
         {
             return nullptr;
-        }
-
-        Media::Brush brush{ nullptr };
-        if (contentBrush != nullptr)
-        {
-            const til::color color{ ThemeColor::ColorFromBrush(contentBrush) };
-            brush = Media::SolidColorBrush{ static_cast<winrt::Windows::UI::Color>(color) };
         }
 
         for (const auto& [leaf, strip] : _paneTabStrips)
@@ -7449,7 +7451,27 @@ namespace winrt::TerminalApp::implementation
             {
                 if (vm.Id() == tab.v)
                 {
-                    vm.Background(brush);
+                    if (contentBrush == nullptr)
+                    {
+                        // Only clear when the VM currently carries a brush; a
+                        // null→null set would raise PropertyChanged needlessly.
+                        if (vm.Background() != nullptr)
+                        {
+                            vm.Background(nullptr);
+                        }
+                        return vm;
+                    }
+
+                    const til::color newColor{ ThemeColor::ColorFromBrush(contentBrush) };
+                    if (const auto current = vm.Background().try_as<Media::SolidColorBrush>())
+                    {
+                        if (til::color{ current.Color() } == newColor)
+                        {
+                            // Same color already in place — no churn.
+                            return vm;
+                        }
+                    }
+                    vm.Background(Media::SolidColorBrush{ static_cast<winrt::Windows::UI::Color>(newColor) });
                     return vm;
                 }
             }
@@ -7545,6 +7567,21 @@ namespace winrt::TerminalApp::implementation
             return std::nullopt;
         }
         return til::color{ ThemeColor::ColorFromBrush(brush) };
+    }
+
+    // Slice 2a.2 follow-up (#54): the first VM in `leaf`'s strip (nullptr when
+    // the leaf has no strip / it's empty). Lets a test subscribe to the VM's
+    // PropertyChanged and count Background raises, to pin the color-equality
+    // short-circuit (no raise on an unchanged-color refresh; a raise on a real
+    // color change).
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_paneTabStripFirstVmForTest(::WorkspaceModel::PaneId leaf) const
+    {
+        const auto it = _paneTabStrips.find(leaf);
+        if (it == _paneTabStrips.end() || it->second.Size() == 0)
+        {
+            return nullptr;
+        }
+        return it->second.GetAt(0);
     }
 
     // Big-flip Slice D (#54): rebuild the active workspace's projected SPLIT pane

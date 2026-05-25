@@ -223,6 +223,14 @@ namespace TerminalAppLocalTests
         // event). Proves both the mount-seed and the title-cadence refresh.
         TEST_METHOD(LivePaneTabBackground_TracksContentBackground);
 
+        // Slice 2a.2 follow-up (#54): the bg refresh runs on every TitleChanged
+        // (per-prompt cadence). Background's WINRT_OBSERVABLE_PROPERTY setter
+        // guards by REFERENCE identity, so a freshly-allocated brush of the same
+        // color would still raise PropertyChanged on every refresh. This pins the
+        // color-equality short-circuit: an unchanged-color refresh raises NO
+        // Background PropertyChanged, while a genuine color change still does.
+        TEST_METHOD(LivePaneTabBackground_NoChurnOnUnchangedColor);
+
         // Big-flip Slice D (#54): the active workspace's SPLIT pane tree is
         // projected into nested XAML inside the still-Collapsed
         // WorkspaceContentHost — a split Grid (two star-sized cells along the
@@ -4779,6 +4787,129 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(updated.has_value());
             VERIFY_ARE_EQUAL(til::color{ blue }, *updated,
                              L"the strip VM Background color must follow the content's new bg (blue) on the TitleChanged-driven refresh");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Slice 2a.2 follow-up (#54): the bg refresh piggybacks on TitleChanged
+    // (per-prompt cadence for many shells). The VM's Background is a
+    // WINRT_OBSERVABLE_PROPERTY whose setter guards by REFERENCE identity, so a
+    // freshly-allocated SolidColorBrush of the SAME color is never reference-equal
+    // to the stored one — without a color-equality short-circuit, every refresh
+    // would re-allocate a brush and raise PropertyChanged(Background), churning
+    // the bound Border re-eval. This test subscribes to the strip VM's
+    // PropertyChanged, counts "Background" raises, then:
+    //   (1) drives a refresh with the SAME content color (SetTitle again, bg
+    //       brush unchanged) and asserts NO new Background raise, and
+    //   (2) drives a refresh with a GENUINE new color and asserts exactly one new
+    //       Background raise.
+    // Headless: pure VM/accessor assertions, no layout/resize.
+    void WorkspaceTests::LivePaneTabBackground_NoChurnOnUnchangedColor()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        const winrt::Windows::UI::Color red{ 255, 255, 0, 0 };
+        const winrt::Windows::UI::Color green{ 255, 0, 255, 0 };
+
+        // The startup tab's content is seeded RED at mount (same factory pattern
+        // as LivePaneTabBackground_TracksContentBackground).
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks, red](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks, red](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xB100 + mocks->size()));
+                mock->SetBackgroundBrush(Media::SolidColorBrush{ red });
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto backgroundRaises = std::make_shared<int>(0);
+
+        auto result = RunOnUIThread([&]() {
+            VERIFY_IS_TRUE(page->_workspaceView != nullptr);
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            const auto seeded = page->_paneTabStripFirstBackgroundForTest(leaf0);
+            VERIFY_IS_TRUE(seeded.has_value());
+            VERIFY_ARE_EQUAL(til::color{ red }, *seeded,
+                             L"precondition: the strip VM Background is seeded red at mount");
+
+            // Subscribe AFTER mount so we only count refresh-driven raises, and
+            // tally only the Background property.
+            vm.PropertyChanged([backgroundRaises](const auto&, const winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs& args) {
+                if (args.PropertyName() == L"Background")
+                {
+                    ++(*backgroundRaises);
+                }
+            });
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Drive a refresh with the SAME content color (bg brush unchanged) — must NOT raise Background");
+        result = RunOnUIThread([&]() {
+            // The bg brush is still red; SetTitle raises TitleChanged which drives
+            // the bg refresh. The color-equality short-circuit must skip the set.
+            (*mocks)[0]->SetTitle(L"same-color-1");
+            (*mocks)[0]->SetTitle(L"same-color-2");
+
+            VERIFY_ARE_EQUAL(0, *backgroundRaises,
+                             L"an unchanged-color refresh must NOT raise Background PropertyChanged (no churn)");
+
+            // Also set a brand-new brush of the IDENTICAL color: still no raise,
+            // because the short-circuit compares COLOR, not brush reference.
+            (*mocks)[0]->SetBackgroundBrush(Media::SolidColorBrush{ red });
+            (*mocks)[0]->SetTitle(L"same-color-3");
+
+            VERIFY_ARE_EQUAL(0, *backgroundRaises,
+                             L"a fresh brush of the identical color must NOT raise Background (color-equality, not reference)");
+
+            const auto still = page->_paneTabStripFirstBackgroundForTest(leaf0);
+            VERIFY_IS_TRUE(still.has_value());
+            VERIFY_ARE_EQUAL(til::color{ red }, *still,
+                             L"the rendered color is unchanged (still red) — the short-circuit does not alter it");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Drive a refresh with a GENUINE new color (green) — must raise Background exactly once");
+        result = RunOnUIThread([&]() {
+            (*mocks)[0]->SetBackgroundBrush(Media::SolidColorBrush{ green });
+            (*mocks)[0]->SetTitle(L"now-green");
+
+            VERIFY_ARE_EQUAL(1, *backgroundRaises,
+                             L"a genuine color change must raise Background PropertyChanged exactly once");
+
+            const auto updated = page->_paneTabStripFirstBackgroundForTest(leaf0);
+            VERIFY_IS_TRUE(updated.has_value());
+            VERIFY_ARE_EQUAL(til::color{ green }, *updated,
+                             L"the strip VM Background color follows the content's new bg (green)");
+
+            // And a follow-up refresh at the SAME (now green) color again raises
+            // nothing — the short-circuit re-armed at the new color.
+            (*mocks)[0]->SetTitle(L"still-green");
+            VERIFY_ARE_EQUAL(1, *backgroundRaises,
+                             L"a same-color refresh after the change still raises nothing (count stays 1)");
         });
         VERIFY_SUCCEEDED(result);
     }

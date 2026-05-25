@@ -929,6 +929,10 @@ namespace winrt::TerminalApp::implementation
         // when no strip / the VM's Background is unset). Lets a test assert the
         // selected-tab background projection follows the mounted content's bg.
         [[nodiscard]] std::optional<til::color> _paneTabStripFirstBackgroundForTest(::WorkspaceModel::PaneId leaf) const;
+        // Slice 2a.2 follow-up (#54): the first strip VM itself (nullptr when no
+        // strip), so a test can subscribe to its PropertyChanged and assert the
+        // color-equality short-circuit raises Background only on a real change.
+        [[nodiscard]] winrt::TerminalApp::PaneTabViewModel _paneTabStripFirstVmForTest(::WorkspaceModel::PaneId leaf) const;
 
         // The per-leaf observable tab-strip view-models, keyed by the leaf's
         // PaneId. Mutated ONLY by the helpers above (driven by the arms). A leaf
