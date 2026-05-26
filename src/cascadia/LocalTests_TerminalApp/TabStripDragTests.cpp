@@ -7,6 +7,7 @@
 
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/TerminalApp.h>
 
 using namespace WEX::Logging;
 using namespace WEX::TestExecution;
@@ -183,6 +184,62 @@ namespace TerminalAppLocalTests
             VERIFY_IS_TRUE(bytes.find("XAML.UnhandledException") != std::string::npos, L"crash.log should be the XAML-routed kind");
 
             dumpFileToLog(crashLogPath(), L"crash.log");
+        }
+
+        // Slice 3b: stand up a REAL TabStripView (the control the drag handlers
+        // live on) under the crash-capture surface, with NO TerminalPage -- a
+        // lightweight, standalone drag rig (vs. WorkspaceTests, which hosts the
+        // strip through a full flag-on page). Prove the bare strip materializes
+        // its inner MUX TabView, arms the three drag flags (the
+        // AllowDropTabs+reorder combo that is the 0xc000027b drag-out failfast
+        // surface; the strip's ctor wires TabDroppedOutside to satisfy it), and
+        // projects one Tag-carrying TabViewItem per PaneTabViewModel. This is the
+        // host that slice 3c (programmatic _onTabStripDrop) and 3d (synthesized
+        // drag-out) will drive.
+        TEST_METHOD(HostRealTabStripView_ProjectsItems_DragFlagsArmed)
+        {
+            using namespace TerminalApp::Diagnostics;
+            namespace MUXC = winrt::Microsoft::UI::Xaml::Controls;
+
+            Breadcrumb(L"3b.Begin");
+            const auto result = RunOnUIThread([]() {
+                Breadcrumb(L"3b.ConstructStrip");
+                winrt::TerminalApp::TabStripView strip{};
+
+                const auto tabView = strip.TabViewControl();
+                VERIFY_IS_NOT_NULL(tabView, L"the bare TabStripView must materialize its inner MUX TabView");
+
+                // The crash-relevant configuration: all three armed in XAML. The
+                // AllowDropTabs(true) demands a wired TabDroppedOutside handler or a
+                // drag-out is the 0xc000027b failfast (the ctor wires it).
+                VERIFY_IS_TRUE(tabView.CanReorderTabs(), L"CanReorderTabs armed (within-leaf reorder)");
+                VERIFY_IS_TRUE(tabView.CanDragTabs(), L"CanDragTabs armed (cross-leaf drag source)");
+                VERIFY_IS_TRUE(tabView.AllowDropTabs(), L"AllowDropTabs armed (cross-leaf drop target)");
+
+                Breadcrumb(L"3b.ProjectVMs");
+                auto source = winrt::single_threaded_observable_vector<winrt::TerminalApp::PaneTabViewModel>();
+                for (uint64_t i = 0; i < 3; ++i)
+                {
+                    winrt::TerminalApp::PaneTabViewModel vm{};
+                    vm.Id(0x3B00 + i);
+                    vm.Title(winrt::hstring{ L"3b tab " + std::to_wstring(i) });
+                    source.Append(vm);
+                }
+                strip.ItemsSource(source);
+
+                VERIFY_ARE_EQUAL(3u, tabView.TabItems().Size(), L"the strip projects one TabViewItem per VM");
+
+                // Each TabViewItem carries its VM in Tag -- the drag-identity path
+                // that _onTabStripDrop (3c) reads back from the DataPackage.
+                const auto item0 = tabView.TabItems().GetAt(0).try_as<MUXC::TabViewItem>();
+                VERIFY_IS_NOT_NULL(item0, L"projected item is a TabViewItem");
+                const auto vm0 = item0.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
+                VERIFY_IS_NOT_NULL(vm0, L"each TabViewItem.Tag is its PaneTabViewModel");
+                VERIFY_ARE_EQUAL(static_cast<uint64_t>(0x3B00), vm0.Id());
+
+                Breadcrumb(L"3b.OK");
+            });
+            VERIFY_SUCCEEDED(result);
         }
     };
 }
