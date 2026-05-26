@@ -18,6 +18,14 @@
 // item opens it and routes its ColorSelected/ColorCleared as model intents.
 #include "ColorPickupFlyout.h"
 
+// Workspaces #55 (custom drag): the in-process reorder pointer gesture — routed
+// pointer events + pointer capture, an Escape-cancel CoreWindow key hook, and
+// VisualTreeHelper to walk a pressed element up to its TabViewItem.
+#include <winrt/Windows.UI.Xaml.Input.h>
+#include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.System.h>
+
 #include "TabStripView.g.cpp"
 
 using namespace winrt;
@@ -41,35 +49,27 @@ namespace winrt::TerminalApp::implementation
         TabView().SelectionChanged({ this, &TabStripView::_onSelectionChanged });
         TabView().TabCloseRequested({ this, &TabStripView::_onTabCloseRequested });
 
-        // Workspaces M6a + M6b (#54, ADR-001): tab drag. All three drag flags are
-        // set TOGETHER in XAML — CanReorderTabs(true) (MUX reorders TabItems
-        // internally for a WITHIN-leaf drag), CanDragTabs(true) + AllowDropTabs(true)
-        // (the CROSS-leaf inter-control move). Because AllowDropTabs is true the
-        // tear-out dispatcher is armed → a drag-out with no TabDroppedOutside handler
-        // is the 0xc000027b failfast, so that handler MUST be wired here in the SAME
-        // change as the flag flip (it is — _onTabDroppedOutside, an inert no-op
-        // marking the M8 boundary).
-        //
-        // M6a (within-leaf): TabDragStarting opens the rearrange window; TabItemsChanged
-        // records the MUX-internal from/to; TabDragCompleted translates from≠to into
-        // the MoveTabRequested intent (the page dispatches moveTab and the diff
-        // re-projects — no write-back here).
-        //
-        // M6b (cross-leaf, inter-control via DataPackage): TabDragStarting ALSO stuffs
-        // the dragged VM's Id + our PID into the DataPackage; the DESTINATION strip
-        // accepts the Move on TabStripDragOver (PID-guarded) and, on TabStripDrop,
-        // hit-tests the drop index and raises the SAME MoveTabRequested intent with
-        // ITS OWN LeafId as the destination, then reconciles both strips from the
-        // model (the durable-divergence safety net — a cross-leaf moveTab CAN no-op).
-        //
-        // These wire ONCE (the TabView outlives every rebuild), mirroring the
-        // selection intents above.
-        TabView().TabDragStarting({ this, &TabStripView::_onTabDragStarting });
-        TabView().TabItemsChanged({ this, &TabStripView::_onTabItemsChanged });
-        TabView().TabDragCompleted({ this, &TabStripView::_onTabDragCompleted });
-        TabView().TabStripDragOver({ this, &TabStripView::_onTabStripDragOver });
-        TabView().TabStripDrop({ this, &TabStripView::_onTabStripDrop });
-        TabView().TabDroppedOutside({ this, &TabStripView::_onTabDroppedOutside });
+        // Workspaces #55 (custom drag): the within-leaf reorder pointer gesture.
+        // MUX's built-in tab drag is OFF (all three flags false in XAML — it arms a
+        // shell CoreDragOperation that fails E_ACCESSDENIED → 0xc000027b here; see the
+        // .h banner). Instead, pointer handlers on the TabView detect the gesture and a
+        // transparent overlay captures it. We register the TabView handlers with
+        // AddHandler(handledEventsToo=true) so the TabViewItem's own pointer handling
+        // (selection visual states) can't swallow them before we see the press/move.
+        // The overlay's own handlers (plain events — nothing else touches the overlay)
+        // drive the captured phase. All wire ONCE; the TabView + overlay outlive every
+        // projection rebuild, so `this` (raw — no refcount, no cycle) is safe: neither
+        // element can outlive the strip that owns them.
+        TabView().AddHandler(UIElement::PointerPressedEvent(),
+                             winrt::box_value(Input::PointerEventHandler{ this, &TabStripView::_onStripPointerPressed }),
+                             true);
+        TabView().AddHandler(UIElement::PointerMovedEvent(),
+                             winrt::box_value(Input::PointerEventHandler{ this, &TabStripView::_onStripPointerMoved }),
+                             true);
+        DragOverlay().PointerMoved({ this, &TabStripView::_onOverlayPointerMoved });
+        DragOverlay().PointerReleased({ this, &TabStripView::_onOverlayPointerReleased });
+        DragOverlay().PointerCaptureLost({ this, &TabStripView::_onOverlayPointerCaptureLost });
+        DragOverlay().PointerCanceled({ this, &TabStripView::_onOverlayPointerCaptureLost });
     }
 
     IInspectable TabStripView::ItemsSource()
@@ -944,229 +944,296 @@ namespace winrt::TerminalApp::implementation
         return item.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
     }
 
-    // Workspaces M6a + M6b (#54, ADR-001): a drag began on THIS strip.
-    //
-    // M6a (within-leaf): open the rearrange window and clear the captured from/to
-    // (ports classic TerminalPage::_TabDragStarted, TabManagement.cpp:1275). While
-    // _rearranging is set, _onTabItemsChanged interprets the MUX-internal TabItems
-    // mutation as the optimistic reorder write-back (recording its indices) rather
-    // than a projection rebuild.
-    //
-    // M6b (cross-leaf): stuff the DataPackage with the dragged VM's stable Id +
-    // our process id, and request a Move (ports classic
-    // TerminalPage::_onTabDragStarting, TerminalPage.cpp:5907-5951 — but we carry
-    // the model TabId, NOT a windowId/Tab handle; the destination strip resolves
-    // the move purely from `paneTabId`). The PID lets a sibling strip's
-    // TabStripDragOver/Drop reject a drag from the classic window's TabView or
-    // another process. The dragged VM is resolved AT FIRE TIME from the dragged
-    // TabViewItem's Tag (args.Tab()) — a rebuild mid-gesture could swap the item,
-    // so we never index TabItems positionally. A null VM (a torn-down row) leaves
-    // no payload, so the drop is a safe no-op.
-    void TabStripView::_onTabDragStarting(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragStartingEventArgs& args)
-    {
-        _rearranging = true;
-        _rearrangeFrom = std::nullopt;
-        _rearrangeTo = std::nullopt;
+    // ====================================================================== //
+    // Workspaces #55 (custom drag): the within-leaf reorder pointer gesture.
+    // No CoreDragOperation (the shell drag fails E_ACCESSDENIED → 0xc000027b here;
+    // see the .h banner). A press-then-threshold on the TabView promotes to an
+    // overlay-captured drag that draws an insertion line and, on release, raises the
+    // MoveTabRequested intent. The gesture NEVER optimistically mutates TabItems —
+    // the model diff re-projects, so there is nothing to reconcile (cleaner than the
+    // retired MUX accept-then-reconcile path).
+    // ====================================================================== //
 
-        // M6b: identify the dragged tab to a potential cross-leaf drop target.
-        const auto item = args.Tab().try_as<MUXC::TabViewItem>();
-        if (const auto vm = _vmFromItem(item))
+    // A left/primary press over a tab arms a CANDIDATE drag (no capture, not handled
+    // — a plain click must still select the tab and the close button must still
+    // work; the threshold decides click-vs-drag). Resolve the dragged VM by walking
+    // the pressed element up to its enclosing TabViewItem.
+    void TabStripView::_onStripPointerPressed(const IInspectable& /*sender*/, const Input::PointerRoutedEventArgs& e)
+    {
+        if (!e.GetCurrentPoint(TabView()).Properties().IsLeftButtonPressed())
         {
-            const auto& props = args.Data().Properties();
-            props.Insert(L"paneTabId", winrt::box_value<uint64_t>(vm.Id()));
-            props.Insert(L"pid", winrt::box_value<uint32_t>(GetCurrentProcessId()));
-            args.Data().RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+            return;
+        }
+
+        winrt::TerminalApp::PaneTabViewModel vm{ nullptr };
+        auto node = e.OriginalSource().try_as<DependencyObject>();
+        while (node)
+        {
+            if (const auto item = node.try_as<MUXC::TabViewItem>())
+            {
+                vm = _vmFromItem(item);
+                break;
+            }
+            node = Media::VisualTreeHelper::GetParent(node);
+        }
+        if (!vm)
+        {
+            return; // the press was not on a tab (strip background, etc.)
+        }
+
+        _reorderCandidate = true;
+        _reorderVm = winrt::make_weak(vm);
+        _reorderStart = e.GetCurrentPoint(TabView()).Position();
+    }
+
+    // While a candidate is armed, promote to an active drag once the pointer moves
+    // past a small threshold. (If the button came up without us seeing a release —
+    // we never captured during the candidate phase — drop the candidate.)
+    void TabStripView::_onStripPointerMoved(const IInspectable& /*sender*/, const Input::PointerRoutedEventArgs& e)
+    {
+        if (!_reorderCandidate || _reorderActive)
+        {
+            return;
+        }
+        if (!e.GetCurrentPoint(TabView()).Properties().IsLeftButtonPressed())
+        {
+            _reorderCandidate = false;
+            return;
+        }
+
+        const auto pos = e.GetCurrentPoint(TabView()).Position();
+        const auto dx = pos.X - _reorderStart.X;
+        const auto dy = pos.Y - _reorderStart.Y;
+        constexpr double threshold = 4.0; // ~SM_CXDRAG: a click never starts a drag
+        if ((dx * dx + dy * dy) >= (threshold * threshold))
+        {
+            _beginReorderDrag(e);
         }
     }
 
-    // Workspaces M6b (#54, ADR-001): a tab is being dragged OVER this strip (the
-    // potential DROP TARGET). We must mark the operation Move or the system never
-    // delivers TabStripDrop (mirrors classic TerminalPage::_onTabStripDragOver,
-    // TerminalPage.cpp:5953-5970). Accept ONLY a drag carrying our `paneTabId` AND
-    // our own process id (the PID guard rejects a drag from the classic window's
-    // TabView or another process — we never interop with a foreign TabView).
-    void TabStripView::_onTabStripDragOver(const IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    // Promote the candidate to an active drag: show + capture the OVERLAY (not the
+    // TabViewItem — MUX un-refcounted-CapturePointer()s its items internally and
+    // would steal/lose our capture mid-drag; TabManagement.cpp:1081), hook Escape,
+    // and draw the first insertion line.
+    void TabStripView::_beginReorderDrag(const Input::PointerRoutedEventArgs& e)
     {
-        const auto& props = e.DataView().Properties();
-        if (props.HasKey(L"paneTabId") &&
-            props.HasKey(L"pid") &&
-            winrt::unbox_value_or<uint32_t>(props.TryLookup(L"pid"), 0u) == GetCurrentProcessId())
+        _reorderActive = true;
+        _reorderLastGap = UINT32_MAX;
+
+        DragOverlay().Visibility(Visibility::Visible);
+        DragOverlay().IsHitTestVisible(true);
+        if (!DragOverlay().CapturePointer(e.Pointer()))
         {
-            e.AcceptedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+            _endReorderDrag(); // never strand a half-armed drag
+            return;
+        }
+
+        // A captured pointer does not capture the keyboard, so hook the window key
+        // feed for the drag's lifetime (revoked in _endReorderDrag) to catch Escape.
+        if (const auto coreWindow = winrt::Windows::UI::Core::CoreWindow::GetForCurrentThread())
+        {
+            _reorderEscRevoker = coreWindow.KeyDown(winrt::auto_revoke, [this](auto&&, const winrt::Windows::UI::Core::KeyEventArgs& args) {
+                if (_reorderActive && args.VirtualKey() == winrt::Windows::System::VirtualKey::Escape)
+                {
+                    args.Handled(true);
+                    _endReorderDrag(); // cancel — no MoveTabRequested raised
+                }
+            });
+        }
+
+        _updateReorderAdorner(e);
+    }
+
+    // Reposition the insertion line at the current drop gap, only when the gap
+    // changes (PointerMoved fires continuously). The line spans the tab row's height.
+    void TabStripView::_updateReorderAdorner(const Input::PointerRoutedEventArgs& e)
+    {
+        double top = 0.0;
+        double height = 0.0;
+        const auto tabs = _currentTabLayout(top, height);
+        if (tabs.empty())
+        {
+            return;
+        }
+
+        const auto pointerX = static_cast<double>(e.GetCurrentPoint(TabView()).Position().X);
+        const auto gap = _dropGapFromGeometry(pointerX, tabs);
+        if (gap == _reorderLastGap)
+        {
+            return;
+        }
+        _reorderLastGap = gap;
+
+        const auto n = static_cast<uint32_t>(tabs.size());
+        const auto lineX = (gap < n) ? tabs[gap].left : tabs[n - 1].left + tabs[n - 1].width;
+
+        const auto line = InsertionIndicator();
+        Canvas::SetLeft(line, lineX);
+        Canvas::SetTop(line, top);
+        line.Height(height);
+        line.Visibility(Visibility::Visible);
+    }
+
+    // The OVERLAY owns the captured pointer for the active phase.
+    void TabStripView::_onOverlayPointerMoved(const IInspectable& /*sender*/, const Input::PointerRoutedEventArgs& e)
+    {
+        if (_reorderActive)
+        {
+            _updateReorderAdorner(e);
         }
     }
 
-    // Workspaces M6b (#54, ADR-001): a tab from a SIBLING leaf's strip was dropped
-    // on THIS strip (the DROP TARGET). Resolve the dragged VM's stable Id from the
-    // DataPackage, compute the drop index by hit-testing the pointer against this
-    // strip's TabViewItem containers (ports classic TerminalPage::_onTabStripDrop,
-    // TerminalPage.cpp:6008-6024), and raise the SAME strip-level MoveTabRequested
-    // intent the within-leaf reorder uses — with THIS strip's own LeafId as the
-    // move destination (the page reads it at dispatch time). The model relocates
-    // the tab (Stage 0 apply(TabMoved) → _movePaneTabVm) preserving the live
-    // IPaneContent instance; the diff's TabMoved re-projects both strips.
-    //
-    // DURABLE-DIVERGENCE SAFETY NET: unlike the M6a within-leaf path, a cross-leaf
-    // moveTab CAN no-op — Actions_Move.cpp:113/119 returns the SAME state pointer
-    // if the tab isn't found or the dst leaf doesn't exist, so _applyWorkspaceAction
-    // diffs state-against-itself, emits nothing, and triggers NO rebuild. To keep
-    // the model authoritative regardless of the action outcome we ALWAYS reconcile
-    // after raising the intent: force a re-projection of this (destination) strip
-    // from _source (idempotent + cheap). The SOURCE strip needs no manual reconcile
-    // here — an inter-control drop does NOT mutate the source's TabItems (MUX cannot
-    // mutate across two separate collections; only the within-leaf CanReorderTabs
-    // path mutates TabItems, and that fires TabDragCompleted on the source, not a
-    // cross-strip Drop), so the source strip's projection is never optimistically
-    // stranded. (The successful-move case re-projects the source strip anyway via
-    // the TabMoved diff's VectorChanged on the source collection.)
-    void TabStripView::_onTabStripDrop(const IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    void TabStripView::_onOverlayPointerReleased(const IInspectable& /*sender*/, const Input::PointerRoutedEventArgs& e)
     {
-        // Split (slice 3c): the hit-test is the ONLY part that needs the framework
-        // DragEventArgs (its coordinate transform); the data-resolution +
-        // intent-raise + reconcile core is _resolveCrossLeafDrop, which the drag rig
-        // drives directly with a constructed DataPackage view (a DragEventArgs is
-        // not publicly constructible). Behaviour is unchanged: the hit-test has no
-        // side effects, so running it before the PID/payload guard (which now lives
-        // in the core) is equivalent — and in practice _onTabStripDragOver only
-        // accepts same-process Move drags, so this fires only for our own drags.
-        _resolveCrossLeafDrop(e.DataView().Properties(), _dropIndexFromPoint(e));
+        if (!_reorderActive)
+        {
+            return;
+        }
+        e.Handled(true);
+        _finishReorderDrag(e); // raises MoveTabRequested unless the drop is a no-op
+        _endReorderDrag();
     }
 
-    // Hit-test `e`'s drop point against this strip's TabViewItem containers and
-    // return the insertion index (ports classic TerminalPage.cpp:6008-6024). If the
-    // pointer is on the left half of a tab, insert before it; if it is past every
-    // tab, append (the page clamps to [0, size], and moveTab clamps again).
-    uint32_t TabStripView::_dropIndexFromPoint(const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    // A lost/cancelled capture (Escape already releases via _endReorderDrag, app
+    // deactivation, an external steal) ABORTS — no MoveTabRequested. Idempotent: the
+    // release path clears _reorderActive before releasing capture, so the trailing
+    // PointerCaptureLost is a no-op.
+    void TabStripView::_onOverlayPointerCaptureLost(const IInspectable& /*sender*/, const Input::PointerRoutedEventArgs& /*e*/)
     {
-        auto dropIdx = -1;
+        if (_reorderActive)
+        {
+            _endReorderDrag();
+        }
+    }
+
+    // Resolve the dragged VM's CURRENT index (by identity — a rebuild could have
+    // reordered TabItems mid-drag) and the live layout, map the pointer to a moveTab
+    // dstIdx, and raise the intent. A no-op drop (back into its own slot) is skipped.
+    void TabStripView::_finishReorderDrag(const Input::PointerRoutedEventArgs& e)
+    {
+        const auto vm = _reorderVm.get();
+        if (!vm)
+        {
+            return; // the dragged tab was torn down mid-gesture
+        }
+
+        const auto items = TabView().TabItems();
+        std::optional<uint32_t> srcIdx{ std::nullopt };
+        for (uint32_t i = 0; i < items.Size(); ++i)
+        {
+            if (_vmFromItem(items.GetAt(i).try_as<MUXC::TabViewItem>()) == vm)
+            {
+                srcIdx = i;
+                break;
+            }
+        }
+        if (!srcIdx.has_value())
+        {
+            return;
+        }
+
+        double top = 0.0;
+        double height = 0.0;
+        const auto tabs = _currentTabLayout(top, height);
+        if (tabs.empty())
+        {
+            return;
+        }
+
+        const auto pointerX = static_cast<double>(e.GetCurrentPoint(TabView()).Position().X);
+        const auto gap = _dropGapFromGeometry(pointerX, tabs);
+        const auto dst = _dstIndexFromGap(gap, *srcIdx);
+        if (!dst.has_value())
+        {
+            return; // dropped in place — skip the dispatch (and a pointless re-project)
+        }
+
+        // The SAME intent the page dispatches as moveTab(state, tabId, LeafId, dst);
+        // the TabMoved diff re-projects this strip in model order. We never mutated
+        // TabItems, so there is nothing to reconcile.
+        MoveTabRequested.raise(vm.Id(), *dst);
+    }
+
+    // Shared teardown for every terminal path (release, capture-lost, Escape, a
+    // failed capture). Idempotent: clears the gesture state, hides the adorner +
+    // overlay, drops the Escape hook, and releases any pointer capture (which fires
+    // a PointerCaptureLost that no-ops because _reorderActive is already false).
+    void TabStripView::_endReorderDrag()
+    {
+        _reorderActive = false;
+        _reorderCandidate = false;
+        _reorderLastGap = UINT32_MAX;
+        _reorderVm = nullptr;
+        _reorderEscRevoker.revoke();
+
+        InsertionIndicator().Visibility(Visibility::Collapsed);
+        DragOverlay().IsHitTestVisible(false);
+        DragOverlay().Visibility(Visibility::Collapsed);
+        DragOverlay().ReleasePointerCaptures();
+    }
+
+    // Gather every projected tab's strip-relative box, in projection order, in
+    // TabView coordinates — the same reference the pointer reads use
+    // (GetCurrentPoint(TabView())). The TabView is always laid out, whereas the
+    // DragOverlay is Collapsed until a drag begins; the overlay shares the TabView's
+    // origin (both fill the wrapping Grid cell), so a TabView-space X is also the
+    // correct Canvas.Left for the insertion line. Also reports the tab row's top +
+    // height for the line. Needs layout (runtime only); the PURE index math below is
+    // what the unit tests drive. If any container is not realized the layout would be
+    // misaligned, so bail to empty (a safe no-op).
+    std::vector<TabStripView::TabExtent> TabStripView::_currentTabLayout(double& outTop, double& outHeight)
+    {
+        outTop = 0.0;
+        outHeight = 0.0;
+
+        std::vector<TabExtent> tabs;
         const auto tabView = TabView();
         const auto items = tabView.TabItems();
         for (uint32_t i = 0; i < items.Size(); ++i)
         {
-            if (const auto item = tabView.ContainerFromIndex(i).try_as<MUXC::TabViewItem>())
+            const auto container = tabView.ContainerFromIndex(i).try_as<MUXC::TabViewItem>();
+            if (!container)
             {
-                const auto posX = e.GetPosition(item).X; // drop point relative to the tab
-                const auto itemWidth = item.ActualWidth();
-                if (posX < itemWidth / 2)
-                {
-                    dropIdx = static_cast<int>(i);
-                    break;
-                }
+                return {}; // an unrealized container would misalign indices
+            }
+            const auto topLeft = container.TransformToVisual(tabView).TransformPoint({ 0.0f, 0.0f });
+            tabs.push_back(TabExtent{ static_cast<double>(topLeft.X), container.ActualWidth() });
+            if (outHeight == 0.0)
+            {
+                outTop = static_cast<double>(topLeft.Y);
+                outHeight = container.ActualHeight();
             }
         }
-        return dropIdx < 0 ? items.Size() : static_cast<uint32_t>(dropIdx);
+        return tabs;
     }
 
-    // The cross-leaf drop RESOLUTION core (no framework DragEventArgs). PID guard —
-    // reject a drop from the classic window's TabView / another process (mirror
-    // classic TerminalPage.cpp:5979-5993). Resolve the dragged VM's stable Id from
-    // the DataPackage, then raise the strip-level intent: the page dispatches
-    // moveTab(state, paneTabId, THIS strip's LeafId, dropIdx) and the resulting
-    // TabMoved diff re-projects both strips (model-as-truth — never a write-back at
-    // the drop site). Then reconcile THIS strip from the model even if the move
-    // no-op'd (the durable-divergence safety net — a cross-leaf moveTab CAN no-op,
-    // see the _onTabStripDrop banner; re-projecting from _source when the model
-    // already matches is a structural no-op). Extracted so the drag rig can drive it
-    // with a constructed DataPackage view (slice 3c).
-    void TabStripView::_resolveCrossLeafDrop(const winrt::Windows::ApplicationModel::DataTransfer::DataPackagePropertySetView& props, uint32_t dropIdx)
+    // PURE: count the tabs whose horizontal MIDPOINT is at/left of pointerX — the
+    // visual gap index in [0, N] the dragged tab would land in with every tab still
+    // present. (Mirrors classic's left-half drop hit-test, stable layout.)
+    uint32_t TabStripView::_dropGapFromGeometry(double pointerX, const std::vector<TabExtent>& tabs)
     {
-        const auto pidObj = props.TryLookup(L"pid");
-        if (!pidObj || winrt::unbox_value_or<uint32_t>(pidObj, 0u) != GetCurrentProcessId())
+        uint32_t gap = 0;
+        for (const auto& t : tabs)
         {
-            return;
+            if (pointerX < t.left + t.width / 2.0)
+            {
+                break;
+            }
+            ++gap;
         }
-
-        const auto tabIdObj = props.TryLookup(L"paneTabId");
-        if (!tabIdObj)
-        {
-            return;
-        }
-        const auto paneTabId = winrt::unbox_value_or<uint64_t>(tabIdObj, 0ull);
-
-        MoveTabRequested.raise(paneTabId, dropIdx);
-        _rebuildProjection();
+        return gap;
     }
 
-    // Workspaces M6b (#54, ADR-001): a tab was released OUTSIDE every strip (the
-    // tear-out gesture). This is the M8 boundary — moving a tab to a NEW window
-    // requires monarch/IPC/ConPTY rehydration and is DEFERRED. This handler is an
-    // INERT no-op present SOLELY to satisfy the AllowDropTabs(true) contract: a
-    // draggable TabView with no TabDroppedOutside handler crashes
-    // Windows.UI.Xaml.dll on drag-out (0xc000027b — see reference_mux_tabview_drag).
-    // Do NOT create a window / touch monarch/IPC/RequestReceiveContent/_stashed/
-    // _MoveContent here — that is M8. Dropping a tab outside the strips simply
-    // leaves it where it was (the model is unchanged, so the projection is correct).
-    void TabStripView::_onTabDroppedOutside(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDroppedOutsideEventArgs& /*args*/)
+    // PURE: convert a visual gap (dragged tab still present) to the moveTab dstIdx,
+    // which the model applies AFTER removing the dragged tab (Actions_Move.cpp
+    // erase-then-insert): a gap right of the source loses one slot. nullopt when the
+    // order would not change (dropping into the source's own slot or its right edge).
+    std::optional<uint32_t> TabStripView::_dstIndexFromGap(uint32_t gap, uint32_t srcIdx)
     {
-        // Intentionally empty — M8 (tear-out to a new window) is deferred.
-    }
-
-    // Workspaces M6a (#54, ADR-001): TabItems membership changed. When a reorder is
-    // in flight, MUX mutates TabItems internally (ItemRemoved at the old index +
-    // ItemInserted at the new) — record those as from/to (ports classic
-    // TerminalPage::_OnTabItemsChanged's _rearrangeFrom/_rearrangeTo capture,
-    // TabManagement.cpp:1037). Outside a rearrange this fires for our own
-    // _rebuildProjection churn and is ignored (the rebuild is the projection; we do
-    // NOT re-derive anything from the control here).
-    void TabStripView::_onTabItemsChanged(const IInspectable& /*sender*/, const winrt::Windows::Foundation::Collections::IVectorChangedEventArgs& args)
-    {
-        if (!_rearranging)
+        if (gap == srcIdx || gap == srcIdx + 1)
         {
-            return;
+            return std::nullopt;
         }
-        switch (args.CollectionChange())
-        {
-        case winrt::Windows::Foundation::Collections::CollectionChange::ItemRemoved:
-            _rearrangeFrom = args.Index();
-            break;
-        case winrt::Windows::Foundation::Collections::CollectionChange::ItemInserted:
-            _rearrangeTo = args.Index();
-            break;
-        default:
-            break;
-        }
-    }
-
-    // Workspaces M6a (#54, ADR-001): a within-leaf drag finished. If MUX actually
-    // reordered (from≠to), translate the captured indices into the strip-level
-    // MoveTabRequested(tabId, dstIdx) intent and let the page dispatch moveTab —
-    // the resulting TabMoved diff re-projects TabItems from the model
-    // (authoritative). We DO NOT write the reorder back into the model here: MUX's
-    // optimistic visual reorder is accepted, then reconciled by the projection (the
-    // common case — model agrees — is a structural no-op; a divergence is visually
-    // corrected). Resolve the dragged VM by its Tag (resolve-at-fire-time — a
-    // rebuild mid-drag could swap items), reading args.Tab() (the moved
-    // TabViewItem). Ports classic TerminalPage::_TabDragCompleted
-    // (TabManagement.cpp:1283), but raises an INTENT instead of mutating _tabs.
-    void TabStripView::_onTabDragCompleted(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragCompletedEventArgs& args)
-    {
-        const auto from = _rearrangeFrom;
-        const auto to = _rearrangeTo;
-        _rearranging = false;
-        _rearrangeFrom = std::nullopt;
-        _rearrangeTo = std::nullopt;
-
-        if (!from.has_value() || !to.has_value() || *from == *to)
-        {
-            // No reorder (a click, or a drag that landed in place). Nothing to
-            // dispatch — the projection is already correct.
-            return;
-        }
-
-        // Resolve the dragged VM's stable Id from the moved TabViewItem's Tag. We
-        // prefer args.Tab() (the dragged item the gesture carries) over indexing
-        // TabItems[to] so a rebuild that swapped the items mid-drag cannot
-        // mis-target. A null VM (a torn-down row) makes this a safe no-op.
-        const auto item = args.Tab().try_as<MUXC::TabViewItem>();
-        const auto vm = _vmFromItem(item);
-        if (!vm)
-        {
-            return;
-        }
-
-        // Raise the strip-level intent; the destination leaf is THIS strip's own
-        // LeafId (the page reads it at dispatch time). dstIdx = the new index MUX
-        // settled on.
-        MoveTabRequested.raise(vm.Id(), *to);
+        return gap > srcIdx ? gap - 1 : gap;
     }
 }

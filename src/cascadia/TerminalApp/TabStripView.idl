@@ -3,10 +3,12 @@
 
 namespace TerminalApp
 {
-    // Workspaces M6a (#54, ADR-001): the strip-level move-intent payload — the
+    // Workspaces #55/#57 (ADR-001): the strip-level move-intent payload — the
     // dragged VM's stable Id and the destination index. The destination leaf is
     // the raising strip's own LeafId (carried separately on the control), so the
     // page resolves moveTab(state, tabId, strip.LeafId(), dstIdx) at dispatch time.
+    // Raised by the custom within-leaf reorder gesture (#55) and, later, the
+    // custom cross-leaf move (#57).
     delegate void MoveTabRequestedEventArgs(UInt64 tabId, UInt32 dstIdx);
 
     // Workspaces M1 (#54, ADR-001): the per-leaf tab strip now hosts the REAL
@@ -21,8 +23,10 @@ namespace TerminalApp
     // ONLY and raises the VM's RequestActivate, never writing model state from
     // the control. A reentrancy guard prevents the programmatic SelectedItem push
     // from looping back into an intent. Close raises the VM's RequestClose
-    // (TabCloseRequested), drag is OFF (M6 wires it). Native TabViewItem chrome /
-    // icon / tooltip replace the old bespoke WUX-ListView re-skin.
+    // (TabCloseRequested). Tab REORDER is a custom in-process pointer gesture (#55)
+    // — MUX's built-in drag is off (it fails 0xc000027b here; see TabStripView.h).
+    // Native TabViewItem chrome / icon / tooltip replace the old bespoke
+    // WUX-ListView re-skin.
     [default_interface] runtimeclass TabStripView : Windows.UI.Xaml.Controls.UserControl
     {
         TabStripView();
@@ -43,22 +47,23 @@ namespace TerminalApp
 
         // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
         // leaf this strip projects. The page sets it in _projectLeafContainer next
-        // to ItemsSource. A within-leaf reorder (M6a) and a cross-leaf drop (M6b)
-        // both raise MoveTabRequested carrying THIS strip's own LeafId as the move
-        // destination — so the page can dispatch moveTab(state, tabId, LeafId,
-        // dstIdx) without re-deriving the leaf from the gesture site.
+        // to ItemsSource. The within-leaf reorder gesture (#55) and the cross-leaf
+        // move (#57) both raise MoveTabRequested carrying THIS strip's own LeafId as
+        // the move destination — so the page can dispatch moveTab(state, tabId,
+        // LeafId, dstIdx) without re-deriving the leaf from the gesture site.
         // APPENDED after TabViewControl (the IDL vtable trap — never insert
         // mid-runtimeclass).
         UInt64 LeafId;
 
-        // Workspaces M6a (#54, ADR-001): a STRIP-LEVEL move INTENT. A within-leaf
-        // reorder translates the captured drag from→to into this, carrying the
-        // dragged VM's Id and the destination index; the destination leaf is
+        // Workspaces #55 (ADR-001): a STRIP-LEVEL move INTENT. The custom within-leaf
+        // reorder gesture maps the drop position to a destination index and raises
+        // this, carrying the dragged VM's Id and that index; the destination leaf is
         // implicitly THIS strip's LeafId. The page subscribes it in
         // _projectLeafContainer and dispatches moveTab(state, tabId, LeafId, dstIdx)
-        // → _applyWorkspaceAction (the M4 SetColorRequested dispatch shape). M6b
-        // (cross-leaf) reuses the SAME intent (the drop-target strip raises it).
-        // args = (tabId, dstIdx). APPENDED after LeafId for the vtable-slot reason.
+        // → _applyWorkspaceAction (the M4 SetColorRequested dispatch shape). The
+        // cross-leaf move (#57) will reuse the SAME intent (the drop-target strip
+        // raises it). args = (tabId, dstIdx). APPENDED after LeafId for the
+        // vtable-slot reason.
         event MoveTabRequestedEventArgs MoveTabRequested;
     }
 }

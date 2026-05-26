@@ -422,6 +422,15 @@ namespace TerminalAppLocalTests
         TEST_METHOD(StripM6a_WithinLeafReorder_DispatchesMoveTab_FlagsSet);
         TEST_METHOD(StripM6b_CrossLeafDrop_DispatchesMoveTab_AllDragFlagsSet);
 
+        // Workspaces #55 (ADR-001): the PURE within-leaf reorder hit-test — the
+        // headlessly-testable core of the custom pointer gesture. Drives
+        // TabStripView's _dropGapFromGeometry (pointer X + tab boxes → visual gap) and
+        // _dstIndexFromGap (gap + dragged index → moveTab dstIdx, nullopt = no-op)
+        // with synthetic geometry, so the gesture's index math is locked without
+        // laying out real pixels (the headless std::clamp-resize trap). The gesture
+        // wiring itself needs a human smoke (synthesized input can't drive it).
+        TEST_METHOD(StripReorder_HitTestGeometry_MapsPointerToModelIndex);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -7521,17 +7530,17 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // Workspaces M6b (#54, ADR-001): the strip's MUX TabView now has all three drag
-    // flags ON — CanReorderTabs (M6a within-leaf reorder) + CanDragTabs +
-    // AllowDropTabs (M6b cross-leaf inter-control move). AllowDropTabs(true) arms the
-    // tear-out dispatcher; pairing it with no TabDroppedOutside handler would crash
-    // Windows.UI.Xaml.dll (0xc000027b), so the inert TabDroppedOutside handler is
-    // wired in the SAME change as this flag flip. (The original M1 premise pinned all
-    // three flags OFF as failfast-avoidance before any handler existed; M6a/M6b wire
-    // the full drag state machine, so this now pins the FULLY-ON invariant. The even
-    // older Slice-1 premise — an explicit horizontal ItemsPanel + SelectionMode=Single
-    // on a hand-built ListView — no longer applies: the MUX TabView is inherently a
-    // horizontal single-select strip.) STRUCTURAL only — no layout.
+    // Workspaces #55 (ADR-001): the strip's MUX TabView has all three built-in drag
+    // flags OFF — CanReorderTabs + CanDragTabs + AllowDropTabs all false. MUX's
+    // built-in tab drag arms a Windows SHELL drag (CoreDragOperation) that fails
+    // E_ACCESSDENIED here and escalates to an uncatchable 0xc000027b failfast on ANY
+    // tab drag, so tab REORDER is a CUSTOM in-process pointer gesture instead (no
+    // CoreDragOperation; see TabStripView.h). This pins that crash-proof flag
+    // invariant. (History: M1 pinned all three OFF as failfast-avoidance; M6a/M6b
+    // briefly flipped them ON for the MUX drag; #55 reverts to OFF for the custom
+    // gesture. The even older Slice-1 premise — an explicit horizontal ItemsPanel +
+    // SelectionMode=Single on a hand-built ListView — no longer applies: the MUX
+    // TabView is inherently a horizontal single-select strip.) STRUCTURAL only.
     void WorkspaceTests::StripSlice1_InnerListViewIsHorizontalAndSingleSelect()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -7578,33 +7587,31 @@ namespace TerminalAppLocalTests
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
 
-            // Workspaces M6b (#54, ADR-001): drag is FULLY on now. CanReorderTabs
-            // (M6a within-leaf reorder) + CanDragTabs + AllowDropTabs (M6b cross-leaf
-            // inter-control move) are ALL true. AllowDropTabs(true) arms the tear-out
-            // dispatcher, so the inert TabDroppedOutside handler is wired in the SAME
-            // change (else a drag-out is the 0xc000027b failfast). The
-            // StripM6b_CrossLeafDrop test exercises the drop dispatch + the wired
-            // handler set; here we just pin the flag invariant.
-            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
-                           L"M6b: CanReorderTabs is true (within-leaf reorder)");
-            VERIFY_IS_TRUE(tabView.CanDragTabs(),
-                           L"M6b: CanDragTabs is true (cross-leaf drag source)");
-            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
-                           L"M6b: AllowDropTabs is true (cross-leaf drop target; the inert "
-                           L"TabDroppedOutside handler is wired to avoid the 0xc000027b failfast)");
+            // Workspaces #55 (ADR-001): all three built-in MUX drag flags are OFF —
+            // tab reorder is the custom in-process pointer gesture (no
+            // CoreDragOperation), so the shell-drag 0xc000027b failfast is
+            // structurally unreachable. (See StripM6a_WithinLeafReorder for the
+            // gesture's dispatch-layer behavior.)
+            VERIFY_IS_FALSE(tabView.CanReorderTabs(),
+                            L"#55: CanReorderTabs is false (custom gesture, not MUX reorder)");
+            VERIFY_IS_FALSE(tabView.CanDragTabs(),
+                            L"#55: CanDragTabs is false (no shell drag)");
+            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
+                            L"#55: AllowDropTabs is false (no shell drop / tear-out dispatcher)");
         });
         VERIFY_SUCCEEDED(result);
     }
 
-    // Workspaces M6a (#54, ADR-001): within-leaf reorder via the strip's
-    // MoveTabRequested intent. A user drags a tab to a new slot; MUX optimistically
-    // reorders TabItems, and on TabDragCompleted the strip raises
-    // MoveTabRequested(tabId, dstIdx) with the destination = its own LeafId. The
-    // page (subscribed in _projectLeafContainer) dispatches moveTab, and the
-    // resulting TabMoved diff re-projects the strip in the model's authoritative
-    // order. We drive this at the DISPATCH LAYER — raise the strip's
-    // MoveTabRequested directly (NO synthetic drag geometry / e.GetPosition /
-    // ContainerFromIndex — the headless std::clamp-resize trap) — and assert:
+    // Workspaces #55 (ADR-001): within-leaf reorder via the strip's MoveTabRequested
+    // intent. A user drags a tab to a new slot with the CUSTOM pointer gesture; on
+    // release it raises MoveTabRequested(tabId, dstIdx) with the destination = its
+    // own LeafId. The page (subscribed in _projectLeafContainer) dispatches moveTab,
+    // and the resulting TabMoved diff re-projects the strip in the model's
+    // authoritative order. We drive this at the DISPATCH LAYER — raise the strip's
+    // MoveTabRequested directly (synthesized input cannot drive a real pointer
+    // gesture, and we avoid synthetic geometry / ContainerFromIndex — the headless
+    // std::clamp-resize trap; the gesture's pointer→index math is covered purely by
+    // StripReorder_HitTestGeometry). We assert:
     //   (1) the drag flags (CanReorderTabs true, CanDragTabs/AllowDropTabs false),
     //   (2) the model reordered (the leaf's tab order swapped), and
     //   (3) the strip re-projected its TabItems in the new model order.
@@ -7680,21 +7687,18 @@ namespace TerminalAppLocalTests
             const auto strip = _leafTabStripView(leafContainer);
             VERIFY_IS_NOT_NULL(strip);
 
-            // (1) The drag flags on the inner MUX TabView. The within-leaf reorder
-            // this test exercises rides CanReorderTabs (unchanged); M6b additionally
-            // flipped CanDragTabs + AllowDropTabs true for the cross-leaf move, so all
-            // three are now true (the inert TabDroppedOutside handler is wired to keep
-            // AllowDropTabs(true) crash-safe). The cross-leaf drop is covered by
-            // StripM6b_CrossLeafDrop.
+            // (1) The drag flags on the inner MUX TabView are ALL OFF — the reorder
+            // this test exercises is the custom pointer gesture, not MUX's built-in
+            // drag (which fails 0xc000027b here). The model reorder below is driven
+            // by the same MoveTabRequested intent the gesture raises on release.
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
-            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
-                           L"CanReorderTabs is true (within-leaf reorder enabled)");
-            VERIFY_IS_TRUE(tabView.CanDragTabs(),
-                           L"M6b: CanDragTabs is true (cross-leaf drag source)");
-            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
-                           L"M6b: AllowDropTabs is true (cross-leaf drop target; tear-out is the "
-                           L"inert TabDroppedOutside no-op)");
+            VERIFY_IS_FALSE(tabView.CanReorderTabs(),
+                            L"#55: CanReorderTabs is false (custom gesture, not MUX reorder)");
+            VERIFY_IS_FALSE(tabView.CanDragTabs(),
+                            L"#55: CanDragTabs is false (no shell drag)");
+            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
+                            L"#55: AllowDropTabs is false (no shell drop)");
 
             // The strip projects [tab0, tab1] before the reorder, and the page set
             // the strip's LeafId to leaf0 (the move destination).
@@ -7739,23 +7743,20 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // Workspaces M6b (#54, ADR-001): CROSS-leaf (inter-control) tab drag via the
-    // DataPackage drag protocol. A tab is dragged from a SIBLING leaf's strip and
-    // dropped on THIS strip; on TabStripDrop the destination strip resolves the
-    // dragged VM Id from the DataPackage, hit-tests the drop index, and raises the
-    // SAME MoveTabRequested intent the within-leaf reorder uses — but with THIS
-    // (destination) strip's own LeafId as the move destination. The page dispatches
-    // moveTab and the TabMoved diff relocates the live VM (Stage 0 apply(TabMoved)
-    // → _movePaneTabVm) preserving the IPaneContent instance.
+    // Workspaces #57 (ADR-001) — the cross-leaf MODEL/DISPATCH contract. A tab moved
+    // from a SIBLING leaf onto THIS strip raises the SAME MoveTabRequested intent the
+    // within-leaf reorder uses — but with THIS (destination) strip's own LeafId as
+    // the move destination. The page dispatches moveTab and the TabMoved diff
+    // relocates the live VM (Stage 0 apply(TabMoved) → _movePaneTabVm) preserving the
+    // IPaneContent instance. The custom cross-leaf GESTURE is #57 (not yet built);
+    // this test pins the dispatch + model path that gesture will drive into.
     //
-    // We drive this at the DISPATCH LAYER — raise the DESTINATION strip's
-    // MoveTabRequested with a FOREIGN tabId (one living in the OTHER leaf), exactly
-    // as TabStripDrop does after the hit-test (NO synthetic e.GetPosition /
-    // ContainerFromIndex against real layout — the headless std::clamp-resize trap).
-    // We assert:
-    //   (1) ALL THREE drag flags are now TRUE (CanReorderTabs + CanDragTabs +
-    //       AllowDropTabs) — the M6b flag flip, the crash surface that demands the
-    //       TabDroppedOutside handler in the same change.
+    // We drive it at the DISPATCH LAYER — raise the DESTINATION strip's
+    // MoveTabRequested with a FOREIGN tabId (one living in the OTHER leaf) (synthesized
+    // input cannot drive a real pointer gesture; we avoid synthetic geometry against
+    // real layout — the headless std::clamp-resize trap). We assert:
+    //   (1) ALL THREE built-in MUX drag flags are OFF (the custom-gesture invariant —
+    //       no shell drag, so no 0xc000027b surface).
     //   (2) A cross-leaf TabMoved relocated the FOREIGN tab's VM into the
     //       destination strip (the Stage-0 arm), preserving the SAME VM instance
     //       (its seeded bell/runtime-color survive).
@@ -7763,9 +7764,9 @@ namespace TerminalAppLocalTests
     //       content root) — no ConPTY disconnect.
     //   (4) The source leaf CASCADED away when it emptied (the model removes the
     //       now-empty single-tab sibling leaf), and its strip holds no VM.
-    //   (5) TabDroppedOutside is wired and INERT: a release outside all strips must
-    //       not crash and must not mutate the model — we assert the strip survives
-    //       and the model is unchanged after the reconcile path runs.
+    //   (5) A no-op move intent (a tab id in no leaf — the durable-divergence path,
+    //       which a cross-leaf drop CAN hit) leaves the strip alive and the model
+    //       unchanged.
     void WorkspaceTests::StripM6b_CrossLeafDrop_DispatchesMoveTab_AllDragFlagsSet()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -7863,17 +7864,18 @@ namespace TerminalAppLocalTests
             const auto strip = _leafTabStripView(leafContainer);
             VERIFY_IS_NOT_NULL(strip);
 
-            // (1) ALL THREE M6b drag flags are TRUE on the inner MUX TabView. This is
-            // the crash surface: AllowDropTabs(true) demands the TabDroppedOutside
-            // handler be wired in the SAME change (it is — see (5)).
+            // (1) ALL THREE built-in MUX drag flags are OFF — the cross-leaf move
+            // (#57) is a custom pointer gesture, not MUX's shell drag (which fails
+            // 0xc000027b here). This test pins the page-dispatch + MODEL contract that
+            // the #57 gesture will raise the SAME MoveTabRequested intent into.
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
-            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
-                           L"M6b: CanReorderTabs stays true (within-leaf reorder)");
-            VERIFY_IS_TRUE(tabView.CanDragTabs(),
-                           L"M6b: CanDragTabs is now true (cross-leaf drag source)");
-            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
-                           L"M6b: AllowDropTabs is now true (cross-leaf drop target)");
+            VERIFY_IS_FALSE(tabView.CanReorderTabs(),
+                            L"#55: CanReorderTabs is false (custom gesture)");
+            VERIFY_IS_FALSE(tabView.CanDragTabs(),
+                            L"#55: CanDragTabs is false (no shell drag)");
+            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
+                            L"#55: AllowDropTabs is false (no shell drop)");
 
             // The destination strip carries leaf0 as its LeafId (the move dst).
             VERIFY_ARE_EQUAL(leaf0.v, strip.LeafId(),
@@ -7952,14 +7954,11 @@ namespace TerminalAppLocalTests
         });
         VERIFY_SUCCEEDED(result);
 
-        // (5) TabDroppedOutside is wired + INERT (the M8 boundary). A real drag-out
-        // would crash Windows.UI.Xaml.dll (0xc000027b) if the handler were absent;
-        // we cannot synthesize the real gesture headless (no event-args ctor), so we
-        // assert the structural contract: AllowDropTabs is on (verified in (1)) AND a
-        // benign no-op move intent (raising MoveTabRequested with a tab id that is
-        // NOT in this model — the durable-divergence no-op path) leaves the strip
-        // alive and the model unchanged, exercising the reconcile-on-drop safety net
-        // without crashing.
+        // (5) The durable-divergence no-op path: a cross-leaf moveTab CAN no-op
+        // (Actions_Move.cpp returns the SAME state when the tab id isn't found), so a
+        // benign move intent (raising MoveTabRequested with a tab id NOT in this
+        // model) must leave the strip alive and the model unchanged. The #57 gesture
+        // relies on this being a safe no-op rather than a crash or a stranded view.
         Log::Comment(L"No-op move intent (unknown tab id) must not crash, must not mutate the model");
         result = RunOnUIThread([&]() {
             const auto rootChild = page->_workspacePaneTreeRootChildForTest();
@@ -7991,6 +7990,50 @@ namespace TerminalAppLocalTests
                              L"no classic Tab was built (cutover)");
         });
         VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces #55 (ADR-001): the PURE within-leaf reorder hit-test. No page, no
+    // layout — just the two static functions the gesture feeds with live geometry,
+    // driven with synthetic tab boxes. This is the headlessly-verifiable core; the
+    // gesture wiring around it (pointer capture, threshold, adorner, cancel) needs a
+    // human smoke (synthesized input can't drive a real pointer drag).
+    void WorkspaceTests::StripReorder_HitTestGeometry_MapsPointerToModelIndex()
+    {
+        using Impl = winrt::TerminalApp::implementation::TabStripView;
+        using Ext = winrt::TerminalApp::implementation::TabStripView::TabExtent;
+
+        // Three tabs left-to-right (left, width): [0,100) [100,220) [220,300).
+        // Midpoints at 50, 160, 260.
+        const std::vector<Ext> tabs{ { 0.0, 100.0 }, { 100.0, 120.0 }, { 220.0, 80.0 } };
+
+        // _dropGapFromGeometry: # of tab midpoints at/left of the pointer X → visual gap.
+        VERIFY_ARE_EQUAL(0u, Impl::DropGapFromGeometryForTest(10.0, tabs)); // left of all
+        VERIFY_ARE_EQUAL(0u, Impl::DropGapFromGeometryForTest(49.0, tabs)); // left half of tab0
+        VERIFY_ARE_EQUAL(1u, Impl::DropGapFromGeometryForTest(51.0, tabs)); // right half of tab0
+        VERIFY_ARE_EQUAL(1u, Impl::DropGapFromGeometryForTest(159.0, tabs)); // left half of tab1
+        VERIFY_ARE_EQUAL(2u, Impl::DropGapFromGeometryForTest(161.0, tabs)); // right half of tab1
+        VERIFY_ARE_EQUAL(2u, Impl::DropGapFromGeometryForTest(259.0, tabs)); // left half of tab2
+        VERIFY_ARE_EQUAL(3u, Impl::DropGapFromGeometryForTest(261.0, tabs)); // right half → append
+        VERIFY_ARE_EQUAL(3u, Impl::DropGapFromGeometryForTest(999.0, tabs)); // far right
+        VERIFY_ARE_EQUAL(0u, Impl::DropGapFromGeometryForTest(123.0, std::vector<Ext>{})); // empty
+
+        // _dstIndexFromGap: gap + dragged srcIdx → moveTab dstIdx (erase-then-insert);
+        // nullopt when the order would not change (own slot / own right edge).
+        // src = 0 (drag the first tab):
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(0u, 0u).has_value()); // back onto itself
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(1u, 0u).has_value()); // its own right edge
+        VERIFY_ARE_EQUAL(1u, Impl::DstIndexFromGapForTest(2u, 0u).value()); // → [B,A,C]
+        VERIFY_ARE_EQUAL(2u, Impl::DstIndexFromGapForTest(3u, 0u).value()); // append → [B,C,A]
+        // src = 1 (middle):
+        VERIFY_ARE_EQUAL(0u, Impl::DstIndexFromGapForTest(0u, 1u).value()); // → [B,A,C]
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(1u, 1u).has_value()); // own slot
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(2u, 1u).has_value()); // own right edge
+        VERIFY_ARE_EQUAL(2u, Impl::DstIndexFromGapForTest(3u, 1u).value()); // → [A,C,B]
+        // src = 2 (drag the last tab):
+        VERIFY_ARE_EQUAL(0u, Impl::DstIndexFromGapForTest(0u, 2u).value()); // → [C,A,B]
+        VERIFY_ARE_EQUAL(1u, Impl::DstIndexFromGapForTest(1u, 2u).value()); // → [A,C,B]
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(2u, 2u).has_value()); // own slot
+        VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(3u, 2u).has_value()); // own right edge
     }
 
     // Workspaces M1 (#54, ADR-001), strengthened from Slice 1/2a: selection is a

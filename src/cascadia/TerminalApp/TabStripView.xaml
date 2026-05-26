@@ -18,22 +18,16 @@
     ActiveTabChanged diff; a user SelectionChanged is an intent only,
     reentrancy-guarded).
 
-    Drag is FULLY on (Workspaces M6a + M6b, #54): all three flags are TRUE.
-    CanReorderTabs="True" enables the WITHIN-leaf reorder (M6a) — MUX mutates
-    TabItems internally during the drag; TabStripView captures the from/to off
-    TabItemsChanged and raises a MoveTabRequested intent on TabDragCompleted, so the
-    page dispatches moveTab and the TabMoved diff re-projects (no write-back).
-    CanDragTabs="True" + AllowDropTabs="True" enable the CROSS-leaf (inter-control)
-    move (M6b): the source strip stuffs the dragged VM's Id + our PID into the
-    DataPackage on TabDragStarting; a sibling strip accepts the Move on
-    TabStripDragOver (PID-guarded) and, on TabStripDrop, hit-tests the drop index
-    and raises the SAME MoveTabRequested intent with ITS OWN LeafId as the
-    destination. AllowDropTabs="True" arms the tear-out dispatcher, so the
-    matching TabDroppedOutside handler MUST be wired (it is — an INERT no-op,
-    the M8 boundary) or a drag-out crashes Windows.UI.Xaml.dll (0xc000027b —
-    drag-out of a draggable TabView with no handler). The four cross-leaf
-    handlers (TabDragStarting / TabStripDragOver / TabStripDrop /
-    TabDroppedOutside) are wired in the ctor.
+    Drag (Workspaces #55): all three MUX drag flags are FALSE. MUX's built-in tab
+    drag arms a Windows SHELL drag (CoreDragOperation) that fails E_ACCESSDENIED in
+    this hosting context and escalates to an (uncatchable) 0xc000027b failfast on ANY
+    tab drag — the shell tab drag does not work here (even production WT can't drag
+    tabs in this environment). So tab REORDER is a CUSTOM in-process pointer gesture
+    that never touches CoreDragOperation: pointer handlers on the TabView detect a
+    press-then-threshold drag, then the DragOverlay below captures the pointer and
+    draws an insertion line; on release the gesture raises MoveTabRequested(tabId,
+    dstIdx) and the model diff re-projects (no write-back). CROSS-leaf move (#57) +
+    tear-out (#60) are likewise custom. See TabStripView.h/.cpp for the gesture.
 
     IsAddTabButtonVisible is false in M1: the native "+" → new-tab-in-this-leaf
     wiring is a SHOULD that we DEFER (see the .cpp). The mux namespace + the
@@ -48,12 +42,36 @@
              xmlns:mux="using:Microsoft.UI.Xaml.Controls"
              mc:Ignorable="d">
 
-    <mux:TabView x:Name="TabView"
-                 Background="{ThemeResource TabViewBackground}"
-                 AllowDropTabs="True"
-                 CanDragTabs="True"
-                 CanReorderTabs="True"
-                 IsAddTabButtonVisible="False"
-                 TabWidthMode="SizeToContent" />
+    <Grid>
+        <mux:TabView x:Name="TabView"
+                     Background="{ThemeResource TabViewBackground}"
+                     AllowDropTabs="False"
+                     CanDragTabs="False"
+                     CanReorderTabs="False"
+                     IsAddTabButtonVisible="False"
+                     TabWidthMode="SizeToContent" />
+
+        <!--
+            Workspaces #55 custom-drag overlay. Sits above the TabView but is
+            transparent + Collapsed + non-hit-test, so clicks pass straight through
+            to the tabs. Only an active reorder drag turns it Visible + hit-test and
+            CAPTURES the pointer on it (NOT the TabViewItem — MUX un-refcounted-
+            CapturePointer()s its items internally and would steal/lose our capture;
+            TabManagement.cpp:1081). It hosts the insertion-line adorner; both are
+            driven entirely from TabStripView.cpp (Canvas.Left / Height / Visibility).
+        -->
+        <Canvas x:Name="DragOverlay"
+                Background="Transparent"
+                IsHitTestVisible="False"
+                Visibility="Collapsed">
+            <Border x:Name="InsertionIndicator"
+                    Width="2"
+                    Visibility="Collapsed">
+                <Border.Background>
+                    <SolidColorBrush Color="{StaticResource SystemAccentColor}" />
+                </Border.Background>
+            </Border>
+        </Canvas>
+    </Grid>
 
 </UserControl>

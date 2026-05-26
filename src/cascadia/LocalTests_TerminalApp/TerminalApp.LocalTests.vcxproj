@@ -35,7 +35,6 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="CppWinrtTailored.h" />
-    <ClInclude Include="CrashCapture.h" />
   </ItemGroup>
 
   <!-- ========================= Cpp Files ======================== -->
@@ -45,8 +44,6 @@
     <ClCompile Include="TabTests.cpp" />
 	<ClCompile Include="FilteredCommandTests.cpp" />
     <ClCompile Include="WorkspaceTests.cpp" />
-    <ClCompile Include="CrashCapture.cpp" />
-    <ClCompile Include="TabStripDragTests.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
