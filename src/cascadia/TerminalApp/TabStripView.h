@@ -41,6 +41,11 @@
 
 #include "TabStripView.g.h"
 
+// Workspaces M6b drag rig (slice 3c): the cross-leaf drop core takes the
+// DataPackage's read-only property view, so the harness can drive it with a
+// constructed DataPackage instead of a (non-constructible) framework DragEventArgs.
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
+
 namespace winrt::TerminalApp::implementation
 {
     struct TabStripView : TabStripViewT<TabStripView>
@@ -56,6 +61,18 @@ namespace winrt::TerminalApp::implementation
         // Test-only structural accessor (see the .idl): the inner MUX TabView so
         // headless TAEF can assert TabItems / SelectedItem / drag flags.
         winrt::Microsoft::UI::Xaml::Controls::TabView TabViewControl();
+
+        // Test-only (drag rig, slice 3c): drive the cross-leaf drop RESOLUTION core
+        // (_resolveCrossLeafDrop) with a hand-built DataPackage property view + a
+        // chosen drop index, WITHOUT a framework DragEventArgs (which is not
+        // publicly constructible). Production _onTabStripDrop computes dropIdx by
+        // hit-testing the pointer (_dropIndexFromPoint), then calls the same core.
+        // An impl-only method (NOT in the .idl — no vtable change, no codegen);
+        // reached via winrt::get_self like the M6b test does for MoveTabRequested.
+        void ResolveCrossLeafDropForTest(const winrt::Windows::ApplicationModel::DataTransfer::DataPackagePropertySetView& props, uint32_t dropIdx)
+        {
+            _resolveCrossLeafDrop(props, dropIdx);
+        }
 
         // Workspaces M6a (#54, ADR-001): the strip-level move INTENT (see the .idl).
         // A within-leaf reorder translates the captured drag from→to into this; the
@@ -186,6 +203,16 @@ namespace winrt::TerminalApp::implementation
         void _onTabStripDragOver(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::DragEventArgs& e);
         void _onTabStripDrop(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::DragEventArgs& e);
         void _onTabDroppedOutside(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDroppedOutsideEventArgs& args);
+
+        // Workspaces M6b drop internals, split so the drag rig (TabStripDragTests
+        // slice 3c) can test the data-resolution core without a framework
+        // DragEventArgs (not publicly constructible). _dropIndexFromPoint is the
+        // pointer hit-test (the only part needing the args' coordinate transform);
+        // _resolveCrossLeafDrop is the PID-guard + paneTabId-resolve +
+        // MoveTabRequested + reconcile core. _onTabStripDrop = the former feeding
+        // the latter.
+        uint32_t _dropIndexFromPoint(const winrt::Windows::UI::Xaml::DragEventArgs& e);
+        void _resolveCrossLeafDrop(const winrt::Windows::ApplicationModel::DataTransfer::DataPackagePropertySetView& props, uint32_t dropIdx);
 
         // Resolve the VM carried in a TabViewItem's Tag (nullptr if none).
         static winrt::TerminalApp::PaneTabViewModel _vmFromItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);

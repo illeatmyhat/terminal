@@ -1021,27 +1021,23 @@ namespace winrt::TerminalApp::implementation
     // the TabMoved diff's VectorChanged on the source collection.)
     void TabStripView::_onTabStripDrop(const IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::DragEventArgs& e)
     {
-        const auto& props = e.DataView().Properties();
+        // Split (slice 3c): the hit-test is the ONLY part that needs the framework
+        // DragEventArgs (its coordinate transform); the data-resolution +
+        // intent-raise + reconcile core is _resolveCrossLeafDrop, which the drag rig
+        // drives directly with a constructed DataPackage view (a DragEventArgs is
+        // not publicly constructible). Behaviour is unchanged: the hit-test has no
+        // side effects, so running it before the PID/payload guard (which now lives
+        // in the core) is equivalent — and in practice _onTabStripDragOver only
+        // accepts same-process Move drags, so this fires only for our own drags.
+        _resolveCrossLeafDrop(e.DataView().Properties(), _dropIndexFromPoint(e));
+    }
 
-        // PID guard — reject a drop from the classic window's TabView / another
-        // process (mirror classic TerminalPage.cpp:5979-5993).
-        const auto pidObj = props.TryLookup(L"pid");
-        if (!pidObj || winrt::unbox_value_or<uint32_t>(pidObj, 0u) != GetCurrentProcessId())
-        {
-            return;
-        }
-
-        const auto tabIdObj = props.TryLookup(L"paneTabId");
-        if (!tabIdObj)
-        {
-            return;
-        }
-        const auto paneTabId = winrt::unbox_value_or<uint64_t>(tabIdObj, 0ull);
-
-        // Hit-test the drop point against this strip's tab containers to pick the
-        // insertion index (ports classic TerminalPage.cpp:6008-6024). If the pointer
-        // is on the left half of a tab, insert before it; if it is past every tab,
-        // -1 → append (the page clamps to [0, size], and moveTab clamps again).
+    // Hit-test `e`'s drop point against this strip's TabViewItem containers and
+    // return the insertion index (ports classic TerminalPage.cpp:6008-6024). If the
+    // pointer is on the left half of a tab, insert before it; if it is past every
+    // tab, append (the page clamps to [0, size], and moveTab clamps again).
+    uint32_t TabStripView::_dropIndexFromPoint(const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    {
         auto dropIdx = -1;
         const auto tabView = TabView();
         const auto items = tabView.TabItems();
@@ -1058,17 +1054,36 @@ namespace winrt::TerminalApp::implementation
                 }
             }
         }
-        const auto clampedIdx = dropIdx < 0 ? items.Size() : static_cast<uint32_t>(dropIdx);
+        return dropIdx < 0 ? items.Size() : static_cast<uint32_t>(dropIdx);
+    }
 
-        // Raise the strip-level intent: the page dispatches
-        // moveTab(state, paneTabId, THIS strip's LeafId, clampedIdx) and the
-        // resulting TabMoved diff re-projects both strips (model-as-truth — never a
-        // write-back at the drop site).
-        MoveTabRequested.raise(paneTabId, clampedIdx);
+    // The cross-leaf drop RESOLUTION core (no framework DragEventArgs). PID guard —
+    // reject a drop from the classic window's TabView / another process (mirror
+    // classic TerminalPage.cpp:5979-5993). Resolve the dragged VM's stable Id from
+    // the DataPackage, then raise the strip-level intent: the page dispatches
+    // moveTab(state, paneTabId, THIS strip's LeafId, dropIdx) and the resulting
+    // TabMoved diff re-projects both strips (model-as-truth — never a write-back at
+    // the drop site). Then reconcile THIS strip from the model even if the move
+    // no-op'd (the durable-divergence safety net — a cross-leaf moveTab CAN no-op,
+    // see the _onTabStripDrop banner; re-projecting from _source when the model
+    // already matches is a structural no-op). Extracted so the drag rig can drive it
+    // with a constructed DataPackage view (slice 3c).
+    void TabStripView::_resolveCrossLeafDrop(const winrt::Windows::ApplicationModel::DataTransfer::DataPackagePropertySetView& props, uint32_t dropIdx)
+    {
+        const auto pidObj = props.TryLookup(L"pid");
+        if (!pidObj || winrt::unbox_value_or<uint32_t>(pidObj, 0u) != GetCurrentProcessId())
+        {
+            return;
+        }
 
-        // Safety net (see the method comment): reconcile THIS strip from the model
-        // even if the move no-op'd. Idempotent — re-projecting from _source when the
-        // model already matches is a structural no-op.
+        const auto tabIdObj = props.TryLookup(L"paneTabId");
+        if (!tabIdObj)
+        {
+            return;
+        }
+        const auto paneTabId = winrt::unbox_value_or<uint64_t>(tabIdObj, 0ull);
+
+        MoveTabRequested.raise(paneTabId, dropIdx);
         _rebuildProjection();
     }
 

@@ -5,8 +5,14 @@
 #include "CrashCapture.h"
 #include "CppWinrtTailored.h"
 
+// The TabStripView IMPL header: slice 3c reaches the impl via winrt::get_self to
+// call the impl-only ResolveCrossLeafDropForTest hook (the same get_self route the
+// WorkspaceTests M6b test uses to raise MoveTabRequested).
+#include "../TerminalApp/TabStripView.h"
+
 #include <winrt/Windows.ApplicationModel.Core.h>
 #include <winrt/Windows.UI.Core.h>
+#include <winrt/Windows.ApplicationModel.DataTransfer.h>
 #include <winrt/TerminalApp.h>
 
 using namespace WEX::Logging;
@@ -238,6 +244,84 @@ namespace TerminalAppLocalTests
                 VERIFY_ARE_EQUAL(static_cast<uint64_t>(0x3B00), vm0.Id());
 
                 Breadcrumb(L"3b.OK");
+            });
+            VERIFY_SUCCEEDED(result);
+        }
+
+        // Slice 3c: drive the REAL cross-leaf drop RESOLUTION on a bare strip with a
+        // hand-built DataPackage (paneTabId + pid -- exactly what _onTabDragStarting
+        // stuffs in), via the ResolveCrossLeafDropForTest hook. A framework
+        // DragEventArgs is not constructible, so this is the faithful headless
+        // substitute for "drop a foreign tab on this strip": it exercises the PID
+        // guard, the paneTabId resolve, and the MoveTabRequested intent (with the
+        // resolved drop index) -- the production logic, minus only the pointer
+        // hit-test (that needs real coordinates -> slice 3d). All under the
+        // crash-capture surface.
+        TEST_METHOD(CrossLeafDrop_ResolvesDataPackage_RaisesMoveTabRequested_PidGuarded)
+        {
+            using namespace TerminalApp::Diagnostics;
+            namespace DT = winrt::Windows::ApplicationModel::DataTransfer;
+
+            Breadcrumb(L"3c.Begin");
+            const auto result = RunOnUIThread([]() {
+                winrt::TerminalApp::TabStripView strip{};
+
+                // Give the strip a source so its post-drop reconcile
+                // (_rebuildProjection, the durable-divergence safety net) is safe.
+                auto source = winrt::single_threaded_observable_vector<winrt::TerminalApp::PaneTabViewModel>();
+                for (uint64_t i = 0; i < 2; ++i)
+                {
+                    winrt::TerminalApp::PaneTabViewModel vm{};
+                    vm.Id(0x3C00 + i);
+                    source.Append(vm);
+                }
+                strip.ItemsSource(source);
+
+                // Observe the strip's move INTENT (raised synchronously by the drop).
+                uint64_t gotTabId = 0;
+                uint32_t gotIdx = 0xFFFFFFFF;
+                int fireCount = 0;
+                strip.MoveTabRequested([&](uint64_t tabId, uint32_t idx) {
+                    gotTabId = tabId;
+                    gotIdx = idx;
+                    ++fireCount;
+                });
+
+                auto stripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(strip);
+
+                // Build a DataPackage view carrying paneTabId + pid, then resolve a
+                // drop at dropIdx -- mirrors a real cross-leaf TabStripDrop.
+                const auto resolveWith = [&](uint64_t tabId, uint32_t pid, uint32_t dropIdx) {
+                    DT::DataPackage pkg;
+                    pkg.Properties().Insert(L"paneTabId", winrt::box_value<uint64_t>(tabId));
+                    pkg.Properties().Insert(L"pid", winrt::box_value<uint32_t>(pid));
+                    stripImpl->ResolveCrossLeafDropForTest(pkg.GetView().Properties(), dropIdx);
+                };
+
+                // (1) A same-process drop carrying a FOREIGN tabId raises the intent
+                //     once, with that tabId and the resolved drop index.
+                Breadcrumb(L"3c.ValidDrop");
+                const uint64_t foreignTabId = 0xBEEF;
+                resolveWith(foreignTabId, GetCurrentProcessId(), 1u);
+                VERIFY_ARE_EQUAL(1, fireCount, L"a same-pid drop raises MoveTabRequested exactly once");
+                VERIFY_ARE_EQUAL(foreignTabId, gotTabId, L"the raised tabId is the dragged paneTabId");
+                VERIFY_ARE_EQUAL(1u, gotIdx, L"the raised dstIdx is the resolved drop index");
+
+                // (2) The PID guard rejects a drop from another process: no new raise.
+                Breadcrumb(L"3c.ForeignPidRejected");
+                resolveWith(foreignTabId, GetCurrentProcessId() + 1, 0u);
+                VERIFY_ARE_EQUAL(1, fireCount, L"a foreign-pid drop is rejected (no new raise)");
+
+                // (3) A same-pid drop with NO paneTabId payload is rejected: no raise.
+                Breadcrumb(L"3c.MissingTabIdRejected");
+                {
+                    DT::DataPackage pkg;
+                    pkg.Properties().Insert(L"pid", winrt::box_value<uint32_t>(GetCurrentProcessId()));
+                    stripImpl->ResolveCrossLeafDropForTest(pkg.GetView().Properties(), 0u);
+                }
+                VERIFY_ARE_EQUAL(1, fireCount, L"a drop with no paneTabId is rejected (no new raise)");
+
+                Breadcrumb(L"3c.OK");
             });
             VERIFY_SUCCEEDED(result);
         }
