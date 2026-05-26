@@ -885,29 +885,34 @@ namespace winrt::TerminalApp::implementation
 
     void WorkspaceView::apply(const ::WorkspaceModel::TabMoved& c)
     {
-        // CONTRACT-ONLY STUB until Phase 2 wires user-reachable cross-leaf
-        // moves. This arm is intentionally empty in Phase 1.
+        // Workspaces M6 Stage 0 (#54, ADR-001): the identity-preserving move arm.
+        // diff() emits a single TabMoved (NOT TabRemoved + TabAdded) when a TabId
+        // lives in both prev and next at a different (leafId, idx) — the signal that
+        // lets us RELOCATE the live IPaneContent rather than tear it down and
+        // re-create it (which would flicker + disconnect ConPTY). The arm carries
+        // the source + destination leaf ids and the destination index.
         //
-        // Identity-preserving move. The model carries the source and
-        // destination leaf ids plus the destination tab index, and the
-        // moved TabId is the same as it was pre-move — diff() emits a
-        // single TabMoved (NOT TabRemoved + TabAdded) which is the
-        // signal that lets a view-layer apply arm preserve the live
-        // IPaneContent.
-        //
-        // What Phase 1 actually proves: the MoveTab_FlagOn_* tests call
-        // WorkspaceModel::moveTab directly and assert the identity-
-        // preserving DIFF CONTRACT (a single TabMoved is emitted). They do
-        // NOT exercise the AC's UX-level claim that a live TermControl /
-        // ConPTY / scrollback survives a move, because no user-reachable
-        // Phase 1 action emits TabMoved — the classic _MoveTab + _MovePane
-        // entry points still own the visible reparent (DetachPane +
-        // AttachPane already preserve the live TermControl + ConPTY there).
-        //
-        // Phase 2 lifts the "one tab per leaf" rule and replaces this stub
-        // with a real AttachPane call; the UX-survival claim is verified
-        // then, against a user-reachable cross-leaf move.
-        (void)c;
+        // Two steps, in order:
+        //   1. Move the strip view-model for this tab from the source leaf's
+        //      collection into the destination leaf's at dstIdx. _movePaneTabVm
+        //      MOVES the SAME PaneTabViewModel instance (preserving its M3 bell /
+        //      M4 runtime-color runtime state + content binding) — it does NOT
+        //      recreate it. After this, _leafContentTabs() reports the moved tab
+        //      under the destination leaf.
+        //   2. Rebuild the projected pane tree and re-attach every leaf's
+        //      active-tab content into its fresh host. The re-attach re-homes the
+        //      moved tab's live IPaneContent.GetRoot() into the DESTINATION leaf's
+        //      content host (a reparent — _attachContentToLeafHost detaches the
+        //      root from its old host first), so the TermControl + swap-chain panel
+        //      survive intact with no ConPTY disconnect. For a same-leaf reorder the
+        //      host child is unchanged and only the strip order moves.
+        auto page = _page();
+        if (!page)
+        {
+            return;
+        }
+        page->_movePaneTabVm(c.srcLeafId, c.dstLeafId, c.id, c.dstIdx);
+        _rebuildAndReattachLeafContents();
     }
 
     void WorkspaceView::apply(const ::WorkspaceModel::ActiveTabChanged& c)

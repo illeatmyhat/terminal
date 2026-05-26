@@ -7480,6 +7480,61 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Workspaces M6 Stage 0 (#54, ADR-001): the projection arm for a TabMoved diff.
+    // Relocate the EXISTING strip view-model for `tab` from `srcLeaf`'s collection
+    // into `dstLeaf`'s at the clamped `dstIdx`. We MOVE the SAME PaneTabViewModel
+    // instance — find it by id identity in the source, detach it WITHOUT
+    // destroying it, then insert that same object into the destination — so the
+    // VM's runtime state (M3 BellIndicator, M4 RuntimeColor) and its live content
+    // binding survive the move. Recreating the VM (the _removePaneTabVm +
+    // _appendPaneTabVm pair) would drop that runtime state and is exactly what the
+    // identity-preserving TabMoved signal exists to avoid. Same-leaf reorder
+    // (srcLeaf == dstLeaf) re-indexes within the one collection. No-op when the
+    // source has no strip or the tab isn't projected there. `dstIdx` is clamped to
+    // [0, dst.Size()] AFTER the source removal (the model's diff already clamps to
+    // the post-move size; we clamp defensively against the live collection so a
+    // same-leaf move past the end appends rather than throws).
+    void TerminalPage::_movePaneTabVm(::WorkspaceModel::PaneId srcLeaf, ::WorkspaceModel::PaneId dstLeaf, ::WorkspaceModel::TabId tab, std::size_t dstIdx)
+    {
+        if (!srcLeaf.valid() || !dstLeaf.valid() || !tab.valid())
+        {
+            return;
+        }
+
+        const auto srcIt = _paneTabStrips.find(srcLeaf);
+        if (srcIt == _paneTabStrips.end())
+        {
+            return;
+        }
+        auto& src = srcIt->second;
+
+        // Locate the moving VM by id identity and detach it without destroying it.
+        winrt::TerminalApp::PaneTabViewModel moving{ nullptr };
+        for (uint32_t i = 0; i < src.Size(); ++i)
+        {
+            if (src.GetAt(i).Id() == tab.v)
+            {
+                moving = src.GetAt(i);
+                src.RemoveAt(i);
+                break;
+            }
+        }
+        if (!moving)
+        {
+            return;
+        }
+
+        // Resolve (creating on first use) the destination collection. For a
+        // same-leaf reorder this is the SAME collection we just removed from.
+        auto& dst = _paneTabStripForLeaf(dstLeaf);
+
+        // Clamp the insertion index to the destination's CURRENT size (post-removal
+        // for the same-leaf case). RemoveAt above shifted the same-leaf collection,
+        // so an out-of-range model index still inserts safely (append on overflow).
+        const auto clamped = std::min<uint32_t>(static_cast<uint32_t>(dstIdx), dst.Size());
+        dst.InsertAt(clamped, moving);
+    }
+
     // Mark the strip view-model whose Id matches the newly-active tab active,
     // clearing IsActive on all others in the SAME leaf. Resolution is by id
     // identity (the S1-resolver philosophy): we never index the collection
@@ -8299,6 +8354,11 @@ namespace winrt::TerminalApp::implementation
         // in _appendPaneTabVm) and the page dispatches the model action.
         winrt::TerminalApp::TabStripView strip{};
         strip.ItemsSource(_paneTabStripForLeaf(leaf));
+        // Workspaces M6 Stage 0 (#54, ADR-001): tell the strip which leaf it
+        // projects, so a within-leaf reorder (M6a) / cross-leaf drop (M6b) can
+        // raise a move intent whose destination is THIS leaf. Set alongside
+        // ItemsSource — both are pure top-down projection wiring.
+        strip.LeafId(leaf.v);
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);
 

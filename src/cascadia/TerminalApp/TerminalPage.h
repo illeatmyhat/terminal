@@ -875,6 +875,12 @@ namespace winrt::TerminalApp::implementation
         // WorkspaceContentHost, so nothing here is on screen.
         void _appendPaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab, const std::string& title);
         void _removePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
+        // Workspaces M6 Stage 0 (#54, ADR-001): relocate the existing strip VM for
+        // `tab` from `srcLeaf`'s collection into `dstLeaf`'s at the clamped `dstIdx`,
+        // MOVING the SAME PaneTabViewModel instance (preserving its runtime bell /
+        // runtime color / content binding) — never recreating it. The projection
+        // arm for TabMoved.
+        void _movePaneTabVm(::WorkspaceModel::PaneId srcLeaf, ::WorkspaceModel::PaneId dstLeaf, ::WorkspaceModel::TabId tab, std::size_t dstIdx);
         void _setActivePaneTabVm(::WorkspaceModel::PaneId leaf, ::WorkspaceModel::TabId tab);
 
         // Live pane-tab title. Set the strip view-model whose stable Id matches

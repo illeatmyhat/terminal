@@ -125,6 +125,7 @@ namespace TerminalAppLocalTests
         TEST_METHOD(ResizePane_FlagOff_LeavesModelDormant);
         TEST_METHOD(MoveTab_FlagOn_DiffEmitsTabMovedPreservingId);
         TEST_METHOD(MoveTab_FlagOn_CrossWorkspaceTabMovedPreservingId);
+        TEST_METHOD(MoveTab_FlagOn_StripVmRelocatesAndContentSurvives);
 
         // Slice 2 / Phase 2 Visible #2 (#46): the workspaces UI shell.
         //  - flag-off: the sidebar column is collapsed / zero-width and the
@@ -3455,6 +3456,218 @@ namespace TerminalAppLocalTests
                              L"moved tab must NOT appear as TabAdded across workspaces");
             VERIFY_ARE_EQUAL(static_cast<std::size_t>(0), removedHits,
                              L"moved tab must NOT appear as TabRemoved across workspaces");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M6 Stage 0 (#54, ADR-001): the apply(TabMoved) PROJECTION arm.
+    // Where the two tests above pin the model/diff contract, this pins the
+    // view-layer relocation the (formerly-stub) WorkspaceView::apply(TabMoved) now
+    // performs: the strip VM is MOVED (the same instance, with its M3 bell / M4
+    // runtime-color runtime state intact) from the source leaf's collection into
+    // the destination's, _leafContentTabs() reports the moved tab under the
+    // destination, and the live IPaneContent instance is PRESERVED across the move
+    // (no teardown / re-create — exactly what the identity-preserving TabMoved
+    // signal exists to guarantee).
+    //
+    // We split the root leaf into two, seed the SIBLING tab's strip VM with a bell
+    // + a runtime color (the runtime state that recreating the VM would drop), then
+    // moveTab the sibling's tab back into the original leaf at idx 1. The mock
+    // factory hands out a stable-rooted MockPaneContent per tab, so "no new mock
+    // was created" + "the moved tab's content root is the SAME instance" proves the
+    // content survived. STRUCTURAL only (strip VM collections + host child
+    // identity), no layout (the headless std::clamp-resize trap).
+    void WorkspaceTests::MoveTab_FlagOn_StripVmRelocatesAndContentSurvives()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        const winrt::Windows::UI::Color green{ 255, 0, 255, 0 };
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xF100 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            // Resolve the root leaf directly (the _rootLeafId helper is defined
+            // later in this file, so it is not in scope here — mirror the
+            // sibling MoveTab_FlagOn_* tests, which navigate the model directly).
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* rootLeaf = std::get_if<::WorkspaceModel::LeafPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(rootLeaf);
+            leaf0 = rootLeaf->id;
+            VERIFY_IS_TRUE(leaf0.valid());
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0),
+                             L"startup: the root leaf has one strip VM");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf so there are two leaves, each with one tab");
+        ::WorkspaceModel::PaneId siblingLeaf{ 0 };
+        ::WorkspaceModel::TabId siblingTabId{ 0 };
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            siblingLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto* node = page->_workspaceModelState->pane(siblingLeaf);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_ARE_EQUAL(1u, leafPane->tabs.size());
+            siblingTabId = leafPane->tabs[0].id;
+            VERIFY_IS_TRUE(siblingTabId.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(siblingLeaf));
+
+            // Two mocks mounted (startup tab + split sibling). Capture the
+            // sibling's content root instance to assert it survives the move.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"the startup tab + the split sibling each mounted one mock");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Seed the sibling tab's strip VM with bell + runtime-color runtime state");
+        winrt::Windows::UI::Xaml::FrameworkElement movingContentRoot{ nullptr };
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripVmAtForTest(siblingLeaf, 0);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_ARE_EQUAL(siblingTabId.v, vm.Id());
+            vm.BellIndicator(true);
+            vm.RuntimeColor(green);
+            VERIFY_IS_TRUE(vm.BellIndicator());
+            VERIFY_IS_NOT_NULL(vm.RuntimeColor());
+
+            // The sibling's live content root — must be the SAME instance after the
+            // move (mount order: mocks[0] = startup, mocks[1] = split sibling).
+            movingContentRoot = (*mocks)[1]->GetRoot();
+            VERIFY_IS_NOT_NULL(movingContentRoot);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"moveTab: relocate the sibling's tab into the original leaf at idx 1");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::moveTab(page->_workspaceModelState,
+                                                  siblingTabId,
+                                                  leaf0,
+                                                  1u);
+            VERIFY_IS_TRUE(next != nullptr);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            // (1) Strip VM collections: the source emptied (its leaf cascaded away
+            // on the move — the model removes the now-empty sibling leaf), and the
+            // destination grew to TWO VMs.
+            VERIFY_ARE_EQUAL(0u, page->_paneTabStripSizeForTest(siblingLeaf),
+                             L"the emptied source leaf's strip holds no VM after the move");
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the destination leaf's strip grew to two VMs");
+
+            // (2) The SAME VM instance moved — its Id is present in the destination
+            // at idx 1, and its M3 bell + M4 runtime color survived (recreating the
+            // VM would have dropped both).
+            const auto movedVm = page->_paneTabStripVmAtForTest(leaf0, 1);
+            VERIFY_IS_NOT_NULL(movedVm);
+            VERIFY_ARE_EQUAL(siblingTabId.v, movedVm.Id(),
+                             L"the moved tab's VM is at idx 1 in the destination strip");
+            VERIFY_IS_TRUE(movedVm.BellIndicator(),
+                           L"the moved VM kept its bell runtime state (instance moved, not recreated)");
+            VERIFY_IS_NOT_NULL(movedVm.RuntimeColor(),
+                               L"the moved VM kept its runtime color (instance moved, not recreated)");
+            VERIFY_ARE_EQUAL(til::color{ green }, til::color{ movedVm.RuntimeColor().Value() },
+                             L"the moved VM's runtime color is still GREEN");
+
+            // (3) _leafContentTabs() now lists the destination leaf (and NOT the
+            // emptied source leaf). The model preserves the destination's existing
+            // active tab by id on a cross-leaf move (Actions_Move.cpp:203-220), so
+            // the startup tab — not the moved sibling — is leaf0's active content
+            // tab here; we assert the structural fact (dst present, src gone) and
+            // prove the moved tab's content-reachability under dst in step (5).
+            bool dstReported = false;
+            for (const auto& [leaf, tab] : page->_leafContentTabs())
+            {
+                if (leaf == leaf0)
+                {
+                    dstReported = true;
+                }
+                VERIFY_IS_FALSE(leaf == siblingLeaf,
+                                L"the emptied source leaf must no longer be a content-bearing leaf");
+            }
+            VERIFY_IS_TRUE(dstReported,
+                           L"the destination leaf is still a content-bearing leaf after the move");
+
+            // (4) Content instance preserved: NO new mock was created (no content
+            // teardown + re-create), and the moved tab's content root is the SAME
+            // FrameworkElement instance it was before the move.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"the move must NOT create a new content (identity-preserving)");
+            VERIFY_ARE_EQUAL(movingContentRoot, (*mocks)[1]->GetRoot(),
+                             L"the moved tab's live content root is the SAME instance (no ConPTY disconnect)");
+
+            // Cutover invariant: no classic Tab was built by the move.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the move must not create a classic Tab (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // (5) Activate the moved tab in the destination leaf: _leafContentTabs()
+        // must then report IT under leaf0, and its SAME live content root must be
+        // the leaf0 host's child — proving the content re-homed into the
+        // destination host across the move (the point of TabMoved vs Remove+Add).
+        Log::Comment(L"Activate the moved tab; its preserved content must show in the destination host");
+        result = RunOnUIThread([&]() {
+            auto next = ::WorkspaceModel::selectTab(page->_workspaceModelState, siblingTabId);
+            page->_applyWorkspaceAction(std::move(next));
+
+            bool movedTabActiveUnderDst = false;
+            for (const auto& [leaf, tab] : page->_leafContentTabs())
+            {
+                if (leaf == leaf0 && tab == siblingTabId)
+                {
+                    movedTabActiveUnderDst = true;
+                }
+            }
+            VERIFY_IS_TRUE(movedTabActiveUnderDst,
+                           L"the activated moved tab is reported under the destination leaf");
+
+            // Its content is still the SAME instance AND is now parented in leaf0's
+            // content host (re-homed by the re-attach, not re-created).
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"activation must not create a new content either");
+            const auto leafChild = page->_leafHostChildForTest(leaf0);
+            VERIFY_ARE_EQUAL(movingContentRoot, leafChild,
+                             L"the destination host shows the moved tab's SAME content root (content re-homed)");
         });
         VERIFY_SUCCEEDED(result);
     }

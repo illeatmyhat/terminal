@@ -34,5 +34,15 @@ namespace TerminalApp
         // pixels (the headless std::clamp-resize trap). Production code drives the
         // strip through ItemsSource and the VM intents only.
         Microsoft.UI.Xaml.Controls.TabView TabViewControl { get; };
+
+        // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
+        // leaf this strip projects. The page sets it in _projectLeafContainer next
+        // to ItemsSource. A within-leaf reorder (M6a) and a cross-leaf drop (M6b)
+        // both raise MoveTabRequested carrying THIS strip's own LeafId as the move
+        // destination — so the page can dispatch moveTab(state, tabId, LeafId,
+        // dstIdx) without re-deriving the leaf from the gesture site.
+        // APPENDED after TabViewControl (the IDL vtable trap — never insert
+        // mid-runtimeclass).
+        UInt64 LeafId;
     }
 }

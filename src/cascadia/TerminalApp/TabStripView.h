@@ -51,6 +51,12 @@ namespace winrt::TerminalApp::implementation
         // headless TAEF can assert TabItems / SelectedItem / drag flags.
         winrt::Microsoft::UI::Xaml::Controls::TabView TabViewControl();
 
+        // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
+        // leaf this strip projects, set by the page in _projectLeafContainer. Both
+        // the within-leaf reorder (M6a) and the cross-leaf drop (M6b) use it as the
+        // moveTab destination. A plain scalar; not observed.
+        WINRT_PROPERTY(uint64_t, LeafId, 0);
+
     private:
         // The source VM collection the page set, and the live subscription to its
         // membership changes. Each membership change re-projects the TabItems.
