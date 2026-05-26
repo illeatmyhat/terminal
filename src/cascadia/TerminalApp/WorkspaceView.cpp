@@ -1102,8 +1102,8 @@ namespace winrt::TerminalApp::implementation
         // customTitle onto the VM's CustomTitle (custom-wins over the live
         // title). Done UNCONDITIONALLY — before the classic-resolution gate
         // below — so the flag-on strip updates even when there is no classic tab
-        // to resolve. (The color/pin still ride the classic path for now; M4
-        // routes runtimeColor to the strip.)
+        // to resolve. (Pin rides the strip via _setPaneTabPinnedForTab below; M4
+        // now routes runtimeColor to the strip via _setPaneTabRuntimeColorForTab.)
         page->_setPaneTabCustomTitleForTab(c.id, winrt::hstring{ til::u8u16(c.customTitle) });
 
         // Workspaces M5 (#54, ADR-001): project the pinned state (the pin/unpin
@@ -1116,6 +1116,17 @@ namespace winrt::TerminalApp::implementation
         // M5 wires only the label + this projection; the full pinned-tab VISUALS
         // (pin glyph, suppress close, sort-to-front) are DEFERRED.
         page->_setPaneTabPinnedForTab(c.id, c.pinned);
+
+        // Workspaces M4 (#54, ADR-001): project the runtimeColor (the user color-
+        // picker result) onto the per-leaf strip VM, resolved by the change's TabId
+        // (c.id). This is the model→view return path for a color change: the
+        // RequestSetColor / RequestClearColor intent dispatched setTabColor, and here
+        // the diff arm pushes the new runtimeColor onto the VM's RuntimeColor (the
+        // USER OVERRIDE, which WINS over the live Background in EffectiveBackground —
+        // like customTitle wins over the live title). A std::nullopt clears it.
+        // Done UNCONDITIONALLY — before the classic-resolution gate below — so the
+        // flag-on strip updates even when there is no classic tab to resolve.
+        page->_setPaneTabRuntimeColorForTab(c.id, c.runtimeColor);
 
         const auto resolved = _resolveClassicTabIndex(c.workspaceId);
         if (!resolved.has_value())

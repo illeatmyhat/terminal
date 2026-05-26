@@ -52,6 +52,15 @@ namespace winrt::TerminalApp::implementation
         // touches the model — mirrors RequestRename exactly.
         void RequestTogglePin(bool pinned);
 
+        // Workspaces M4 (#54, ADR-001): set/clear-color intents. The per-tab context
+        // menu's "Color…" item opens the reused ColorPickupFlyout and calls these
+        // with the chosen color (set) or nothing (clear); the page dispatches
+        // setTabColor(Id, color) / setTabColor(Id, null) and the resulting
+        // TabDecorationUpdated diff arm projects the new runtimeColor back onto
+        // RuntimeColor. The VM never touches the model — mirrors RequestRename.
+        void RequestSetColor(const winrt::Windows::UI::Color& color);
+        void RequestClearColor();
+
         til::property_changed_event PropertyChanged;
 
         // sender = *this (carries Id); args = null. The page resolves the tab
@@ -67,6 +76,12 @@ namespace winrt::TerminalApp::implementation
         // Id); args = the desired pinned state (a boxed bool). The page resolves
         // the tab from the sender's Id and dispatches setTabPinned.
         til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> TogglePinRequested;
+
+        // Workspaces M4 (#54, ADR-001): set/clear-color intent. sender = *this
+        // (carries Id); args = the chosen color boxed as an IReference<Color> on a
+        // set, or null on a clear. The page resolves the tab from the sender's Id
+        // and dispatches setTabColor.
+        til::typed_event<winrt::TerminalApp::PaneTabViewModel, winrt::Windows::Foundation::IInspectable> SetColorRequested;
 
         // Stable identity (TabId.v); not observed.
         WINRT_PROPERTY(uint64_t, Id, 0);
@@ -164,6 +179,55 @@ namespace winrt::TerminalApp::implementation
         // (matches the .idl append). The setter short-circuits on an unchanged value.
         WINRT_OBSERVABLE_PROPERTY(bool, Pinned, PropertyChanged.raise, false);
 
+    public:
+        // Workspaces M4 (#54, ADR-001): the model's TabRecord.runtimeColor — the
+        // USER-CHOSEN tab color set via the per-tab "Color…" picker. A pure
+        // downstream projection of the model (the TabDecorationUpdated diff arm sets
+        // it through the page via _setPaneTabRuntimeColorForTab; the VM never writes
+        // it back). null = "no override". It is NOT a plain observable property: like
+        // M2's CustomTitle it short-circuits on an unchanged value and raises a
+        // PropertyChanged whose name is L"RuntimeColor" so TabStripView's dispatcher
+        // re-applies the chrome.
+        //
+        // RuntimeColor WINS over the live terminal-background tint (Background) in
+        // the computed EffectiveBackground below — exactly as CustomTitle wins over
+        // the live title. These are TWO DISTINCT concerns: Background is the live
+        // content color (the M1.2 projection), RuntimeColor is the user override.
+        winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> RuntimeColor() const noexcept
+        {
+            return _runtimeColor;
+        }
+        void RuntimeColor(const winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>& value)
+        {
+            // Compare by VALUE (both null, or both set to the same color) so a
+            // re-set of the same override raises no spurious PropertyChanged.
+            const auto same = (!_runtimeColor && !value) ||
+                              (_runtimeColor && value && _runtimeColor.Value() == value.Value());
+            if (!same)
+            {
+                _runtimeColor = value;
+                PropertyChanged.raise(*this, winrt::Windows::UI::Xaml::Data::PropertyChangedEventArgs{ L"RuntimeColor" });
+            }
+        }
+
+        // Workspaces M4 (#54, ADR-001): the EFFECTIVE tab background — the user
+        // override wins. When RuntimeColor is set it is a FRESH non-acrylic
+        // SolidColorBrush of that color; otherwise it falls back to the live
+        // Background brush (the M1.2 live-content tint). Mirrors M2's computed
+        // Title (_customTitle ?? _liveTitle). TabStripView consumes this (not
+        // Background directly) so the user color wins; a null result means
+        // "no color at all — fall back to the native theme".
+        winrt::Windows::UI::Xaml::Media::Brush EffectiveBackground() const
+        {
+            if (_runtimeColor)
+            {
+                winrt::Windows::UI::Xaml::Media::SolidColorBrush brush{};
+                brush.Color(_runtimeColor.Value());
+                return brush;
+            }
+            return Background();
+        }
+
     private:
         // Workspaces M2 (#54, ADR-001): the two inputs to the computed Title (see
         // the Title()/CustomTitle() accessors above). _liveTitle is the live shell
@@ -172,6 +236,11 @@ namespace winrt::TerminalApp::implementation
         // _customTitle.
         winrt::hstring _liveTitle{};
         winrt::hstring _customTitle{};
+
+        // Workspaces M4 (#54, ADR-001): the model's runtimeColor user override (the
+        // input to the computed EffectiveBackground above; null = no override). Set
+        // by the color picker's commit via the diff arm; the VM never writes it back.
+        winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> _runtimeColor{ nullptr };
 
         // Set the live shell title and raise PropertyChanged(L"Title") only when
         // the EFFECTIVE title actually changes. While a custom title is in force

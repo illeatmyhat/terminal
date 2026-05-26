@@ -112,5 +112,46 @@ namespace TerminalApp
         // sender = the VM (carries Id); args = the desired pinned state (a boxed
         // Boolean). APPENDED LAST for the vtable-slot reason.
         event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> TogglePinRequested;
+
+        // Workspaces M4 (#54, ADR-001): the model's TabRecord.runtimeColor — the
+        // USER-CHOSEN tab color set via the per-tab "Color…" picker. A pure
+        // downstream projection of the model (the TabDecorationUpdated diff arm sets
+        // it through the page; the VM never writes it back). null = "no override";
+        // when set it WINS over the live terminal-background tint (Background) in the
+        // computed EffectiveBackground — exactly as CustomTitle wins over the live
+        // title. (These are TWO DISTINCT concerns: Background is the live content
+        // color, RuntimeColor is the user override.) APPENDED LAST (after
+        // TogglePinRequested) for the vtable-slot reason (inserting mid-runtimeclass
+        // trips the /RTCs "Stack around 'value' corrupted" trap).
+        Windows.Foundation.IReference<Windows.UI.Color> RuntimeColor { get; set; };
+
+        // Workspaces M4 (#54, ADR-001): set-color INTENT. The per-tab context menu's
+        // "Color…" item opens the reused ColorPickupFlyout and raises this with the
+        // chosen color; the owning TerminalPage dispatches setTabColor(Id, color) and
+        // the resulting TabDecorationUpdated diff arm projects the new runtimeColor
+        // back onto RuntimeColor. The VM NEVER touches the model — mirrors
+        // RequestRename / RequestTogglePin. APPENDED LAST for the vtable-slot reason.
+        void RequestSetColor(Windows.UI.Color color);
+
+        // Workspaces M4 (#54, ADR-001): clear-color INTENT (the picker's "Clear
+        // color" button). Dispatches setTabColor(Id, null) → the diff clears
+        // RuntimeColor, falling the EffectiveBackground back to the live Background.
+        // APPENDED LAST for the vtable-slot reason.
+        void RequestClearColor();
+
+        // sender = the VM (carries Id); args = the chosen color boxed as an
+        // IReference<Color> on a set, or null on a clear. The page resolves the tab
+        // from the sender's Id and dispatches setTabColor. APPENDED LAST for the
+        // vtable-slot reason.
+        event Windows.Foundation.TypedEventHandler<PaneTabViewModel, IInspectable> SetColorRequested;
+
+        // Workspaces M4 (#54, ADR-001): the EFFECTIVE tab background brush — the
+        // user override (RuntimeColor) WINS over the live terminal-background tint
+        // (Background), mirroring how the computed Title prefers CustomTitle over the
+        // live title. A FRESH SolidColorBrush of RuntimeColor when set, else the live
+        // Background, else null (fall back to the native theme). Read-only computed —
+        // TabStripView consumes THIS (not Background directly) so the user color
+        // wins. APPENDED LAST for the vtable-slot reason.
+        Windows.UI.Xaml.Media.Brush EffectiveBackground { get; };
     }
 }

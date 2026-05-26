@@ -404,6 +404,21 @@ namespace TerminalAppLocalTests
         //    new dispatch path for them, only a new trigger.
         TEST_METHOD(StripM5_ContextMenu_TogglePin_DispatchesSetTabPinned);
 
+        // Workspaces M4 (#54, ADR-001): per-tab color flyout. The right-click
+        // gesture + the ColorPickupFlyout itself are NOT headless-testable (no
+        // layout), so this pins the menu's MODEL INTENTS at the VM/dispatch level —
+        // the same level the picker's ColorSelected/ColorCleared handlers raise them:
+        //  - Set: raising the VM's RequestSetColor(color) dispatches setTabColor
+        //    through the model (intent → action → diff); the TabDecorationUpdated arm
+        //    projects the new runtimeColor back onto the VM's RuntimeColor, and the
+        //    user override WINS over the live Background in EffectiveBackground.
+        //  - Clear: RequestClearColor() dispatches setTabColor(null), the diff clears
+        //    RuntimeColor, and EffectiveBackground falls back to the live Background.
+        // Pins the model-as-truth color override (the color is NOT written on the
+        // view at the intent site) AND the RuntimeColor-wins-over-Background
+        // precedence (the two distinct concerns).
+        TEST_METHOD(StripM4_ColorFlyout_DispatchesSetTabColor_RuntimeColorWins);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -5027,6 +5042,156 @@ namespace TerminalAppLocalTests
             VERIFY_IS_NOT_NULL(unpinnedVm);
             VERIFY_IS_FALSE(unpinnedVm.Pinned(),
                             L"the VM Pinned must surface the unpinned state after the unpin round trip");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M4 (#54, ADR-001): the per-tab "Color…" flyout routes the chosen
+    // color through the model as the single source of truth, and the user override
+    // (RuntimeColor) WINS over the live terminal-background tint (Background) in the
+    // VM's computed EffectiveBackground — exactly as M2's customTitle wins over the
+    // live title. The right-click gesture + the ColorPickupFlyout are not headless-
+    // testable (no layout — std::clamp trap), so we drive the VM's set/clear-color
+    // INTENTS directly (the same level the picker's ColorSelected/ColorCleared
+    // handlers raise them) and assert model→diff→projection round-trips.
+    //
+    // The factory hands out a MockPaneContent whose BackgroundBrush is RED, so the
+    // startup tab's live Background seeds to RED at mount. We then:
+    //   1. RequestSetColor(BLUE) → the model's runtimeColor flips to BLUE, the diff
+    //      projects it onto the VM's RuntimeColor, and EffectiveBackground == BLUE
+    //      (the user override wins over the RED live Background).
+    //   2. RequestClearColor() → the model's runtimeColor clears, the VM's
+    //      RuntimeColor goes null, and EffectiveBackground falls back to the RED
+    //      live Background.
+    void WorkspaceTests::StripM4_ColorFlyout_DispatchesSetTabColor_RuntimeColorWins()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        // RED = the live terminal background the mock seeds at mount; BLUE = the
+        // user color the picker chooses (the override that must win).
+        const winrt::Windows::UI::Color red{ 255, 255, 0, 0 };
+        const winrt::Windows::UI::Color blue{ 255, 0, 0, 255 };
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks, red](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks, red](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0xE100 + mocks->size()));
+                // Seed the live content background RED before it mounts, so the
+                // startup tab's strip VM Background is RED at mount (the 2a.2 path).
+                mock->SetBackgroundBrush(Media::SolidColorBrush{ red });
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        ::WorkspaceModel::TabId tab0{ 0 };
+
+        auto result = RunOnUIThread([&]() {
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs.empty());
+            tab0 = leafPane->tabs[0].id;
+            VERIFY_IS_TRUE(tab0.valid());
+
+            // Startup: no runtime color in the model NOR on the VM; the live
+            // Background is RED, so EffectiveBackground falls back to RED.
+            VERIFY_IS_FALSE(leafPane->tabs[0].runtimeColor.has_value(),
+                            L"startup: the model's TabRecord.runtimeColor is unset");
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_IS_NULL(vm.RuntimeColor(),
+                           L"startup: the strip VM has no runtime-color override");
+
+            const auto liveBrush = vm.EffectiveBackground().try_as<Media::SolidColorBrush>();
+            VERIFY_IS_NOT_NULL(liveBrush);
+            VERIFY_ARE_EQUAL(til::color{ red }, til::color{ liveBrush.Color() },
+                             L"startup: EffectiveBackground == the live RED Background (no override yet)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Raise RequestSetColor(BLUE) — the picker's ColorSelected. It must dispatch setTabColor and the override must win over the live RED.");
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            // Call the intent directly (dispatch-level — no synthetic flyout / layout).
+            vm.RequestSetColor(blue);
+
+            // The pick mutated the MODEL (runtimeColor is model-as-truth).
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_TRUE(leafPane->tabs[0].runtimeColor.has_value(),
+                           L"RequestSetColor must dispatch setTabColor so the model's runtimeColor is set");
+            // Compare component-wise (no TAEF ToString for ::WorkspaceModel::Color;
+            // mirrors the existing runtimeColor assertions at ~line 2047).
+            const auto modelColor = leafPane->tabs[0].runtimeColor.value();
+            VERIFY_ARE_EQUAL(blue.R, modelColor.r, L"the model's runtimeColor R must equal BLUE.R");
+            VERIFY_ARE_EQUAL(blue.G, modelColor.g, L"the model's runtimeColor G must equal BLUE.G");
+            VERIFY_ARE_EQUAL(blue.B, modelColor.b, L"the model's runtimeColor B must equal BLUE.B");
+            VERIFY_ARE_EQUAL(blue.A, modelColor.a, L"the model's runtimeColor A must equal BLUE.A");
+
+            // And the diff projected it onto the VM's RuntimeColor.
+            const auto coloredVm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(coloredVm);
+            VERIFY_IS_NOT_NULL(coloredVm.RuntimeColor(),
+                               L"the VM RuntimeColor must surface the override after the round trip");
+            VERIFY_ARE_EQUAL(til::color{ blue }, til::color{ coloredVm.RuntimeColor().Value() },
+                             L"the VM RuntimeColor must equal the chosen BLUE");
+
+            // RuntimeColor WINS: EffectiveBackground is BLUE, not the RED live bg.
+            const auto effBrush = coloredVm.EffectiveBackground().try_as<Media::SolidColorBrush>();
+            VERIFY_IS_NOT_NULL(effBrush);
+            VERIFY_ARE_EQUAL(til::color{ blue }, til::color{ effBrush.Color() },
+                             L"EffectiveBackground must be the BLUE override, NOT the RED live Background (override wins)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Raise RequestClearColor() — the picker's ColorCleared. It must dispatch setTabColor(null); EffectiveBackground falls back to the live RED.");
+        result = RunOnUIThread([&]() {
+            const auto vm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(vm);
+
+            vm.RequestClearColor();
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_IS_FALSE(leafPane->tabs[0].runtimeColor.has_value(),
+                            L"RequestClearColor must dispatch setTabColor(null) so the model's runtimeColor clears");
+
+            const auto clearedVm = page->_paneTabStripFirstVmForTest(leaf0);
+            VERIFY_IS_NOT_NULL(clearedVm);
+            VERIFY_IS_NULL(clearedVm.RuntimeColor(),
+                           L"the VM RuntimeColor must clear after the clear round trip");
+
+            // No override → EffectiveBackground falls back to the live RED Background.
+            const auto effBrush = clearedVm.EffectiveBackground().try_as<Media::SolidColorBrush>();
+            VERIFY_IS_NOT_NULL(effBrush);
+            VERIFY_ARE_EQUAL(til::color{ red }, til::color{ effBrush.Color() },
+                             L"EffectiveBackground must fall back to the RED live Background after the override is cleared");
         });
         VERIFY_SUCCEEDED(result);
     }

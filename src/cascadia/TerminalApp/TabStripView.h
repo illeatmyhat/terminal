@@ -91,13 +91,22 @@ namespace winrt::TerminalApp::implementation
         // by the item, released on _rebuildProjection (weak captures, no use-after-free
         // on a torn-down tab). The `header` is captured so the Rename item reuses M2's
         // BeginRename() path. UI thread.
-        winrt::Windows::UI::Xaml::Controls::MenuFlyout _makeContextFlyout(const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header);
+        winrt::Windows::UI::Xaml::Controls::MenuFlyout _makeContextFlyout(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header);
 
         // Refresh the Pin/Unpin context-menu item's label from the VM's projected
         // Pinned state (the toggle text comes BACK from the model via the
         // TabDecorationUpdated diff arm). Used at build time and on the VM's Pinned
         // PropertyChanged. UI thread.
         void _applyContextMenuPinLabel(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
+
+        // Workspaces M4 (#54, ADR-001): open the reused ColorPickupFlyout anchored
+        // to `item` (mirrors classic Tab::AttachColorPicker). The flyout's
+        // ColorSelected → vm.RequestSetColor / ColorCleared → vm.RequestClearColor
+        // (TabId-scoped model intents — NEVER a click-site write-back). The picker
+        // is held in _tabColorPickup for its open lifetime and self-released on
+        // Closed (so its handlers can't outlive a torn-down strip); the VM is
+        // weak-captured so a commit after a re-projection is a safe no-op. UI thread.
+        void _showColorPicker(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm);
 
         // Workspaces M1.2 (#54, ADR-001): apply / clear the classic selected-tab
         // color treatment (ported from Tab::_ApplyTabColorOnUIThread /
@@ -120,6 +129,16 @@ namespace winrt::TerminalApp::implementation
 
         // Resolve the VM carried in a TabViewItem's Tag (nullptr if none).
         static winrt::TerminalApp::PaneTabViewModel _vmFromItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);
+
+        // Workspaces M4 (#54, ADR-001): the currently-open per-tab color picker (the
+        // reused ColorPickupFlyout). Held for its open lifetime so its
+        // ColorSelected/ColorCleared/Closed handlers stay alive while shown; released
+        // back to nullptr on Closed (mirrors classic Tab::_tabColorPickup). Only one
+        // is ever open at a time. Its handler tokens revoke on Closed.
+        winrt::TerminalApp::ColorPickupFlyout _tabColorPickup{ nullptr };
+        winrt::event_token _colorSelectedToken{};
+        winrt::event_token _colorClearedToken{};
+        winrt::event_token _colorPickerClosedToken{};
     };
 }
 

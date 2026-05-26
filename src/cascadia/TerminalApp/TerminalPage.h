@@ -910,6 +910,18 @@ namespace winrt::TerminalApp::implementation
         // without a re-scan.
         winrt::TerminalApp::PaneTabViewModel _setPaneTabPinnedForTab(::WorkspaceModel::TabId tab, bool pinned);
 
+        // Workspaces M4 (#54, ADR-001): set the strip VM whose stable Id matches
+        // `tab` to carry the model's runtimeColor (the user color-picker result),
+        // resolving the VM across ALL leaf strips by id (the TabDecorationUpdated
+        // diff arm that drives this carries a TabId directly). Writes RuntimeColor
+        // (the USER OVERRIDE, which wins over the live Background in the VM's
+        // EffectiveBackground); a std::nullopt color clears the override. A pure
+        // downstream projection of the model — the new color returns through here,
+        // NOT written directly on the view at the intent site. A no-op when no strip
+        // holds the tab. Returns the matching VM (empty when none) so callers/tests
+        // can verify without a re-scan.
+        winrt::TerminalApp::PaneTabViewModel _setPaneTabRuntimeColorForTab(::WorkspaceModel::TabId tab, std::optional<::WorkspaceModel::Color> color);
+
         // Slice 2a.2 (#54): set the strip VM whose stable Id matches `tab` to
         // carry the content's background COLOR (resolving the VM across ALL leaf
         // strips by id, like _setPaneTabTitleForTab — the ContentMounted arm

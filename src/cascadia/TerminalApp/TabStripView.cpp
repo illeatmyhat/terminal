@@ -13,6 +13,11 @@
 // Mirrors Tab.cpp's explicit relative include of the types ColorFix.
 #include "../../types/inc/ColorFix.hpp"
 
+// Workspaces M4 (#54, ADR-001): the reused per-tab color picker (the SAME control
+// classic Tab and the workspace sidebar use). The per-tab "Color…" context-menu
+// item opens it and routes its ColorSelected/ColorCleared as model intents.
+#include "ColorPickupFlyout.h"
+
 #include "TabStripView.g.cpp"
 
 using namespace winrt;
@@ -192,8 +197,15 @@ namespace winrt::TerminalApp::implementation
                             }
                         }
                     }
-                    else if (prop == L"Title" || prop == L"Icon" || prop == L"Background" || prop == L"BellIndicator")
+                    else if (prop == L"Title" || prop == L"Icon" || prop == L"Background" || prop == L"BellIndicator" || prop == L"RuntimeColor")
                     {
+                        // Workspaces M4 (#54, ADR-001): a RuntimeColor flip (the user
+                        // color override, set/cleared via the per-tab "Color…" picker,
+                        // returning from the model through _setPaneTabRuntimeColorForTab)
+                        // rides the SAME chrome-refresh path as Background — _applyChrome
+                        // re-reads vm.EffectiveBackground() (RuntimeColor wins over the
+                        // live Background) and re-applies the tab color treatment.
+                        //
                         // Workspaces M3 (#54, ADR-001): a BellIndicator flip rides
                         // the SAME chrome-refresh path as Title/Icon/Background —
                         // _applyChrome pushes the new state onto the header's
@@ -285,7 +297,7 @@ namespace winrt::TerminalApp::implementation
         // is the reconcile pattern the big-flip forbids. The flyout is owned by the
         // item and released with it on the next _rebuildProjection (the items
         // weak-capture the VM / header, so a click after teardown is a safe no-op).
-        item.ContextFlyout(_makeContextFlyout(vm, header));
+        item.ContextFlyout(_makeContextFlyout(item, vm, header));
 
         _applyChrome(item, vm);
 
@@ -314,7 +326,7 @@ namespace winrt::TerminalApp::implementation
     // DEFERRED (model gaps / other slices): Color… (M4 — a clear spot is left
     // below), Duplicate / Close Other Tabs / Close Tabs to the Right (model gaps),
     // Move to New Window (M8).
-    winrt::Windows::UI::Xaml::Controls::MenuFlyout TabStripView::_makeContextFlyout(const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header)
+    winrt::Windows::UI::Xaml::Controls::MenuFlyout TabStripView::_makeContextFlyout(const MUXC::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm, const winrt::TerminalApp::TabHeaderControl& header)
     {
         namespace WUXC = winrt::Windows::UI::Xaml::Controls;
         namespace WUXMedia = winrt::Windows::UI::Xaml::Media;
@@ -344,9 +356,34 @@ namespace winrt::TerminalApp::implementation
             flyout.Items().Append(renameItem);
         }
 
-        // DEFERRED — "Change tab color…" lands here in M4 (reuse ColorPickupFlyout,
-        // re-route ColorSelected/ColorCleared → setTabColor / reset). Left as a
-        // clear spot per the M5 brief.
+        // "Change tab color" (Workspaces M4) — open the REUSED ColorPickupFlyout (the
+        // same control classic Tab + the workspace sidebar use) anchored to the item;
+        // its ColorSelected → vm.RequestSetColor (→ setTabColor), ColorCleared →
+        // vm.RequestClearColor (→ setTabColor(null)). The user color is a MODEL
+        // OVERRIDE (runtimeColor) that WINS over the live-terminal-bg tint
+        // (EffectiveBackground) — like CustomTitle wins over the live title. The
+        // picker is a SEPARATE flyout (NOT the item's ContextFlyout); _showColorPicker
+        // owns its lifetime. Weak-capture the item so a late click on a torn-down tab
+        // is a safe no-op. Glyph + label match classic Tab::_CreateContextMenu
+        // (Tab.cpp:1651-1659: \xE790 + RS_(L"TabColorChoose")).
+        {
+            WUXC::MenuFlyoutItem colorItem{};
+            WUXC::FontIcon colorSymbol{};
+            colorSymbol.FontFamily(fluentFont);
+            colorSymbol.Glyph(L"\xE790"); // Color (matches classic Tab::_CreateContextMenu)
+            colorItem.Icon(colorSymbol);
+            colorItem.Text(RS_(L"TabColorChoose"));
+            colorItem.Click([weakThis = get_weak(), weakItem = winrt::make_weak(item), weakVm = winrt::make_weak(vm)](auto&& /*s*/, auto&& /*e*/) {
+                auto strongThis{ weakThis.get() };
+                auto i{ weakItem.get() };
+                auto v{ weakVm.get() };
+                if (strongThis && i && v)
+                {
+                    strongThis->_showColorPicker(i, v);
+                }
+            });
+            flyout.Items().Append(colorItem);
+        }
 
         // "Pin tab" / "Unpin tab" — the M5 RequestTogglePin intent. The label is set
         // by _applyContextMenuPinLabel (seeded at build, refreshed on the Pinned
@@ -422,6 +459,71 @@ namespace winrt::TerminalApp::implementation
         }
     }
 
+    // Workspaces M4 (#54, ADR-001): open the REUSED ColorPickupFlyout anchored to the
+    // tab item, mirroring classic Tab::AttachColorPicker (Tab.cpp:785-818). The
+    // picker's ColorSelected raises the VM's RequestSetColor (→ setTabColor) and
+    // ColorCleared raises RequestClearColor (→ setTabColor(null)); the new
+    // runtimeColor returns from the model via the TabDecorationUpdated diff arm onto
+    // the VM's RuntimeColor (which wins over the live Background in
+    // EffectiveBackground). NEVER a click-site write-back — model-as-truth.
+    //
+    // Lifetime: hold the picker in _tabColorPickup for its open lifetime (so its
+    // handlers stay alive while shown) and self-release on Closed (revoking the
+    // handlers + nulling the member), exactly as classic does — its handlers must
+    // not outlive a torn-down strip. The VM is weak-captured so a commit after a
+    // re-projection is a safe no-op. UI thread (a user-initiated right-click click).
+    void TabStripView::_showColorPicker(const MUXC::TabViewItem& item, const winrt::TerminalApp::PaneTabViewModel& vm)
+    {
+        // A picker is already open — replace it (revoke its handlers first so the
+        // stale ones can't fire). Mirrors the single-picker-at-a-time invariant.
+        if (_tabColorPickup)
+        {
+            _tabColorPickup.ColorSelected(_colorSelectedToken);
+            _tabColorPickup.ColorCleared(_colorClearedToken);
+            _tabColorPickup.Closed(_colorPickerClosedToken);
+            _tabColorPickup = nullptr;
+        }
+
+        _tabColorPickup = winrt::TerminalApp::ColorPickupFlyout{};
+
+        const auto weakVm = winrt::make_weak(vm);
+
+        _colorSelectedToken = _tabColorPickup.ColorSelected([weakVm](const winrt::Windows::UI::Color& color) {
+            if (auto v{ weakVm.get() })
+            {
+                // Route the chosen color as a model intent (→ setTabColor); the new
+                // runtimeColor returns from the model (no write-back here).
+                v.RequestSetColor(color);
+            }
+        });
+
+        _colorClearedToken = _tabColorPickup.ColorCleared([weakVm]() {
+            if (auto v{ weakVm.get() })
+            {
+                // Route the clear as a model intent (→ setTabColor(null)).
+                v.RequestClearColor();
+            }
+        });
+
+        _colorPickerClosedToken = _tabColorPickup.Closed([weakThis = get_weak()](auto&& /*s*/, auto&& /*e*/) {
+            // Release the picker + its handlers (mirrors classic Tab's Closed
+            // handler) so they can't outlive a torn-down strip.
+            if (auto strongThis{ weakThis.get() })
+            {
+                if (strongThis->_tabColorPickup)
+                {
+                    strongThis->_tabColorPickup.ColorSelected(strongThis->_colorSelectedToken);
+                    strongThis->_tabColorPickup.ColorCleared(strongThis->_colorClearedToken);
+                    strongThis->_tabColorPickup.Closed(strongThis->_colorPickerClosedToken);
+                    strongThis->_tabColorPickup = nullptr;
+                }
+            }
+        });
+
+        // Anchor to the tab item (classic: _tabColorPickup.ShowAt(TabViewItem())).
+        _tabColorPickup.ShowAt(item);
+    }
+
     // Refresh the native TabViewItem chrome (header title + icon + tooltip) from
     // the VM — the maintainers' control renders the rounded top / flare / hover /
     // separator natively, so the old bespoke projection is gone. The header is a
@@ -476,20 +578,18 @@ namespace winrt::TerminalApp::implementation
             item.IconSource(Microsoft::Terminal::UI::IconPathConverter::IconSourceMUX(iconPath, false));
         }
 
-        // Workspaces M1.2 (#54, ADR-001): tint the tab to track the LIVE terminal
-        // background color (classic WT: the selected tab background == the terminal
-        // background, so the selected tab merges into its content). vm.Background()
-        // is a FRESH non-acrylic SolidColorBrush projected from the mounted
-        // IPaneContent's BackgroundBrush() (seeded at ContentMounted, refreshed on
-        // TitleChanged); nullptr until seeded → fall back to the native theme.
-        //
-        // This is the LIVE CONTENT color (runtime, like the live Title), NOT a
-        // user-chosen override. A future slice (M4) adds the user-chosen tab color
-        // as a MODEL override (TabRecord.runtimeColor / setTabColor) which will
-        // take precedence here (like customTitle wins over liveTitle); when M4
-        // lands it layers on top of this — read the model override first, fall back
-        // to this live color. Only the live color is wired now.
-        if (const auto bgBrush = vm.Background().try_as<winrt::Windows::UI::Xaml::Media::SolidColorBrush>())
+        // Workspaces M1.2 / M4 (#54, ADR-001): tint the tab. The EFFECTIVE background
+        // is the user color override (RuntimeColor) when set, else the LIVE terminal
+        // background color (Background) — exactly as CustomTitle wins over the live
+        // title. vm.EffectiveBackground() folds that precedence:
+        //   * RuntimeColor (M4 user override, the per-tab "Color…" picker) → a FRESH
+        //     SolidColorBrush of that color, OR
+        //   * the live Background (M1.2 — projected from the mounted IPaneContent's
+        //     BackgroundBrush(), so the selected tab merges into its content), OR
+        //   * nullptr (neither) → fall back to the native theme.
+        // These are TWO DISTINCT concerns folded into one effective value here; the
+        // classic color treatment (_applyTabColor) is identical regardless of source.
+        if (const auto bgBrush = vm.EffectiveBackground().try_as<winrt::Windows::UI::Xaml::Media::SolidColorBrush>())
         {
             _applyTabColor(item, til::color{ bgBrush.Color() });
         }

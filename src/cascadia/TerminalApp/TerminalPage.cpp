@@ -7410,6 +7410,42 @@ namespace winrt::TerminalApp::implementation
             page->_applyWorkspaceAction(std::move(next));
         });
 
+        // Workspaces M4 (#54, ADR-001): the set/clear-color intent. The per-tab
+        // context menu's "Color…" item opens the reused ColorPickupFlyout and raises
+        // SetColorRequested carrying the chosen color (an IReference<Color>) on a set
+        // or null on a clear → we dispatch setTabColor(id, color) / setTabColor(id,
+        // nullopt) for this tab's id. The resulting TabDecorationUpdated diff arm
+        // projects the new runtimeColor back onto the VM's RuntimeColor (model-as-
+        // truth — the new color is NEVER written onto the view here; it returns via
+        // the projection, where it wins over the live Background). Mirrors the
+        // TogglePinRequested dispatch shape, and the color conversion matches
+        // _HandleSetTabColor (AppActionHandlers.cpp).
+        vm.SetColorRequested([weakThis = get_weak()](const winrt::TerminalApp::PaneTabViewModel& sender, const winrt::Windows::Foundation::IInspectable& args) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ sender.Id() };
+            if (!id.valid())
+            {
+                return;
+            }
+            std::optional<::WorkspaceModel::Color> modelColor;
+            if (const auto colorRef = args.try_as<winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>>())
+            {
+                const auto uiColor = colorRef.Value();
+                modelColor = ::WorkspaceModel::Color{ uiColor.R, uiColor.G, uiColor.B, uiColor.A };
+            }
+            // A null payload (clear) leaves modelColor as std::nullopt.
+            auto next = ::WorkspaceModel::setTabColor(page->_workspaceModelState, id, modelColor);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
         // Workspaces M1 (#54, ADR-001): the hover-highlight + separator hide are
         // now rendered natively by the MUX TabView, so the old hover-intent
         // subscriptions (HoverEnter/Exit → _recomputePaneTabSeparators) are gone.
@@ -7557,6 +7593,43 @@ namespace winrt::TerminalApp::implementation
                 if (vm.Id() == tab.v)
                 {
                     vm.Pinned(pinned);
+                    return vm;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // Workspaces M4 (#54, ADR-001): set the strip VM whose stable Id matches `tab`
+    // to carry the model's runtimeColor (the user color-picker result). Mirrors
+    // _setPaneTabPinnedForTab — resolve across ALL leaf strips by id identity (the
+    // TabDecorationUpdated diff arm carries a TabId directly) — but writes
+    // RuntimeColor (the USER OVERRIDE, which wins over the live Background in the
+    // VM's EffectiveBackground). A std::nullopt color clears the override (the VM's
+    // RuntimeColor goes null and EffectiveBackground falls back to the live
+    // Background). A pure downstream projection — the new color returns through
+    // here, NOT written on the view at the intent site. Returns the matching VM
+    // (empty when none). The conversion mirrors _HandleSetTabColor in reverse
+    // (AppActionHandlers.cpp): a model Color → a winrt IReference<Color>.
+    winrt::TerminalApp::PaneTabViewModel TerminalPage::_setPaneTabRuntimeColorForTab(::WorkspaceModel::TabId tab, std::optional<::WorkspaceModel::Color> color)
+    {
+        if (!tab.valid())
+        {
+            return nullptr;
+        }
+        winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color> colorRef{ nullptr };
+        if (color.has_value())
+        {
+            const winrt::Windows::UI::Color uiColor{ color->a, color->r, color->g, color->b };
+            colorRef = winrt::box_value(uiColor).try_as<winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>>();
+        }
+        for (const auto& [leaf, strip] : _paneTabStrips)
+        {
+            for (const auto& vm : strip)
+            {
+                if (vm.Id() == tab.v)
+                {
+                    vm.RuntimeColor(colorRef);
                     return vm;
                 }
             }

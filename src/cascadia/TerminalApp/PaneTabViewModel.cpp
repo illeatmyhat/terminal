@@ -50,4 +50,26 @@ namespace winrt::TerminalApp::implementation
     {
         TogglePinRequested.raise(*this, winrt::box_value(pinned));
     }
+
+    // Set-color intent (Workspaces M4, #54, ADR-001). Raise SetColorRequested
+    // carrying the chosen color (boxed as an IReference<Color>) so the page
+    // dispatches setTabColor(Id, color); the resulting TabDecorationUpdated diff
+    // arm projects the new runtimeColor back onto this VM's RuntimeColor (which
+    // wins over the live Background in EffectiveBackground). The VM never touches
+    // the model. TabStripView raises this from the per-tab "Color…" menu item's
+    // ColorPickupFlyout.ColorSelected.
+    void PaneTabViewModel::RequestSetColor(const winrt::Windows::UI::Color& color)
+    {
+        SetColorRequested.raise(*this, winrt::box_value(color).try_as<winrt::Windows::Foundation::IReference<winrt::Windows::UI::Color>>());
+    }
+
+    // Clear-color intent (Workspaces M4, #54, ADR-001). Raise SetColorRequested
+    // with a NULL payload so the page dispatches setTabColor(Id, null); the diff
+    // arm clears RuntimeColor, falling EffectiveBackground back to the live
+    // Background. The VM never touches the model. TabStripView raises this from the
+    // ColorPickupFlyout.ColorCleared.
+    void PaneTabViewModel::RequestClearColor()
+    {
+        SetColorRequested.raise(*this, nullptr);
+    }
 }
