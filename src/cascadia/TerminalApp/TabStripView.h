@@ -27,9 +27,15 @@
 //     0xc000027b corner).
 //   * TabCloseRequested → the VM's RequestClose (→ closeTab model action).
 //
-// Drag is OFF (CanReorderTabs / CanDragTabs / AllowDropTabs = false, set in
-// XAML); M6 wires the full drag state machine. Native TabViewItem chrome / icon
-// / tooltip replace the old bespoke re-skin.
+// Drag is FULLY ON (CanReorderTabs / CanDragTabs / AllowDropTabs = true, set in
+// XAML): M6a wires the WITHIN-leaf reorder (MUX mutates TabItems internally,
+// captured from/to → MoveTabRequested) and M6b wires the CROSS-leaf
+// inter-control move (DataPackage carries the VM Id + PID; the destination strip
+// hit-tests the drop index → MoveTabRequested with its own LeafId as dst, then
+// reconciles). TabDroppedOutside is an inert no-op (the M8 tear-out boundary)
+// kept SOLELY to satisfy the AllowDropTabs(true) contract (else a drag-out is
+// the 0xc000027b failfast). Native TabViewItem chrome / icon / tooltip replace
+// the old bespoke re-skin.
 
 #pragma once
 
@@ -55,7 +61,7 @@ namespace winrt::TerminalApp::implementation
         // A within-leaf reorder translates the captured drag from→to into this; the
         // page subscribes it and dispatches moveTab(state, tabId, LeafId(), dstIdx).
         // Declared BEFORE the WINRT_PROPERTY below: that macro closes with a
-        // `private:` section, so a member placed after it would be inaccessible to
+        // `protected:` section, so a member placed after it would be inaccessible to
         // the generated projection glue (the event raiser must stay public).
         til::event<winrt::TerminalApp::MoveTabRequestedEventArgs> MoveTabRequested;
 
@@ -162,12 +168,24 @@ namespace winrt::TerminalApp::implementation
         // from the model (authoritative) — MUX's optimistic visual reorder is
         // accepted then reconciled, never written back to the model here. Ports
         // classic TabManagement.cpp:1035 (_rearrangeFrom/_rearrangeTo) / :1283.
-        // AllowDropTabs stays FALSE in M6a → the tear-out dispatcher is
-        // short-circuited, so the missing-TabDroppedOutside crash is structurally
-        // impossible (M6b wires that arm).
+        // Workspaces M6b (#54, ADR-001): cross-leaf (inter-control) move. The flags
+        // CanDragTabs(true) + AllowDropTabs(true) arm the DataPackage drag protocol.
+        // _onTabDragStarting ALSO stuffs the dragged VM Id + our PID into the
+        // DataPackage; the DESTINATION strip accepts the Move on
+        // _onTabStripDragOver (PID-guarded) and, on _onTabStripDrop, hit-tests the
+        // drop index and raises the SAME MoveTabRequested intent with ITS OWN LeafId
+        // as the destination, then reconciles itself from the model (the
+        // durable-divergence safety net — a cross-leaf moveTab CAN no-op).
+        // _onTabDroppedOutside is an INERT no-op (the M8 tear-out boundary) present
+        // SOLELY to satisfy the AllowDropTabs(true) contract (else a drag-out is the
+        // 0xc000027b failfast). Ports classic TerminalPage.cpp:5907-6033, but raises
+        // a model INTENT and carries a TabId — not a windowId / Tab handle.
         void _onTabDragStarting(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDragStartingEventArgs& args);
         void _onTabItemsChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::Collections::IVectorChangedEventArgs& args);
         void _onTabDragCompleted(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDragCompletedEventArgs& args);
+        void _onTabStripDragOver(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::DragEventArgs& e);
+        void _onTabStripDrop(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::UI::Xaml::DragEventArgs& e);
+        void _onTabDroppedOutside(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDroppedOutsideEventArgs& args);
 
         // Resolve the VM carried in a TabViewItem's Tag (nullptr if none).
         static winrt::TerminalApp::PaneTabViewModel _vmFromItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);

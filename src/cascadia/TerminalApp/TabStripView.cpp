@@ -41,20 +41,35 @@ namespace winrt::TerminalApp::implementation
         TabView().SelectionChanged({ this, &TabStripView::_onSelectionChanged });
         TabView().TabCloseRequested({ this, &TabStripView::_onTabCloseRequested });
 
-        // Workspaces M6a (#54, ADR-001): within-leaf reorder. The drag flags are
+        // Workspaces M6a + M6b (#54, ADR-001): tab drag. All three drag flags are
         // set TOGETHER in XAML — CanReorderTabs(true) (MUX reorders TabItems
-        // internally), CanDragTabs(false), AllowDropTabs(false). With AllowDropTabs
-        // false the tear-out dispatcher is short-circuited → the
-        // missing-TabDroppedOutside crash is structurally impossible; M6b flips the
-        // remaining two and wires the cross-leaf state machine. TabDragStarting
-        // opens the rearrange window; TabItemsChanged records the MUX-internal
-        // from/to; TabDragCompleted translates from≠to into the MoveTabRequested
-        // intent (the page dispatches moveTab and the diff re-projects — no
-        // write-back here). These wire ONCE (the TabView outlives every rebuild),
-        // mirroring the selection intents above.
+        // internally for a WITHIN-leaf drag), CanDragTabs(true) + AllowDropTabs(true)
+        // (the CROSS-leaf inter-control move). Because AllowDropTabs is true the
+        // tear-out dispatcher is armed → a drag-out with no TabDroppedOutside handler
+        // is the 0xc000027b failfast, so that handler MUST be wired here in the SAME
+        // change as the flag flip (it is — _onTabDroppedOutside, an inert no-op
+        // marking the M8 boundary).
+        //
+        // M6a (within-leaf): TabDragStarting opens the rearrange window; TabItemsChanged
+        // records the MUX-internal from/to; TabDragCompleted translates from≠to into
+        // the MoveTabRequested intent (the page dispatches moveTab and the diff
+        // re-projects — no write-back here).
+        //
+        // M6b (cross-leaf, inter-control via DataPackage): TabDragStarting ALSO stuffs
+        // the dragged VM's Id + our PID into the DataPackage; the DESTINATION strip
+        // accepts the Move on TabStripDragOver (PID-guarded) and, on TabStripDrop,
+        // hit-tests the drop index and raises the SAME MoveTabRequested intent with
+        // ITS OWN LeafId as the destination, then reconciles both strips from the
+        // model (the durable-divergence safety net — a cross-leaf moveTab CAN no-op).
+        //
+        // These wire ONCE (the TabView outlives every rebuild), mirroring the
+        // selection intents above.
         TabView().TabDragStarting({ this, &TabStripView::_onTabDragStarting });
         TabView().TabItemsChanged({ this, &TabStripView::_onTabItemsChanged });
         TabView().TabDragCompleted({ this, &TabStripView::_onTabDragCompleted });
+        TabView().TabStripDragOver({ this, &TabStripView::_onTabStripDragOver });
+        TabView().TabStripDrop({ this, &TabStripView::_onTabStripDrop });
+        TabView().TabDroppedOutside({ this, &TabStripView::_onTabDroppedOutside });
     }
 
     IInspectable TabStripView::ItemsSource()
@@ -929,17 +944,146 @@ namespace winrt::TerminalApp::implementation
         return item.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
     }
 
-    // Workspaces M6a (#54, ADR-001): a within-leaf drag began. Open the rearrange
-    // window and clear the captured from/to (ports classic
-    // TerminalPage::_TabDragStarted, TabManagement.cpp:1275). While _rearranging is
-    // set, _onTabItemsChanged interprets the MUX-internal TabItems mutation as the
-    // optimistic reorder write-back (recording its indices) rather than a
-    // projection rebuild.
-    void TabStripView::_onTabDragStarting(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragStartingEventArgs& /*args*/)
+    // Workspaces M6a + M6b (#54, ADR-001): a drag began on THIS strip.
+    //
+    // M6a (within-leaf): open the rearrange window and clear the captured from/to
+    // (ports classic TerminalPage::_TabDragStarted, TabManagement.cpp:1275). While
+    // _rearranging is set, _onTabItemsChanged interprets the MUX-internal TabItems
+    // mutation as the optimistic reorder write-back (recording its indices) rather
+    // than a projection rebuild.
+    //
+    // M6b (cross-leaf): stuff the DataPackage with the dragged VM's stable Id +
+    // our process id, and request a Move (ports classic
+    // TerminalPage::_onTabDragStarting, TerminalPage.cpp:5907-5951 — but we carry
+    // the model TabId, NOT a windowId/Tab handle; the destination strip resolves
+    // the move purely from `paneTabId`). The PID lets a sibling strip's
+    // TabStripDragOver/Drop reject a drag from the classic window's TabView or
+    // another process. The dragged VM is resolved AT FIRE TIME from the dragged
+    // TabViewItem's Tag (args.Tab()) — a rebuild mid-gesture could swap the item,
+    // so we never index TabItems positionally. A null VM (a torn-down row) leaves
+    // no payload, so the drop is a safe no-op.
+    void TabStripView::_onTabDragStarting(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragStartingEventArgs& args)
     {
         _rearranging = true;
         _rearrangeFrom = std::nullopt;
         _rearrangeTo = std::nullopt;
+
+        // M6b: identify the dragged tab to a potential cross-leaf drop target.
+        const auto item = args.Tab().try_as<MUXC::TabViewItem>();
+        if (const auto vm = _vmFromItem(item))
+        {
+            const auto& props = args.Data().Properties();
+            props.Insert(L"paneTabId", winrt::box_value<uint64_t>(vm.Id()));
+            props.Insert(L"pid", winrt::box_value<uint32_t>(GetCurrentProcessId()));
+            args.Data().RequestedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+        }
+    }
+
+    // Workspaces M6b (#54, ADR-001): a tab is being dragged OVER this strip (the
+    // potential DROP TARGET). We must mark the operation Move or the system never
+    // delivers TabStripDrop (mirrors classic TerminalPage::_onTabStripDragOver,
+    // TerminalPage.cpp:5953-5970). Accept ONLY a drag carrying our `paneTabId` AND
+    // our own process id (the PID guard rejects a drag from the classic window's
+    // TabView or another process — we never interop with a foreign TabView).
+    void TabStripView::_onTabStripDragOver(const IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    {
+        const auto& props = e.DataView().Properties();
+        if (props.HasKey(L"paneTabId") &&
+            props.HasKey(L"pid") &&
+            winrt::unbox_value_or<uint32_t>(props.TryLookup(L"pid"), 0u) == GetCurrentProcessId())
+        {
+            e.AcceptedOperation(winrt::Windows::ApplicationModel::DataTransfer::DataPackageOperation::Move);
+        }
+    }
+
+    // Workspaces M6b (#54, ADR-001): a tab from a SIBLING leaf's strip was dropped
+    // on THIS strip (the DROP TARGET). Resolve the dragged VM's stable Id from the
+    // DataPackage, compute the drop index by hit-testing the pointer against this
+    // strip's TabViewItem containers (ports classic TerminalPage::_onTabStripDrop,
+    // TerminalPage.cpp:6008-6024), and raise the SAME strip-level MoveTabRequested
+    // intent the within-leaf reorder uses — with THIS strip's own LeafId as the
+    // move destination (the page reads it at dispatch time). The model relocates
+    // the tab (Stage 0 apply(TabMoved) → _movePaneTabVm) preserving the live
+    // IPaneContent instance; the diff's TabMoved re-projects both strips.
+    //
+    // DURABLE-DIVERGENCE SAFETY NET: unlike the M6a within-leaf path, a cross-leaf
+    // moveTab CAN no-op — Actions_Move.cpp:113/119 returns the SAME state pointer
+    // if the tab isn't found or the dst leaf doesn't exist, so _applyWorkspaceAction
+    // diffs state-against-itself, emits nothing, and triggers NO rebuild. To keep
+    // the model authoritative regardless of the action outcome we ALWAYS reconcile
+    // after raising the intent: force a re-projection of this (destination) strip
+    // from _source (idempotent + cheap). The SOURCE strip needs no manual reconcile
+    // here — an inter-control drop does NOT mutate the source's TabItems (MUX cannot
+    // mutate across two separate collections; only the within-leaf CanReorderTabs
+    // path mutates TabItems, and that fires TabDragCompleted on the source, not a
+    // cross-strip Drop), so the source strip's projection is never optimistically
+    // stranded. (The successful-move case re-projects the source strip anyway via
+    // the TabMoved diff's VectorChanged on the source collection.)
+    void TabStripView::_onTabStripDrop(const IInspectable& /*sender*/, const winrt::Windows::UI::Xaml::DragEventArgs& e)
+    {
+        const auto& props = e.DataView().Properties();
+
+        // PID guard — reject a drop from the classic window's TabView / another
+        // process (mirror classic TerminalPage.cpp:5979-5993).
+        const auto pidObj = props.TryLookup(L"pid");
+        if (!pidObj || winrt::unbox_value_or<uint32_t>(pidObj, 0u) != GetCurrentProcessId())
+        {
+            return;
+        }
+
+        const auto tabIdObj = props.TryLookup(L"paneTabId");
+        if (!tabIdObj)
+        {
+            return;
+        }
+        const auto paneTabId = winrt::unbox_value_or<uint64_t>(tabIdObj, 0ull);
+
+        // Hit-test the drop point against this strip's tab containers to pick the
+        // insertion index (ports classic TerminalPage.cpp:6008-6024). If the pointer
+        // is on the left half of a tab, insert before it; if it is past every tab,
+        // -1 → append (the page clamps to [0, size], and moveTab clamps again).
+        auto dropIdx = -1;
+        const auto tabView = TabView();
+        const auto items = tabView.TabItems();
+        for (uint32_t i = 0; i < items.Size(); ++i)
+        {
+            if (const auto item = tabView.ContainerFromIndex(i).try_as<MUXC::TabViewItem>())
+            {
+                const auto posX = e.GetPosition(item).X; // drop point relative to the tab
+                const auto itemWidth = item.ActualWidth();
+                if (posX < itemWidth / 2)
+                {
+                    dropIdx = static_cast<int>(i);
+                    break;
+                }
+            }
+        }
+        const auto clampedIdx = dropIdx < 0 ? items.Size() : static_cast<uint32_t>(dropIdx);
+
+        // Raise the strip-level intent: the page dispatches
+        // moveTab(state, paneTabId, THIS strip's LeafId, clampedIdx) and the
+        // resulting TabMoved diff re-projects both strips (model-as-truth — never a
+        // write-back at the drop site).
+        MoveTabRequested.raise(paneTabId, clampedIdx);
+
+        // Safety net (see the method comment): reconcile THIS strip from the model
+        // even if the move no-op'd. Idempotent — re-projecting from _source when the
+        // model already matches is a structural no-op.
+        _rebuildProjection();
+    }
+
+    // Workspaces M6b (#54, ADR-001): a tab was released OUTSIDE every strip (the
+    // tear-out gesture). This is the M8 boundary — moving a tab to a NEW window
+    // requires monarch/IPC/ConPTY rehydration and is DEFERRED. This handler is an
+    // INERT no-op present SOLELY to satisfy the AllowDropTabs(true) contract: a
+    // draggable TabView with no TabDroppedOutside handler crashes
+    // Windows.UI.Xaml.dll on drag-out (0xc000027b — see reference_mux_tabview_drag).
+    // Do NOT create a window / touch monarch/IPC/RequestReceiveContent/_stashed/
+    // _MoveContent here — that is M8. Dropping a tab outside the strips simply
+    // leaves it where it was (the model is unchanged, so the projection is correct).
+    void TabStripView::_onTabDroppedOutside(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDroppedOutsideEventArgs& /*args*/)
+    {
+        // Intentionally empty — M8 (tear-out to a new window) is deferred.
     }
 
     // Workspaces M6a (#54, ADR-001): TabItems membership changed. When a reorder is

@@ -420,6 +420,7 @@ namespace TerminalAppLocalTests
         // precedence (the two distinct concerns).
         TEST_METHOD(StripM4_ColorFlyout_DispatchesSetTabColor_RuntimeColorWins);
         TEST_METHOD(StripM6a_WithinLeafReorder_DispatchesMoveTab_FlagsSet);
+        TEST_METHOD(StripM6b_CrossLeafDrop_DispatchesMoveTab_AllDragFlagsSet);
 
         TEST_CLASS_SETUP(ClassSetup)
         {
@@ -7520,15 +7521,17 @@ namespace TerminalAppLocalTests
         VERIFY_SUCCEEDED(result);
     }
 
-    // Workspaces M1 (#54, ADR-001): the strip's MUX TabView has all three drag
-    // flags OFF — CanReorderTabs / CanDragTabs / AllowDropTabs == false. This is
-    // failfast-avoidance, not cosmetics: AllowDropTabs defaults TRUE, and pairing
-    // a draggable TabView with no TabDroppedOutside handler crashes
-    // Windows.UI.Xaml.dll (0xc000027b). M6 wires the full drag state machine; M1
-    // must keep drag disabled. (The old Slice-1 premise — an explicit horizontal
-    // ItemsPanel + SelectionMode=Single on a hand-built ListView — no longer
-    // applies: the MUX TabView is inherently a horizontal single-select strip, so
-    // we assert the M1-relevant invariant instead.) STRUCTURAL only — no layout.
+    // Workspaces M6b (#54, ADR-001): the strip's MUX TabView now has all three drag
+    // flags ON — CanReorderTabs (M6a within-leaf reorder) + CanDragTabs +
+    // AllowDropTabs (M6b cross-leaf inter-control move). AllowDropTabs(true) arms the
+    // tear-out dispatcher; pairing it with no TabDroppedOutside handler would crash
+    // Windows.UI.Xaml.dll (0xc000027b), so the inert TabDroppedOutside handler is
+    // wired in the SAME change as this flag flip. (The original M1 premise pinned all
+    // three flags OFF as failfast-avoidance before any handler existed; M6a/M6b wire
+    // the full drag state machine, so this now pins the FULLY-ON invariant. The even
+    // older Slice-1 premise — an explicit horizontal ItemsPanel + SelectionMode=Single
+    // on a hand-built ListView — no longer applies: the MUX TabView is inherently a
+    // horizontal single-select strip.) STRUCTURAL only — no layout.
     void WorkspaceTests::StripSlice1_InnerListViewIsHorizontalAndSingleSelect()
     {
         static constexpr std::wstring_view settingsJson{ LR"(
@@ -7575,19 +7578,20 @@ namespace TerminalAppLocalTests
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
 
-            // Workspaces M6a (#54, ADR-001): drag is PARTIALLY on now.
-            // CanReorderTabs flipped TRUE to enable the within-leaf reorder; the
-            // other two flags stay FALSE — with AllowDropTabs false the tear-out
-            // dispatcher is short-circuited, so the missing-TabDroppedOutside crash
-            // (0xc000027b) remains structurally impossible. M6b flips CanDragTabs +
-            // AllowDropTabs and wires the cross-leaf state machine.
+            // Workspaces M6b (#54, ADR-001): drag is FULLY on now. CanReorderTabs
+            // (M6a within-leaf reorder) + CanDragTabs + AllowDropTabs (M6b cross-leaf
+            // inter-control move) are ALL true. AllowDropTabs(true) arms the tear-out
+            // dispatcher, so the inert TabDroppedOutside handler is wired in the SAME
+            // change (else a drag-out is the 0xc000027b failfast). The
+            // StripM6b_CrossLeafDrop test exercises the drop dispatch + the wired
+            // handler set; here we just pin the flag invariant.
             VERIFY_IS_TRUE(tabView.CanReorderTabs(),
-                           L"M6a: CanReorderTabs must be true (within-leaf reorder)");
-            VERIFY_IS_FALSE(tabView.CanDragTabs(),
-                            L"M6a: CanDragTabs stays false (cross-leaf drag is M6b)");
-            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
-                            L"M6a: AllowDropTabs stays false (it defaults true; on + no "
-                            L"TabDroppedOutside handler crashes Windows.UI.Xaml.dll)");
+                           L"M6b: CanReorderTabs is true (within-leaf reorder)");
+            VERIFY_IS_TRUE(tabView.CanDragTabs(),
+                           L"M6b: CanDragTabs is true (cross-leaf drag source)");
+            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
+                           L"M6b: AllowDropTabs is true (cross-leaf drop target; the inert "
+                           L"TabDroppedOutside handler is wired to avoid the 0xc000027b failfast)");
         });
         VERIFY_SUCCEEDED(result);
     }
@@ -7676,15 +7680,21 @@ namespace TerminalAppLocalTests
             const auto strip = _leafTabStripView(leafContainer);
             VERIFY_IS_NOT_NULL(strip);
 
-            // (1) The M6a drag flags on the inner MUX TabView.
+            // (1) The drag flags on the inner MUX TabView. The within-leaf reorder
+            // this test exercises rides CanReorderTabs (unchanged); M6b additionally
+            // flipped CanDragTabs + AllowDropTabs true for the cross-leaf move, so all
+            // three are now true (the inert TabDroppedOutside handler is wired to keep
+            // AllowDropTabs(true) crash-safe). The cross-leaf drop is covered by
+            // StripM6b_CrossLeafDrop.
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
             VERIFY_IS_TRUE(tabView.CanReorderTabs(),
-                           L"M6a: CanReorderTabs must be true (within-leaf reorder enabled)");
-            VERIFY_IS_FALSE(tabView.CanDragTabs(),
-                            L"M6a: CanDragTabs must stay false (cross-leaf drag is M6b)");
-            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
-                            L"M6a: AllowDropTabs must stay false (crash-proof: no tear-out)");
+                           L"CanReorderTabs is true (within-leaf reorder enabled)");
+            VERIFY_IS_TRUE(tabView.CanDragTabs(),
+                           L"M6b: CanDragTabs is true (cross-leaf drag source)");
+            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
+                           L"M6b: AllowDropTabs is true (cross-leaf drop target; tear-out is the "
+                           L"inert TabDroppedOutside no-op)");
 
             // The strip projects [tab0, tab1] before the reorder, and the page set
             // the strip's LeafId to leaf0 (the move destination).
@@ -7725,6 +7735,260 @@ namespace TerminalAppLocalTests
             // No classic Tab was built by the reorder (cutover).
             VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
                              L"the reorder must not create a classic Tab (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M6b (#54, ADR-001): CROSS-leaf (inter-control) tab drag via the
+    // DataPackage drag protocol. A tab is dragged from a SIBLING leaf's strip and
+    // dropped on THIS strip; on TabStripDrop the destination strip resolves the
+    // dragged VM Id from the DataPackage, hit-tests the drop index, and raises the
+    // SAME MoveTabRequested intent the within-leaf reorder uses — but with THIS
+    // (destination) strip's own LeafId as the move destination. The page dispatches
+    // moveTab and the TabMoved diff relocates the live VM (Stage 0 apply(TabMoved)
+    // → _movePaneTabVm) preserving the IPaneContent instance.
+    //
+    // We drive this at the DISPATCH LAYER — raise the DESTINATION strip's
+    // MoveTabRequested with a FOREIGN tabId (one living in the OTHER leaf), exactly
+    // as TabStripDrop does after the hit-test (NO synthetic e.GetPosition /
+    // ContainerFromIndex against real layout — the headless std::clamp-resize trap).
+    // We assert:
+    //   (1) ALL THREE drag flags are now TRUE (CanReorderTabs + CanDragTabs +
+    //       AllowDropTabs) — the M6b flag flip, the crash surface that demands the
+    //       TabDroppedOutside handler in the same change.
+    //   (2) A cross-leaf TabMoved relocated the FOREIGN tab's VM into the
+    //       destination strip (the Stage-0 arm), preserving the SAME VM instance
+    //       (its seeded bell/runtime-color survive).
+    //   (3) The live IPaneContent instance identity survived (no new mock; same
+    //       content root) — no ConPTY disconnect.
+    //   (4) The source leaf CASCADED away when it emptied (the model removes the
+    //       now-empty single-tab sibling leaf), and its strip holds no VM.
+    //   (5) TabDroppedOutside is wired and INERT: a release outside all strips must
+    //       not crash and must not mutate the model — we assert the strip survives
+    //       and the model is unchanged after the reconcile path runs.
+    void WorkspaceTests::StripM6b_CrossLeafDrop_DispatchesMoveTab_AllDragFlagsSet()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        const winrt::Windows::UI::Color cyan{ 255, 0, 255, 255 };
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x6B00 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Split the root leaf so there are TWO leaves, each with one tab");
+        ::WorkspaceModel::PaneId siblingLeaf{ 0 };
+        ::WorkspaceModel::TabId siblingTabId{ 0 };
+        winrt::Windows::UI::Xaml::FrameworkElement movingContentRoot{ nullptr };
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto split = ::WorkspaceModel::splitPane(page->_workspaceModelState,
+                                                     leaf0,
+                                                     ::WorkspaceModel::Axis::Vertical,
+                                                     0.5,
+                                                     ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(split.newPaneId.valid());
+            siblingLeaf = split.newPaneId;
+            page->_applyWorkspaceAction(std::move(split.state));
+
+            const auto* node = page->_workspaceModelState->pane(siblingLeaf);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_ARE_EQUAL(1u, leafPane->tabs.size());
+            siblingTabId = leafPane->tabs[0].id;
+            VERIFY_IS_TRUE(siblingTabId.valid());
+
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(leaf0));
+            VERIFY_ARE_EQUAL(1u, page->_paneTabStripSizeForTest(siblingLeaf));
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"the startup tab + the split sibling each mounted one mock");
+
+            // Seed the sibling tab's VM with runtime state that recreating the VM
+            // would drop (the cross-leaf move must MOVE the instance, not rebuild it).
+            const auto vm = page->_paneTabStripVmAtForTest(siblingLeaf, 0);
+            VERIFY_IS_NOT_NULL(vm);
+            VERIFY_ARE_EQUAL(siblingTabId.v, vm.Id());
+            vm.BellIndicator(true);
+            vm.RuntimeColor(cyan);
+
+            // The sibling's live content root (mounts: mocks[0]=startup, mocks[1]=sibling).
+            movingContentRoot = (*mocks)[1]->GetRoot();
+            VERIFY_IS_NOT_NULL(movingContentRoot);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Drive the DESTINATION strip's cross-leaf drop dispatch (foreign tabId)");
+        result = RunOnUIThread([&]() {
+            // Walk the projected tree to the DESTINATION leaf's strip (leaf0). This
+            // is the strip that, on a real TabStripDrop, would resolve the dragged
+            // (foreign) tab's Id from the DataPackage and raise MoveTabRequested with
+            // its OWN LeafId as the destination.
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+
+            // (1) ALL THREE M6b drag flags are TRUE on the inner MUX TabView. This is
+            // the crash surface: AllowDropTabs(true) demands the TabDroppedOutside
+            // handler be wired in the SAME change (it is — see (5)).
+            const auto tabView = strip.TabViewControl();
+            VERIFY_IS_NOT_NULL(tabView);
+            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
+                           L"M6b: CanReorderTabs stays true (within-leaf reorder)");
+            VERIFY_IS_TRUE(tabView.CanDragTabs(),
+                           L"M6b: CanDragTabs is now true (cross-leaf drag source)");
+            VERIFY_IS_TRUE(tabView.AllowDropTabs(),
+                           L"M6b: AllowDropTabs is now true (cross-leaf drop target)");
+
+            // The destination strip carries leaf0 as its LeafId (the move dst).
+            VERIFY_ARE_EQUAL(leaf0.v, strip.LeafId(),
+                             L"the destination strip's LeafId is leaf0 (the move dst)");
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(1), tabView.TabItems().Size(),
+                             L"the destination strip starts with its one startup tab");
+
+            // (2) Raise the destination strip's MoveTabRequested with the FOREIGN
+            // tabId (siblingTabId lives in the OTHER leaf) at index 1 — exactly what
+            // TabStripDrop does after the DataPackage read + hit-test. NO synthetic
+            // drag geometry.
+            auto stripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(strip);
+            stripImpl->MoveTabRequested.raise(siblingTabId.v, 1u);
+
+            // The model performed a cross-leaf TabMoved: the foreign tab now lives in
+            // leaf0; the emptied sibling leaf cascaded away.
+            const auto* dstNode = page->_workspaceModelState->pane(leaf0);
+            const auto* dstLeaf = std::get_if<::WorkspaceModel::LeafPane>(dstNode);
+            VERIFY_IS_NOT_NULL(dstLeaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), dstLeaf->tabs.size(),
+                             L"the destination leaf grew to two tabs (cross-leaf move)");
+            bool foreignUnderDst = false;
+            for (const auto& t : dstLeaf->tabs)
+            {
+                if (t.id.v == siblingTabId.v)
+                {
+                    foreignUnderDst = true;
+                }
+            }
+            VERIFY_IS_TRUE(foreignUnderDst,
+                           L"the moved (foreign) tab id is present in the destination leaf");
+
+            // (4) Source leaf cascaded: it no longer exists in the model, and its
+            // strip holds no VM.
+            VERIFY_IS_NULL(page->_workspaceModelState->pane(siblingLeaf),
+                           L"the emptied single-tab source leaf cascaded out of the model");
+            VERIFY_ARE_EQUAL(0u, page->_paneTabStripSizeForTest(siblingLeaf),
+                             L"the emptied source leaf's strip holds no VM after the move");
+
+            // (2 cont.) The SAME VM instance relocated — its Id is in the destination
+            // strip and its seeded bell + runtime color survived (recreate would drop
+            // both).
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0),
+                             L"the destination strip grew to two VMs");
+            winrt::TerminalApp::PaneTabViewModel movedVm{ nullptr };
+            for (uint32_t i = 0; i < 2; ++i)
+            {
+                const auto vm = page->_paneTabStripVmAtForTest(leaf0, i);
+                if (vm && vm.Id() == siblingTabId.v)
+                {
+                    movedVm = vm;
+                }
+            }
+            VERIFY_IS_NOT_NULL(movedVm);
+            VERIFY_IS_TRUE(movedVm.BellIndicator(),
+                           L"the moved VM kept its bell runtime state (instance moved, not recreated)");
+            VERIFY_IS_NOT_NULL(movedVm.RuntimeColor(),
+                               L"the moved VM kept its runtime color (instance moved, not recreated)");
+            VERIFY_ARE_EQUAL(til::color{ cyan }, til::color{ movedVm.RuntimeColor().Value() },
+                             L"the moved VM's runtime color is still CYAN");
+
+            // The destination strip re-projected: 2 TabItems, the foreign tab present.
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), tabView.TabItems().Size(),
+                             L"the destination strip re-projected to two TabItems");
+
+            // (3) Content instance preserved: NO new mock (no teardown + re-create)
+            // and the moved tab's content root is the SAME FrameworkElement.
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), mocks->size(),
+                             L"the cross-leaf move must NOT create a new content (identity-preserving)");
+            VERIFY_ARE_EQUAL(movingContentRoot, (*mocks)[1]->GetRoot(),
+                             L"the moved tab's live content root is the SAME instance (no ConPTY disconnect)");
+
+            // Cutover invariant: no classic Tab was built by the move.
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the cross-leaf move must not create a classic Tab (cutover)");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        // (5) TabDroppedOutside is wired + INERT (the M8 boundary). A real drag-out
+        // would crash Windows.UI.Xaml.dll (0xc000027b) if the handler were absent;
+        // we cannot synthesize the real gesture headless (no event-args ctor), so we
+        // assert the structural contract: AllowDropTabs is on (verified in (1)) AND a
+        // benign no-op move intent (raising MoveTabRequested with a tab id that is
+        // NOT in this model — the durable-divergence no-op path) leaves the strip
+        // alive and the model unchanged, exercising the reconcile-on-drop safety net
+        // without crashing.
+        Log::Comment(L"No-op move intent (unknown tab id) must not crash, must not mutate the model");
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+
+            const auto* before = page->_workspaceModelState->pane(leaf0);
+            const auto* beforeLeaf = std::get_if<::WorkspaceModel::LeafPane>(before);
+            VERIFY_IS_NOT_NULL(beforeLeaf);
+            const auto beforeCount = beforeLeaf->tabs.size();
+
+            // A tabId that exists in no leaf: moveTab returns the SAME state pointer
+            // (Actions_Move.cpp:113), the diff emits nothing, and the strip relies on
+            // the TabStripDrop reconcile to stay authoritative. The strip survives and
+            // the model is unchanged.
+            auto stripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(strip);
+            stripImpl->MoveTabRequested.raise(0xDEADBEEFull, 0u);
+
+            const auto* after = page->_workspaceModelState->pane(leaf0);
+            const auto* afterLeaf = std::get_if<::WorkspaceModel::LeafPane>(after);
+            VERIFY_IS_NOT_NULL(afterLeaf);
+            VERIFY_ARE_EQUAL(beforeCount, afterLeaf->tabs.size(),
+                             L"a no-op move (unknown tab id) does not mutate the model");
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(beforeCount), strip.TabViewControl().TabItems().Size(),
+                             L"the strip projection still matches the (unchanged) model after the no-op");
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"no classic Tab was built (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -18,16 +18,22 @@
     ActiveTabChanged diff; a user SelectionChanged is an intent only,
     reentrancy-guarded).
 
-    Drag is PARTIALLY on (Workspaces M6a, #54): CanReorderTabs="True" enables the
-    WITHIN-leaf reorder — MUX mutates TabItems internally during the drag;
-    TabStripView captures the from/to off TabItemsChanged and raises a
-    MoveTabRequested intent on TabDragCompleted, so the page dispatches moveTab and
-    the TabMoved diff re-projects (no write-back). CanDragTabs and AllowDropTabs
-    stay FALSE: with AllowDropTabs false the tear-out dispatcher is
-    short-circuited, so the missing-TabDroppedOutside crash (0xc000027b — drag-out
-    of a draggable TabView with no handler) is structurally IMPOSSIBLE. M6b flips
-    CanDragTabs + AllowDropTabs on and wires the full cross-leaf state machine
-    (TabDragStarting / TabStripDragOver / TabStripDrop / TabDroppedOutside).
+    Drag is FULLY on (Workspaces M6a + M6b, #54): all three flags are TRUE.
+    CanReorderTabs="True" enables the WITHIN-leaf reorder (M6a) — MUX mutates
+    TabItems internally during the drag; TabStripView captures the from/to off
+    TabItemsChanged and raises a MoveTabRequested intent on TabDragCompleted, so the
+    page dispatches moveTab and the TabMoved diff re-projects (no write-back).
+    CanDragTabs="True" + AllowDropTabs="True" enable the CROSS-leaf (inter-control)
+    move (M6b): the source strip stuffs the dragged VM's Id + our PID into the
+    DataPackage on TabDragStarting; a sibling strip accepts the Move on
+    TabStripDragOver (PID-guarded) and, on TabStripDrop, hit-tests the drop index
+    and raises the SAME MoveTabRequested intent with ITS OWN LeafId as the
+    destination. AllowDropTabs="True" arms the tear-out dispatcher, so the
+    matching TabDroppedOutside handler MUST be wired (it is — an INERT no-op,
+    the M8 boundary) or a drag-out crashes Windows.UI.Xaml.dll (0xc000027b —
+    drag-out of a draggable TabView with no handler). The four cross-leaf
+    handlers (TabDragStarting / TabStripDragOver / TabStripDrop /
+    TabDroppedOutside) are wired in the ctor.
 
     IsAddTabButtonVisible is false in M1: the native "+" → new-tab-in-this-leaf
     wiring is a SHOULD that we DEFER (see the .cpp). The mux namespace + the
@@ -44,8 +50,8 @@
 
     <mux:TabView x:Name="TabView"
                  Background="{ThemeResource TabViewBackground}"
-                 AllowDropTabs="False"
-                 CanDragTabs="False"
+                 AllowDropTabs="True"
+                 CanDragTabs="True"
                  CanReorderTabs="True"
                  IsAddTabButtonVisible="False"
                  TabWidthMode="SizeToContent" />
