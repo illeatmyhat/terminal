@@ -296,9 +296,11 @@ namespace winrt::TerminalApp::implementation
     }
 
     // Workspaces M5 (#54, ADR-001): build the per-tab context menu. Mirrors classic
-    // Tab::_CreateContextMenu's construction (MenuFlyoutItem + FontIcon glyph +
-    // tooltip), but routes every click as a model intent on the VM rather than
-    // classic's _dispatch.DoAction reconcile. Entries (model-ready only):
+    // Tab::_CreateContextMenu's construction (MenuFlyoutItem + FontIcon glyph), but
+    // routes every click as a model intent on the VM rather than classic's
+    // _dispatch.DoAction reconcile. (Classic also sets a per-item HelpText tooltip;
+    // the per-leaf menu omits it for now — the items are self-describing.) Entries
+    // (model-ready only):
     //   * Rename — reuses M2's path: calls the hosted TabHeaderControl's
     //     BeginRename() (the SAME entry point the double-tap uses). Not a
     //     reimplementation — the renamer commit still flows TitleChangeRequested →
@@ -322,7 +324,10 @@ namespace winrt::TerminalApp::implementation
         WUXC::MenuFlyout flyout{};
 
         // "Rename tab" — reuse M2's renamer (the double-tap path). Weak-capture the
-        // header so a late click on a torn-down tab is a safe no-op.
+        // header so a late click on a torn-down tab is a safe no-op. Caveat: a
+        // _rebuildProjection mid-flyout swaps in a NEW header/item, so this captured
+        // header expires — the click then resolves to nothing and Rename is a
+        // harmless no-op (the user simply re-opens the menu on the live row).
         {
             WUXC::MenuFlyoutItem renameItem{};
             WUXC::FontIcon renameSymbol{};
@@ -373,7 +378,7 @@ namespace winrt::TerminalApp::implementation
         // to the right) is DEFERRED (model gaps). Weak-capture the VM.
         {
             WUXC::MenuFlyoutItem closeItem{};
-            closeItem.Text(L"Close tab");
+            closeItem.Text(RS_(L"TabClose"));
             closeItem.Click([weakVm = winrt::make_weak(vm)](auto&& /*s*/, auto&& /*e*/) {
                 if (auto v{ weakVm.get() })
                 {
