@@ -35,6 +35,7 @@
   <ItemGroup>
     <ClInclude Include="pch.h" />
     <ClInclude Include="CppWinrtTailored.h" />
+    <ClInclude Include="CrashCapture.h" />
   </ItemGroup>
 
   <!-- ========================= Cpp Files ======================== -->
@@ -44,6 +45,8 @@
     <ClCompile Include="TabTests.cpp" />
 	<ClCompile Include="FilteredCommandTests.cpp" />
     <ClCompile Include="WorkspaceTests.cpp" />
+    <ClCompile Include="CrashCapture.cpp" />
+    <ClCompile Include="TabStripDragTests.cpp" />
     <ClCompile Include="pch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -81,7 +84,7 @@
       <DisableSpecificWarnings>4702;%(DisableSpecificWarnings)</DisableSpecificWarnings>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>onecoreuap.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>dbghelp.lib;onecoreuap.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
 
