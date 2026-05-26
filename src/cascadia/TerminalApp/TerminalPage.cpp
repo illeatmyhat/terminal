@@ -8359,6 +8359,41 @@ namespace winrt::TerminalApp::implementation
         // raise a move intent whose destination is THIS leaf. Set alongside
         // ItemsSource — both are pure top-down projection wiring.
         strip.LeafId(leaf.v);
+
+        // Workspaces M6a (#54, ADR-001): subscribe the strip's move INTENT. A
+        // within-leaf reorder raises MoveTabRequested(tabId, dstIdx) with the
+        // destination = THIS strip's LeafId; dispatch moveTab and let the resulting
+        // TabMoved diff re-project the strip (model-as-truth — never a write-back at
+        // the gesture site). Mirrors the M4 SetColorRequested dispatch shape: weak
+        // page, re-resolve, flag + state guard, TabId-valid check. We weak-capture
+        // the strip too so we read its LeafId at fire time. The sender strip carries
+        // the destination leaf; a rebuild builds a fresh strip and re-subscribes, so
+        // the handler is bound to exactly one strip's lifetime.
+        strip.MoveTabRequested([weakThis = get_weak(), weakStrip = winrt::make_weak(strip)](uint64_t tabId, uint32_t dstIdx) {
+            auto page{ weakThis.get() };
+            if (!page)
+            {
+                return;
+            }
+            if (!page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const auto strongStrip{ weakStrip.get() };
+            if (!strongStrip)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ tabId };
+            const ::WorkspaceModel::PaneId dstLeaf{ strongStrip.LeafId() };
+            if (!id.valid() || !dstLeaf.valid())
+            {
+                return;
+            }
+            auto next = ::WorkspaceModel::moveTab(page->_workspaceModelState, id, dstLeaf, static_cast<std::size_t>(dstIdx));
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);
 

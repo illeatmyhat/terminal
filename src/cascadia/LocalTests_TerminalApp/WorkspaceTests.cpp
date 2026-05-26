@@ -419,6 +419,7 @@ namespace TerminalAppLocalTests
         // view at the intent site) AND the RuntimeColor-wins-over-Background
         // precedence (the two distinct concerns).
         TEST_METHOD(StripM4_ColorFlyout_DispatchesSetTabColor_RuntimeColorWins);
+        TEST_METHOD(StripM6a_WithinLeafReorder_DispatchesMoveTab_FlagsSet);
 
         TEST_CLASS_SETUP(ClassSetup)
         {
@@ -7574,14 +7575,156 @@ namespace TerminalAppLocalTests
             const auto tabView = strip.TabViewControl();
             VERIFY_IS_NOT_NULL(tabView);
 
-            // Drag OFF — the M1 failfast-avoidance invariant (all three flags).
-            VERIFY_IS_FALSE(tabView.CanReorderTabs(),
-                            L"M1: CanReorderTabs must be false (drag is M6)");
+            // Workspaces M6a (#54, ADR-001): drag is PARTIALLY on now.
+            // CanReorderTabs flipped TRUE to enable the within-leaf reorder; the
+            // other two flags stay FALSE — with AllowDropTabs false the tear-out
+            // dispatcher is short-circuited, so the missing-TabDroppedOutside crash
+            // (0xc000027b) remains structurally impossible. M6b flips CanDragTabs +
+            // AllowDropTabs and wires the cross-leaf state machine.
+            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
+                           L"M6a: CanReorderTabs must be true (within-leaf reorder)");
             VERIFY_IS_FALSE(tabView.CanDragTabs(),
-                            L"M1: CanDragTabs must be false (drag is M6)");
+                            L"M6a: CanDragTabs stays false (cross-leaf drag is M6b)");
             VERIFY_IS_FALSE(tabView.AllowDropTabs(),
-                            L"M1: AllowDropTabs must be false (it defaults true; on + no "
+                            L"M6a: AllowDropTabs stays false (it defaults true; on + no "
                             L"TabDroppedOutside handler crashes Windows.UI.Xaml.dll)");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // Workspaces M6a (#54, ADR-001): within-leaf reorder via the strip's
+    // MoveTabRequested intent. A user drags a tab to a new slot; MUX optimistically
+    // reorders TabItems, and on TabDragCompleted the strip raises
+    // MoveTabRequested(tabId, dstIdx) with the destination = its own LeafId. The
+    // page (subscribed in _projectLeafContainer) dispatches moveTab, and the
+    // resulting TabMoved diff re-projects the strip in the model's authoritative
+    // order. We drive this at the DISPATCH LAYER — raise the strip's
+    // MoveTabRequested directly (NO synthetic drag geometry / e.GetPosition /
+    // ContainerFromIndex — the headless std::clamp-resize trap) — and assert:
+    //   (1) the drag flags (CanReorderTabs true, CanDragTabs/AllowDropTabs false),
+    //   (2) the model reordered (the leaf's tab order swapped), and
+    //   (3) the strip re-projected its TabItems in the new model order.
+    // This proves the strip→page→model→re-project wiring end to end without
+    // touching layout. (Same-leaf reorder rides the SAME apply(TabMoved) arm Stage
+    // 0 introduced; here the entry point is the strip intent, not a direct
+    // _applyWorkspaceAction.)
+    void WorkspaceTests::StripM6a_WithinLeafReorder_DispatchesMoveTab_FlagsSet()
+    {
+        static constexpr std::wstring_view settingsJson{ LR"(
+        {
+            "defaultProfile": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+            "experimental.workspaces.enabled": true,
+            "profiles": [
+                {
+                    "name" : "profile0",
+                    "guid": "{6239a42c-1111-49a3-80bd-e8fdd045185c}",
+                    "historySize": 1,
+                    "closeOnExit": "never"
+                }
+            ]
+        })" };
+
+        CascadiaSettings settings{ settingsJson, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        auto mocks = std::make_shared<std::vector<winrt::com_ptr<MockPaneContent>>>();
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings, [mocks](winrt::TerminalApp::implementation::TerminalPage* p) {
+            p->_makePaneContentForSpecOverrideForTest = [mocks](const ::WorkspaceModel::TabContent&) -> winrt::TerminalApp::IPaneContent {
+                auto mock = winrt::make_self<MockPaneContent>(static_cast<uint64_t>(0x6A00 + mocks->size()));
+                mocks->push_back(mock);
+                return mock.as<winrt::TerminalApp::IPaneContent>();
+            };
+        });
+
+        ::WorkspaceModel::WorkspaceId ws0{ 0 };
+        ::WorkspaceModel::PaneId leaf0{ 0 };
+        auto result = RunOnUIThread([&]() {
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            ws0 = workspaces[0].id;
+            leaf0 = _rootLeafId(page->_workspaceModelState, 0);
+            VERIFY_IS_TRUE(leaf0.valid());
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Add a SECOND tab so the leaf has two ordered rows to reorder");
+        ::WorkspaceModel::TabId tab0{ 0 };
+        ::WorkspaceModel::TabId tab1{ 0 };
+        result = RunOnUIThread([&]() {
+            const ::WorkspaceModel::TerminalSpec spec{};
+            auto added = ::WorkspaceModel::newTab(page->_workspaceModelState, ws0, leaf0, ::WorkspaceModel::TabContent{ spec });
+            VERIFY_IS_TRUE(added.id.valid());
+            page->_applyWorkspaceAction(std::move(added.state));
+
+            const auto* node = page->_workspaceModelState->pane(leaf0);
+            const auto* leafPane = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leafPane);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), leafPane->tabs.size());
+            tab0 = leafPane->tabs[0].id;
+            tab1 = leafPane->tabs[1].id;
+            VERIFY_IS_TRUE(tab0.valid() && tab1.valid());
+            VERIFY_ARE_EQUAL(2u, page->_paneTabStripSizeForTest(leaf0));
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&]() {
+            const auto rootChild = page->_workspacePaneTreeRootChildForTest();
+            const auto leafContainer = _findLeafContainer(rootChild, leaf0);
+            VERIFY_IS_NOT_NULL(leafContainer);
+            const auto strip = _leafTabStripView(leafContainer);
+            VERIFY_IS_NOT_NULL(strip);
+
+            // (1) The M6a drag flags on the inner MUX TabView.
+            const auto tabView = strip.TabViewControl();
+            VERIFY_IS_NOT_NULL(tabView);
+            VERIFY_IS_TRUE(tabView.CanReorderTabs(),
+                           L"M6a: CanReorderTabs must be true (within-leaf reorder enabled)");
+            VERIFY_IS_FALSE(tabView.CanDragTabs(),
+                            L"M6a: CanDragTabs must stay false (cross-leaf drag is M6b)");
+            VERIFY_IS_FALSE(tabView.AllowDropTabs(),
+                            L"M6a: AllowDropTabs must stay false (crash-proof: no tear-out)");
+
+            // The strip projects [tab0, tab1] before the reorder, and the page set
+            // the strip's LeafId to leaf0 (the move destination).
+            VERIFY_ARE_EQUAL(leaf0.v, strip.LeafId(),
+                             L"the page set the strip's LeafId to this leaf");
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), tabView.TabItems().Size());
+            const auto pre0 = tabView.TabItems().GetAt(0).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+            const auto pre1 = tabView.TabItems().GetAt(1).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+            VERIFY_ARE_EQUAL(tab0.v, pre0.Tag().as<winrt::TerminalApp::PaneTabViewModel>().Id());
+            VERIFY_ARE_EQUAL(tab1.v, pre1.Tag().as<winrt::TerminalApp::PaneTabViewModel>().Id());
+
+            // (2)+(3): raise the strip's MoveTabRequested intent — the exact event
+            // the TabDragCompleted handler raises — moving tab0 to index 1. NO
+            // synthetic drag geometry (the headless std::clamp-resize trap): we
+            // invoke the dispatch path directly via the projected event raiser.
+            auto stripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(strip);
+            stripImpl->MoveTabRequested.raise(tab0.v, 1u);
+
+            // The model reordered: leaf tabs are now [tab1, tab0].
+            const auto* afterNode = page->_workspaceModelState->pane(leaf0);
+            const auto* afterLeaf = std::get_if<::WorkspaceModel::LeafPane>(afterNode);
+            VERIFY_IS_NOT_NULL(afterLeaf);
+            VERIFY_ARE_EQUAL(static_cast<size_t>(2), afterLeaf->tabs.size());
+            VERIFY_ARE_EQUAL(tab1.v, afterLeaf->tabs[0].id.v,
+                             L"the model reordered: tab1 is now first");
+            VERIFY_ARE_EQUAL(tab0.v, afterLeaf->tabs[1].id.v,
+                             L"the model reordered: tab0 is now second");
+
+            // The strip re-projected its TabItems in the new model order.
+            VERIFY_ARE_EQUAL(static_cast<uint32_t>(2), tabView.TabItems().Size());
+            const auto post0 = tabView.TabItems().GetAt(0).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+            const auto post1 = tabView.TabItems().GetAt(1).try_as<winrt::Microsoft::UI::Xaml::Controls::TabViewItem>();
+            VERIFY_ARE_EQUAL(tab1.v, post0.Tag().as<winrt::TerminalApp::PaneTabViewModel>().Id(),
+                             L"the strip re-projected tab1 first (model order)");
+            VERIFY_ARE_EQUAL(tab0.v, post1.Tag().as<winrt::TerminalApp::PaneTabViewModel>().Id(),
+                             L"the strip re-projected tab0 second (model order)");
+
+            // No classic Tab was built by the reorder (cutover).
+            VERIFY_ARE_EQUAL(0u, page->_tabs.Size(),
+                             L"the reorder must not create a classic Tab (cutover)");
         });
         VERIFY_SUCCEEDED(result);
     }

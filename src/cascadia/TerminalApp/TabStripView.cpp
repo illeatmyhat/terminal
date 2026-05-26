@@ -37,9 +37,24 @@ namespace winrt::TerminalApp::implementation
 
         // Wire the control-level intents ONCE (the TabView outlives every
         // projection rebuild). SelectionChanged is a user intent only (guarded);
-        // TabCloseRequested raises the VM's close intent. Drag is OFF in XAML.
+        // TabCloseRequested raises the VM's close intent.
         TabView().SelectionChanged({ this, &TabStripView::_onSelectionChanged });
         TabView().TabCloseRequested({ this, &TabStripView::_onTabCloseRequested });
+
+        // Workspaces M6a (#54, ADR-001): within-leaf reorder. The drag flags are
+        // set TOGETHER in XAML — CanReorderTabs(true) (MUX reorders TabItems
+        // internally), CanDragTabs(false), AllowDropTabs(false). With AllowDropTabs
+        // false the tear-out dispatcher is short-circuited → the
+        // missing-TabDroppedOutside crash is structurally impossible; M6b flips the
+        // remaining two and wires the cross-leaf state machine. TabDragStarting
+        // opens the rearrange window; TabItemsChanged records the MUX-internal
+        // from/to; TabDragCompleted translates from≠to into the MoveTabRequested
+        // intent (the page dispatches moveTab and the diff re-projects — no
+        // write-back here). These wire ONCE (the TabView outlives every rebuild),
+        // mirroring the selection intents above.
+        TabView().TabDragStarting({ this, &TabStripView::_onTabDragStarting });
+        TabView().TabItemsChanged({ this, &TabStripView::_onTabItemsChanged });
+        TabView().TabDragCompleted({ this, &TabStripView::_onTabDragCompleted });
     }
 
     IInspectable TabStripView::ItemsSource()
@@ -912,5 +927,87 @@ namespace winrt::TerminalApp::implementation
             return nullptr;
         }
         return item.Tag().try_as<winrt::TerminalApp::PaneTabViewModel>();
+    }
+
+    // Workspaces M6a (#54, ADR-001): a within-leaf drag began. Open the rearrange
+    // window and clear the captured from/to (ports classic
+    // TerminalPage::_TabDragStarted, TabManagement.cpp:1275). While _rearranging is
+    // set, _onTabItemsChanged interprets the MUX-internal TabItems mutation as the
+    // optimistic reorder write-back (recording its indices) rather than a
+    // projection rebuild.
+    void TabStripView::_onTabDragStarting(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragStartingEventArgs& /*args*/)
+    {
+        _rearranging = true;
+        _rearrangeFrom = std::nullopt;
+        _rearrangeTo = std::nullopt;
+    }
+
+    // Workspaces M6a (#54, ADR-001): TabItems membership changed. When a reorder is
+    // in flight, MUX mutates TabItems internally (ItemRemoved at the old index +
+    // ItemInserted at the new) — record those as from/to (ports classic
+    // TerminalPage::_OnTabItemsChanged's _rearrangeFrom/_rearrangeTo capture,
+    // TabManagement.cpp:1037). Outside a rearrange this fires for our own
+    // _rebuildProjection churn and is ignored (the rebuild is the projection; we do
+    // NOT re-derive anything from the control here).
+    void TabStripView::_onTabItemsChanged(const IInspectable& /*sender*/, const winrt::Windows::Foundation::Collections::IVectorChangedEventArgs& args)
+    {
+        if (!_rearranging)
+        {
+            return;
+        }
+        switch (args.CollectionChange())
+        {
+        case winrt::Windows::Foundation::Collections::CollectionChange::ItemRemoved:
+            _rearrangeFrom = args.Index();
+            break;
+        case winrt::Windows::Foundation::Collections::CollectionChange::ItemInserted:
+            _rearrangeTo = args.Index();
+            break;
+        default:
+            break;
+        }
+    }
+
+    // Workspaces M6a (#54, ADR-001): a within-leaf drag finished. If MUX actually
+    // reordered (from≠to), translate the captured indices into the strip-level
+    // MoveTabRequested(tabId, dstIdx) intent and let the page dispatch moveTab —
+    // the resulting TabMoved diff re-projects TabItems from the model
+    // (authoritative). We DO NOT write the reorder back into the model here: MUX's
+    // optimistic visual reorder is accepted, then reconciled by the projection (the
+    // common case — model agrees — is a structural no-op; a divergence is visually
+    // corrected). Resolve the dragged VM by its Tag (resolve-at-fire-time — a
+    // rebuild mid-drag could swap items), reading args.Tab() (the moved
+    // TabViewItem). Ports classic TerminalPage::_TabDragCompleted
+    // (TabManagement.cpp:1283), but raises an INTENT instead of mutating _tabs.
+    void TabStripView::_onTabDragCompleted(const MUXC::TabView& /*sender*/, const MUXC::TabViewTabDragCompletedEventArgs& args)
+    {
+        const auto from = _rearrangeFrom;
+        const auto to = _rearrangeTo;
+        _rearranging = false;
+        _rearrangeFrom = std::nullopt;
+        _rearrangeTo = std::nullopt;
+
+        if (!from.has_value() || !to.has_value() || *from == *to)
+        {
+            // No reorder (a click, or a drag that landed in place). Nothing to
+            // dispatch — the projection is already correct.
+            return;
+        }
+
+        // Resolve the dragged VM's stable Id from the moved TabViewItem's Tag. We
+        // prefer args.Tab() (the dragged item the gesture carries) over indexing
+        // TabItems[to] so a rebuild that swapped the items mid-drag cannot
+        // mis-target. A null VM (a torn-down row) makes this a safe no-op.
+        const auto item = args.Tab().try_as<MUXC::TabViewItem>();
+        const auto vm = _vmFromItem(item);
+        if (!vm)
+        {
+            return;
+        }
+
+        // Raise the strip-level intent; the destination leaf is THIS strip's own
+        // LeafId (the page reads it at dispatch time). dstIdx = the new index MUX
+        // settled on.
+        MoveTabRequested.raise(vm.Id(), *to);
     }
 }

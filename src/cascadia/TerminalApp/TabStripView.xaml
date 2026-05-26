@@ -16,10 +16,18 @@
     projection in TabStripView.cpp (NOT TabItemsSource binding). Selection is a
     one-way projection of the model (the page pushes SelectedItem from the
     ActiveTabChanged diff; a user SelectionChanged is an intent only,
-    reentrancy-guarded). Drag is OFF (CanReorderTabs / CanDragTabs /
-    AllowDropTabs = false) — M6 wires the full drag state machine; leaving
-    AllowDropTabs at its default true without a TabDroppedOutside handler crashes
-    Windows.UI.Xaml.dll (0xc000027b).
+    reentrancy-guarded).
+
+    Drag is PARTIALLY on (Workspaces M6a, #54): CanReorderTabs="True" enables the
+    WITHIN-leaf reorder — MUX mutates TabItems internally during the drag;
+    TabStripView captures the from/to off TabItemsChanged and raises a
+    MoveTabRequested intent on TabDragCompleted, so the page dispatches moveTab and
+    the TabMoved diff re-projects (no write-back). CanDragTabs and AllowDropTabs
+    stay FALSE: with AllowDropTabs false the tear-out dispatcher is
+    short-circuited, so the missing-TabDroppedOutside crash (0xc000027b — drag-out
+    of a draggable TabView with no handler) is structurally IMPOSSIBLE. M6b flips
+    CanDragTabs + AllowDropTabs on and wires the full cross-leaf state machine
+    (TabDragStarting / TabStripDragOver / TabStripDrop / TabDroppedOutside).
 
     IsAddTabButtonVisible is false in M1: the native "+" → new-tab-in-this-leaf
     wiring is a SHOULD that we DEFER (see the .cpp). The mux namespace + the
@@ -38,7 +46,7 @@
                  Background="{ThemeResource TabViewBackground}"
                  AllowDropTabs="False"
                  CanDragTabs="False"
-                 CanReorderTabs="False"
+                 CanReorderTabs="True"
                  IsAddTabButtonVisible="False"
                  TabWidthMode="SizeToContent" />
 

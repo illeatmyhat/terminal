@@ -51,6 +51,14 @@ namespace winrt::TerminalApp::implementation
         // headless TAEF can assert TabItems / SelectedItem / drag flags.
         winrt::Microsoft::UI::Xaml::Controls::TabView TabViewControl();
 
+        // Workspaces M6a (#54, ADR-001): the strip-level move INTENT (see the .idl).
+        // A within-leaf reorder translates the captured drag from→to into this; the
+        // page subscribes it and dispatches moveTab(state, tabId, LeafId(), dstIdx).
+        // Declared BEFORE the WINRT_PROPERTY below: that macro closes with a
+        // `private:` section, so a member placed after it would be inaccessible to
+        // the generated projection glue (the event raiser must stay public).
+        til::event<winrt::TerminalApp::MoveTabRequestedEventArgs> MoveTabRequested;
+
         // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
         // leaf this strip projects, set by the page in _projectLeafContainer. Both
         // the within-leaf reorder (M6a) and the cross-leaf drop (M6b) use it as the
@@ -77,6 +85,17 @@ namespace winrt::TerminalApp::implementation
         // bool the inner scope_exit would clear the outer guard early; the counter
         // keeps it raised until the OUTERMOST scope unwinds.
         int _selectionPushDepth{ 0 };
+
+        // Workspaces M6a (#54, ADR-001): within-leaf reorder bookkeeping (ports
+        // classic TabManagement.cpp:1035/1283). _rearranging is true between
+        // TabDragStarting and TabDragCompleted; while it is set, TabItemsChanged is
+        // the MUX-internal reorder write-back (NOT a projection rebuild), so we
+        // record the Removed (from) and Inserted (to) indices it reports rather
+        // than re-projecting. On TabDragCompleted we translate from→to into the
+        // MoveTabRequested intent. Reset after each gesture.
+        bool _rearranging{ false };
+        std::optional<uint32_t> _rearrangeFrom{ std::nullopt };
+        std::optional<uint32_t> _rearrangeTo{ std::nullopt };
 
         // Tear down + rebuild the whole TabView.TabItems() projection from
         // _source (append every VM as a TabViewItem; re-subscribe each VM's
@@ -132,6 +151,23 @@ namespace winrt::TerminalApp::implementation
 
         // TabCloseRequested → the VM's RequestClose intent (→ closeTab).
         void _onTabCloseRequested(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabCloseRequestedEventArgs& args);
+
+        // Workspaces M6a (#54, ADR-001): within-leaf reorder. CanReorderTabs(true)
+        // lets MUX mutate TabItems internally during a drag (→ TabItemsChanged
+        // Removed+Inserted), bracketed by TabDragStarting → TabDragCompleted. We
+        // capture the from/to indices off TabItemsChanged and, on TabDragCompleted
+        // with from≠to, resolve the dragged VM Id from the moved TabViewItem's Tag
+        // and raise the strip-level MoveTabRequested(id, to) intent. The page
+        // dispatches moveTab and the resulting TabMoved diff re-projects TabItems
+        // from the model (authoritative) — MUX's optimistic visual reorder is
+        // accepted then reconciled, never written back to the model here. Ports
+        // classic TabManagement.cpp:1035 (_rearrangeFrom/_rearrangeTo) / :1283.
+        // AllowDropTabs stays FALSE in M6a → the tear-out dispatcher is
+        // short-circuited, so the missing-TabDroppedOutside crash is structurally
+        // impossible (M6b wires that arm).
+        void _onTabDragStarting(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDragStartingEventArgs& args);
+        void _onTabItemsChanged(const winrt::Windows::Foundation::IInspectable& sender, const winrt::Windows::Foundation::Collections::IVectorChangedEventArgs& args);
+        void _onTabDragCompleted(const winrt::Microsoft::UI::Xaml::Controls::TabView& sender, const winrt::Microsoft::UI::Xaml::Controls::TabViewTabDragCompletedEventArgs& args);
 
         // Resolve the VM carried in a TabViewItem's Tag (nullptr if none).
         static winrt::TerminalApp::PaneTabViewModel _vmFromItem(const winrt::Microsoft::UI::Xaml::Controls::TabViewItem& item);

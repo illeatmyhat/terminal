@@ -3,6 +3,12 @@
 
 namespace TerminalApp
 {
+    // Workspaces M6a (#54, ADR-001): the strip-level move-intent payload — the
+    // dragged VM's stable Id and the destination index. The destination leaf is
+    // the raising strip's own LeafId (carried separately on the control), so the
+    // page resolves moveTab(state, tabId, strip.LeafId(), dstIdx) at dispatch time.
+    delegate void MoveTabRequestedEventArgs(UInt64 tabId, UInt32 dstIdx);
+
     // Workspaces M1 (#54, ADR-001): the per-leaf tab strip now hosts the REAL
     // MUX TabView (Microsoft.UI.Xaml.Controls.TabView — the same control the
     // classic per-window tab row uses), driven by WorkspaceModel as the single
@@ -44,5 +50,15 @@ namespace TerminalApp
         // APPENDED after TabViewControl (the IDL vtable trap — never insert
         // mid-runtimeclass).
         UInt64 LeafId;
+
+        // Workspaces M6a (#54, ADR-001): a STRIP-LEVEL move INTENT. A within-leaf
+        // reorder translates the captured drag from→to into this, carrying the
+        // dragged VM's Id and the destination index; the destination leaf is
+        // implicitly THIS strip's LeafId. The page subscribes it in
+        // _projectLeafContainer and dispatches moveTab(state, tabId, LeafId, dstIdx)
+        // → _applyWorkspaceAction (the M4 SetColorRequested dispatch shape). M6b
+        // (cross-leaf) reuses the SAME intent (the drop-target strip raises it).
+        // args = (tabId, dstIdx). APPENDED after LeafId for the vtable-slot reason.
+        event MoveTabRequestedEventArgs MoveTabRequested;
     }
 }
