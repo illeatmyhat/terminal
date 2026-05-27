@@ -8445,6 +8445,33 @@ namespace winrt::TerminalApp::implementation
         container.Children().Append(leafContentHost);
         _paneContentHosts[leaf] = leafContentHost;
 
+        // Workspaces (focus tracking): when this leaf's terminal gains focus,
+        // make it the model's ACTIVE leaf so new-tab / split target the FOCUSED
+        // leaf — not the latest-CREATED one (the bug: splitPane sets activePaneId
+        // to the new sibling, and nothing re-pointed it on focus, so a user who
+        // clicked back into the original pane still got new tabs in the sibling).
+        // GotFocus is a bubbling routed event, so focusing the hosted TermControl
+        // raises it on this content host. focusPane only changes activePaneId
+        // (which the diff does NOT emit — Diff.cpp ignores it), so within a
+        // workspace this updates the model with zero projection churn and no focus
+        // loop. The already-active guard skips redundant dispatches (incl. the
+        // programmatic re-focus echo). Mirrors classic Tab's GotFocus →
+        // _UpdateActivePane hook, which the workspace cutover dropped.
+        leafContentHost.GotFocus([weakThis = get_weak(), leaf](const IInspectable& /*sender*/, const RoutedEventArgs& /*e*/) {
+            auto page{ weakThis.get() };
+            if (!page || !page->_workspacesFlagEnabled() || !page->_workspaceModelState)
+            {
+                return;
+            }
+            const auto active = page->_activeLeafModelId();
+            if (active.has_value() && active.value() == leaf)
+            {
+                return; // already the active leaf — nothing to do
+            }
+            auto next = ::WorkspaceModel::focusPane(page->_workspaceModelState, leaf);
+            page->_applyWorkspaceAction(std::move(next));
+        });
+
         return container;
     }
 
