@@ -431,6 +431,12 @@ namespace TerminalAppLocalTests
         // wiring itself needs a human smoke (synthesized input can't drive it).
         TEST_METHOD(StripReorder_HitTestGeometry_MapsPointerToModelIndex);
 
+        // Workspaces #57: pin the PURE cross-leaf drop resolver — a window-space
+        // release point + every leaf strip's geometry → {dstLeafId, dstIdx} of the
+        // strip under the point (nullopt over no strip), with synthetic StripExtents
+        // (no real layout).
+        TEST_METHOD(CrossLeafDrop_ResolvesPointToLeafAndIndex);
+
         TEST_CLASS_SETUP(ClassSetup)
         {
             return true;
@@ -8034,6 +8040,48 @@ namespace TerminalAppLocalTests
         VERIFY_ARE_EQUAL(1u, Impl::DstIndexFromGapForTest(1u, 2u).value()); // → [A,C,B]
         VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(2u, 2u).has_value()); // own slot
         VERIFY_IS_FALSE(Impl::DstIndexFromGapForTest(3u, 2u).has_value()); // own right edge
+    }
+
+    // Workspaces #57: the PURE cross-leaf drop resolver maps a window-space release
+    // point + every leaf strip's geometry to {dstLeafId, dstIdx} (the gap from
+    // _dropGapFromGeometry on the strip-local X; cross-leaf inserts into a fresh
+    // collection so the gap IS the dstIdx, no erase-then-insert adjustment). Driven
+    // with synthetic StripExtents — no real layout (the headless std::clamp trap).
+    void WorkspaceTests::CrossLeafDrop_ResolvesPointToLeafAndIndex()
+    {
+        using Impl = winrt::TerminalApp::implementation::TabStripView;
+        using SExt = Impl::StripExtent;
+
+        // Strip A: window rect (0,0,300,40); tabs (local X) [0,100)[100,220)[220,300), mids 50,160,260.
+        // Strip B: window rect (0,100,200,40); tabs [0,100)[100,200), mids 50,150.
+        std::vector<SExt> strips{
+            SExt{ 0xA, 0.0, 0.0, 300.0, 40.0, { { 0.0, 100.0 }, { 100.0, 120.0 }, { 220.0, 80.0 } } },
+            SExt{ 0xB, 0.0, 100.0, 200.0, 40.0, { { 0.0, 100.0 }, { 100.0, 100.0 } } },
+        };
+
+        // Inside A, right of tab0 midpoint, left of tab1 midpoint -> (A, gap 1).
+        auto r = Impl::ResolveCrossLeafDropForTest(150.0, 20.0, strips);
+        VERIFY_IS_TRUE(r.has_value());
+        VERIFY_ARE_EQUAL(0xAull, r->first);
+        VERIFY_ARE_EQUAL(1u, r->second);
+
+        // Inside A, far right -> append (A, gap 3).
+        r = Impl::ResolveCrossLeafDropForTest(290.0, 20.0, strips);
+        VERIFY_IS_TRUE(r.has_value());
+        VERIFY_ARE_EQUAL(0xAull, r->first);
+        VERIFY_ARE_EQUAL(3u, r->second);
+
+        // Inside B, left of tab0 midpoint -> (B, gap 0).
+        r = Impl::ResolveCrossLeafDropForTest(40.0, 120.0, strips);
+        VERIFY_IS_TRUE(r.has_value());
+        VERIFY_ARE_EQUAL(0xBull, r->first);
+        VERIFY_ARE_EQUAL(0u, r->second);
+
+        // Dead space (over no strip) -> nullopt.
+        VERIFY_IS_FALSE(Impl::ResolveCrossLeafDropForTest(500.0, 500.0, strips).has_value());
+
+        // Empty strip set -> nullopt.
+        VERIFY_IS_FALSE(Impl::ResolveCrossLeafDropForTest(10.0, 10.0, std::vector<SExt>{}).has_value());
     }
 
     // Workspaces M1 (#54, ADR-001), strengthened from Slice 1/2a: selection is a

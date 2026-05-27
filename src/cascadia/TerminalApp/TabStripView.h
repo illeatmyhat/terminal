@@ -95,6 +95,20 @@ namespace winrt::TerminalApp::implementation
             double width;
         };
 
+        // Workspaces #57: one leaf strip's geometry for the cross-leaf drop hit-test —
+        // the strip's TabView bounds in WINDOW coordinates (so points from different
+        // strips compare in a common space) plus its tab boxes in STRIP-LOCAL X
+        // (the same space _dropGapFromGeometry expects: localX = windowX - left).
+        struct StripExtent
+        {
+            uint64_t leafId;
+            double left;
+            double top;
+            double width;
+            double height;
+            std::vector<TabExtent> tabs;
+        };
+
         // Test-only (impl-only — NOT in the .idl, no vtable change, no codegen;
         // reached via winrt::get_self / the impl type directly, like the WorkspaceTests
         // strip tests). Drive the two PURE pieces of the within-leaf reorder hit-test
@@ -110,6 +124,41 @@ namespace winrt::TerminalApp::implementation
             return _dstIndexFromGap(gap, srcIdx);
         }
 
+        // Workspaces #57: test forwarder for the PURE cross-leaf drop resolver
+        // (impl-only, reached via the impl type directly like the forwarders above).
+        static std::optional<std::pair<uint64_t, uint32_t>> ResolveCrossLeafDropForTest(double px, double py, const std::vector<StripExtent>& strips)
+        {
+            return _resolveCrossLeafDrop(px, py, strips);
+        }
+
+        // Workspaces #57: this strip's current geometry (bounds in `relativeTo`'s
+        // coordinate space + tab boxes) for the page's cross-leaf drop hit-test. The
+        // page passes the shared pane-tree ancestor (_workspacePaneTreeRoot) so every
+        // sibling strip's rect lives in ONE concrete space (NOT the unreliable nullptr
+        // window root). Live (uses TransformToVisual + _currentTabLayout) so NOT
+        // headless-testable; the PURE resolution it feeds is _resolveCrossLeafDrop,
+        // which IS unit-tested. Public so the page can gather every sibling strip's
+        // extent.
+        StripExtent CurrentStripExtent(winrt::Windows::UI::Xaml::UIElement const& relativeTo);
+
+        // Workspaces #57: map a point in THIS strip's TabView-local space into
+        // `ancestor`'s space. The page calls this on the SOURCE strip to lift the
+        // source-local release point into the shared _workspacePaneTreeRoot ancestor
+        // space, so it compares against the sibling strips' CurrentStripExtent rects
+        // in ONE concrete coordinate space (NOT the unreliable nullptr window root).
+        // Public so the page can call it.
+        winrt::Windows::Foundation::Point LocalPointToAncestor(winrt::Windows::UI::Xaml::UIElement const& ancestor, double x, double y);
+
+        // Workspaces #57: PURE cross-leaf drop resolver — given a release point in
+        // WINDOW coords and every leaf strip's geometry, return {dstLeafId, dstIdx} of
+        // the strip under the point (dstIdx = the visual gap from _dropGapFromGeometry;
+        // cross-leaf inserts into a DIFFERENT collection so there is NO erase-then-
+        // insert adjustment — unlike within-leaf _dstIndexFromGap). nullopt if the
+        // point is over no strip. First containing strip wins (strips never overlap).
+        // Public static so the page can call it directly (also exposed via the
+        // ForTest forwarder above).
+        static std::optional<std::pair<uint64_t, uint32_t>> _resolveCrossLeafDrop(double px, double py, const std::vector<StripExtent>& strips);
+
         // Workspaces M6a (#54, ADR-001): the strip-level move INTENT (see the .idl).
         // A within-leaf reorder translates the captured drag from→to into this; the
         // page subscribes it and dispatches moveTab(state, tabId, LeafId(), dstIdx).
@@ -118,11 +167,44 @@ namespace winrt::TerminalApp::implementation
         // the generated projection glue (the event raiser must stay public).
         til::event<winrt::TerminalApp::MoveTabRequestedEventArgs> MoveTabRequested;
 
+        // Workspaces #57 (ADR-001): the cross-leaf move INTENT (see the .idl). On
+        // release OUTSIDE this strip's own bounds the gesture raises this with the
+        // dragged VM's Id, THIS strip's LeafId, and the release point in this strip's
+        // OWN TabView-LOCAL coords; the page lifts that point into the shared
+        // _workspacePaneTreeRoot ancestor space, hit-tests every leaf strip there, and
+        // dispatches moveTab (or no-ops over no strip). Declared alongside
+        // MoveTabRequested and BEFORE the WINRT_PROPERTY below (the raiser must stay
+        // public — that macro closes with a `protected:` section).
+        til::event<winrt::TerminalApp::MoveTabToPointRequestedEventArgs> MoveTabToPointRequested;
+
+        // Workspaces #57 slice 2 (ADR-001): per-move cross-leaf hover INTENT. The
+        // SOURCE strip raises DragHoverRequested on EVERY pointer move during a drag
+        // (carrying its LeafId + the pointer in its OWN TabView-local coords); the page
+        // hit-tests every strip and shows the insertion indicator on the strip under the
+        // pointer. DragHoverEnded fires from the single _endReorderDrag funnel so the
+        // page clears the target indicator on drop/cancel/capture-loss. Declared
+        // alongside the other move intents and BEFORE the WINRT_PROPERTY below (the
+        // raiser must stay public — that macro closes with a `protected:` section).
+        til::event<winrt::TerminalApp::DragHoverRequestedEventArgs> DragHoverRequested;
+        til::event<winrt::TerminalApp::DragHoverEndedEventArgs> DragHoverEnded;
+
+        // Workspaces #57 slice 2: the page calls these on a NON-dragging strip to
+        // preview a cross-leaf drop. Show/position THIS strip's InsertionIndicator at
+        // `gap` (an insertion index in [0, tabCount]) WITHOUT capturing the pointer (the
+        // source strip owns capture) — the DragOverlay is made Visible but stays
+        // IsHitTestVisible=false so the target never steals capture. HideExternalInsertionIndicator
+        // clears it. No-ops on the strip that is itself the active dragger (its own line
+        // is managed locally by _updateReorderAdorner). Public so the page can drive it.
+        void ShowExternalInsertionIndicator(uint32_t gap);
+        void HideExternalInsertionIndicator();
+
         // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
         // leaf this strip projects, set by the page in _projectLeafContainer. The
-        // within-leaf reorder gesture (#55) and the cross-leaf move (#57) both raise
-        // MoveTabRequested with THIS strip's own LeafId as the moveTab destination
-        // (the page reads it at dispatch time). A plain scalar; not observed.
+        // within-leaf reorder gesture (#55) raises MoveTabRequested with THIS strip's
+        // own LeafId as the moveTab destination (the page reads it at dispatch time).
+        // The cross-leaf move (#57) resolves its destination by hit-testing the
+        // release point instead, so it does NOT use this LeafId. A plain scalar; not
+        // observed.
         WINRT_PROPERTY(uint64_t, LeafId, 0);
 
     private:

@@ -7936,6 +7936,9 @@ namespace winrt::TerminalApp::implementation
             }
         }
         _paneContentHosts.clear();
+        // Workspaces #57: drop the prior rebuild's strip registrations; each
+        // surviving leaf re-registers its fresh strip in _projectLeafContainer.
+        _paneTabStripViews.clear();
 
         const auto activeWsId = _workspaceModelState->activeWorkspaceId_view();
         if (!activeWsId.has_value())
@@ -8394,6 +8397,38 @@ namespace winrt::TerminalApp::implementation
             page->_applyWorkspaceAction(std::move(next));
         });
 
+        // Workspaces #57: register this strip so the cross-leaf drop hit-test can
+        // reach its geometry, and subscribe the cross-leaf move intent. The source
+        // strip raises MoveTabToPointRequested on release outside its own bounds,
+        // carrying its own LeafId + the release point in its OWN TabView-local coords;
+        // resolve the target leaf + index across all strips (in the shared pane-tree
+        // ancestor space) and dispatch (mirrors the MoveTabRequested weak-capture
+        // shape above).
+        _paneTabStripViews[leaf] = strip;
+        strip.MoveTabToPointRequested([weakThis = get_weak()](uint64_t tabId, uint64_t srcLeafId, double sx, double sy) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_resolveCrossLeafTabDrop(tabId, srcLeafId, sx, sy);
+            }
+        });
+
+        // Workspaces #57 slice 2: the source strip raises DragHoverRequested on every
+        // pointer move during a drag; the page hit-tests all strips and shows the
+        // insertion indicator on the strip under the pointer (DragHoverEnded clears it
+        // on drop/cancel). Weak page capture like the others.
+        strip.DragHoverRequested([weakThis = get_weak()](uint64_t srcLeafId, double sx, double sy) {
+            if (auto page{ weakThis.get() })
+            {
+                page->_onDragHover(srcLeafId, sx, sy);
+            }
+        });
+        strip.DragHoverEnded([weakThis = get_weak()]() {
+            if (auto page{ weakThis.get() })
+            {
+                page->_onDragHoverEnded();
+            }
+        });
+
         Controls::Grid::SetRow(strip, 0);
         container.Children().Append(strip);
 
@@ -8411,6 +8446,163 @@ namespace winrt::TerminalApp::implementation
         _paneContentHosts[leaf] = leafContentHost;
 
         return container;
+    }
+
+    // Workspaces #57: resolve a strip's cross-leaf move intent. The source strip
+    // raised MoveTabToPointRequested with its OWN LeafId + the release point in its
+    // own TabView-local coords. We lift that point into the shared
+    // _workspacePaneTreeRoot ancestor space, gather every leaf strip's geometry in
+    // THAT SAME ancestor space, find the strip under the point (the PURE
+    // _resolveCrossLeafDrop), and dispatch moveTab to that leaf + index. Using one
+    // concrete shared ancestor (instead of the nullptr window root) is the fix for
+    // the #57 silent no-op: GetCurrentPoint(nullptr) + TransformToVisual(nullptr) do
+    // NOT share an origin under XAML-island hosting, so the point landed in no
+    // strip's rect. A point over no strip is a no-op (NOT a tear-out — that's #60).
+    // Model-as-truth: the TabMoved diff re-projects both source + destination strips.
+    void TerminalPage::_resolveCrossLeafTabDrop(uint64_t tabId, uint64_t srcLeafId, double srcLocalX, double srcLocalY)
+    {
+        // Wrap the whole body: a TransformToVisual under XAML-island hosting can throw,
+        // and a gesture-path throw must not propagate out (it would crash the drag).
+        try
+        {
+            if (!_workspacesFlagEnabled() || !_workspaceModelState)
+            {
+                return;
+            }
+            const ::WorkspaceModel::TabId id{ tabId };
+            if (!id.valid())
+            {
+                return;
+            }
+
+            const auto hit = _hitTestCrossLeaf(srcLeafId, srcLocalX, srcLocalY);
+            if (!hit.has_value())
+            {
+                return; // released over no strip — no-op (NOT a tear-out; that's #60)
+            }
+            const ::WorkspaceModel::PaneId dstLeaf{ hit->first };
+            if (!dstLeaf.valid())
+            {
+                return;
+            }
+            auto next = ::WorkspaceModel::moveTab(_workspaceModelState, id, dstLeaf, static_cast<std::size_t>(hit->second));
+            _applyWorkspaceAction(std::move(next));
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // Workspaces #57 slice 2: the shared cross-leaf hit-test, factored out of
+    // _resolveCrossLeafTabDrop so the per-move hover preview (_onDragHover) reuses the
+    // exact same #57 transform + pure resolver. Resolve the SOURCE strip (it produced
+    // the point in its own TabView space), lift that point into the shared
+    // _workspacePaneTreeRoot ancestor space, gather every leaf strip's geometry in THAT
+    // SAME ancestor space, and run the PURE _resolveCrossLeafDrop. Using one concrete
+    // shared ancestor (not the nullptr window root) is the #57 silent-no-op fix:
+    // GetCurrentPoint(nullptr) + TransformToVisual(nullptr) do NOT share an origin under
+    // XAML-island hosting. Returns {dstLeafId, gap} of the strip under the point, or
+    // nullopt (no source strip / no pane-tree root / over no strip).
+    std::optional<std::pair<uint64_t, uint32_t>> TerminalPage::_hitTestCrossLeaf(uint64_t srcLeafId, double srcLocalX, double srcLocalY)
+    {
+        if (!_workspacePaneTreeRoot)
+        {
+            return std::nullopt;
+        }
+
+        // Resolve the source strip (it produced the point in its own TabView space).
+        const auto srcIt = _paneTabStripViews.find(::WorkspaceModel::PaneId{ srcLeafId });
+        if (srcIt == _paneTabStripViews.end() || !srcIt->second)
+        {
+            return std::nullopt;
+        }
+
+        // Lift the source-local point into the shared pane-tree ancestor space.
+        const auto srcStripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(srcIt->second);
+        const auto srcPt = srcStripImpl->LocalPointToAncestor(_workspacePaneTreeRoot, srcLocalX, srcLocalY);
+
+        // Gather every leaf strip's geometry in that SAME ancestor space.
+        std::vector<winrt::TerminalApp::implementation::TabStripView::StripExtent> strips;
+        for (const auto& [leaf, strip] : _paneTabStripViews)
+        {
+            if (!strip)
+            {
+                continue;
+            }
+            const auto stripImpl = winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(strip);
+            strips.push_back(stripImpl->CurrentStripExtent(_workspacePaneTreeRoot));
+        }
+        return winrt::TerminalApp::implementation::TabStripView::_resolveCrossLeafDrop(srcPt.X, srcPt.Y, strips);
+    }
+
+    // Workspaces #57 slice 2: per-move cross-leaf hover preview. The source strip raises
+    // DragHoverRequested on EVERY pointer move; hit-test the pointer across all strips
+    // (reusing the #57 transform + pure resolver via _hitTestCrossLeaf) and show the
+    // insertion indicator on the strip under it. The TARGET is the hit leaf only when it
+    // differs from the source (a within-source hover keeps the source's own locally
+    // managed line — _onDragHover does not touch the source). On a target change, hide
+    // the PRIOR target's indicator first. Driving a transient VISUAL adorner from the
+    // gesture is fine — it is NOT model state.
+    void TerminalPage::_onDragHover(uint64_t srcLeafId, double srcLocalX, double srcLocalY)
+    {
+        try
+        {
+            const auto hit = _hitTestCrossLeaf(srcLeafId, srcLocalX, srcLocalY);
+
+            // The target is the hit strip, but only when it is a DIFFERENT leaf than the
+            // source (the source manages its own line locally).
+            const std::optional<::WorkspaceModel::PaneId> target =
+                (hit.has_value() && hit->first != srcLeafId) ? std::optional<::WorkspaceModel::PaneId>{ ::WorkspaceModel::PaneId{ hit->first } } : std::nullopt;
+            const auto gap = hit.has_value() ? hit->second : 0u;
+
+            // Moved off the prior target (or onto none / back to source) — hide it.
+            if (_dragHoverLeaf.has_value() && _dragHoverLeaf != target)
+            {
+                const auto priorIt = _paneTabStripViews.find(*_dragHoverLeaf);
+                if (priorIt != _paneTabStripViews.end() && priorIt->second)
+                {
+                    winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(priorIt->second)->HideExternalInsertionIndicator();
+                }
+            }
+
+            _dragHoverLeaf = target;
+
+            // Show/track the indicator on the current target every move so the line
+            // follows the pointer within it.
+            if (target.has_value())
+            {
+                const auto targetIt = _paneTabStripViews.find(*target);
+                if (targetIt != _paneTabStripViews.end() && targetIt->second)
+                {
+                    winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(targetIt->second)->ShowExternalInsertionIndicator(gap);
+                }
+            }
+        }
+        catch (...)
+        {
+        }
+    }
+
+    // Workspaces #57 slice 2: clear the cross-leaf preview indicator when the drag ends
+    // (drop / cancel / capture-loss — the source strip raises DragHoverEnded from its
+    // single _endReorderDrag funnel).
+    void TerminalPage::_onDragHoverEnded()
+    {
+        try
+        {
+            if (_dragHoverLeaf.has_value())
+            {
+                const auto it = _paneTabStripViews.find(*_dragHoverLeaf);
+                if (it != _paneTabStripViews.end() && it->second)
+                {
+                    winrt::get_self<winrt::TerminalApp::implementation::TabStripView>(it->second)->HideExternalInsertionIndicator();
+                }
+                _dragHoverLeaf.reset();
+            }
+        }
+        catch (...)
+        {
+        }
     }
 
     // Big-flip Slice F-0 (#54): parent `contentRoot` into `leaf`'s per-leaf

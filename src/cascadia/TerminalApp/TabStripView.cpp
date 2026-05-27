@@ -1067,14 +1067,6 @@ namespace winrt::TerminalApp::implementation
     // changes (PointerMoved fires continuously). The line spans the tab row's height.
     void TabStripView::_updateReorderAdorner(const Input::PointerRoutedEventArgs& e)
     {
-        double top = 0.0;
-        double height = 0.0;
-        const auto tabs = _currentTabLayout(top, height);
-        if (tabs.empty())
-        {
-            return;
-        }
-
         const auto pointerPos = e.GetCurrentPoint(TabView()).Position();
         const auto pointerX = static_cast<double>(pointerPos.X);
 
@@ -1084,6 +1076,36 @@ namespace winrt::TerminalApp::implementation
         // as the TabView-relative pointer X/Y.
         DragGhostPopup().HorizontalOffset(pointerX + 14.0);
         DragGhostPopup().VerticalOffset(static_cast<double>(pointerPos.Y) + 10.0);
+
+        // Workspaces #57 slice 2: raise the per-move cross-leaf hover intent on EVERY
+        // move — BEFORE any early-return below (the tabs-empty bail AND the
+        // outside-bounds bail) so the page hit-tests for both within-source and
+        // outside-source positions and drives the TARGET strip's indicator. Carries
+        // THIS strip's LeafId + the SAME source-local pointer point used here
+        // (GetCurrentPoint(TabView())), so the page lifts it into the shared
+        // _workspacePaneTreeRoot ancestor space (the MoveTabToPointRequested approach).
+        DragHoverRequested.raise(LeafId(), static_cast<double>(pointerPos.X), static_cast<double>(pointerPos.Y));
+
+        double top = 0.0;
+        double height = 0.0;
+        const auto tabs = _currentTabLayout(top, height);
+        if (tabs.empty())
+        {
+            return;
+        }
+
+        // Workspaces #57: once the pointer leaves this strip's bounds it's a
+        // cross-leaf hover — hide our own insertion line (a stale line on the source
+        // would mislead). The ghost keeps following; the TARGET strip's indicator is
+        // driven by the page off the DragHoverRequested raised above.
+        const auto sw = TabView().ActualWidth();
+        const auto sh = TabView().ActualHeight();
+        if (pointerPos.X < 0.0 || pointerPos.X > sw || pointerPos.Y < 0.0 || pointerPos.Y > sh)
+        {
+            InsertionIndicator().Visibility(Visibility::Collapsed);
+            _reorderLastGap = UINT32_MAX; // force a fresh line position on re-entry
+            return;
+        }
 
         const auto gap = _dropGapFromGeometry(pointerX, tabs);
         if (gap == _reorderLastGap)
@@ -1118,7 +1140,17 @@ namespace winrt::TerminalApp::implementation
             return;
         }
         e.Handled(true);
-        _finishReorderDrag(e); // raises MoveTabRequested unless the drop is a no-op
+        // If _finishReorderDrag throws (e.g. a TransformToVisual under XAML-island
+        // hosting), _endReorderDrag MUST still run — otherwise the overlay stays
+        // capturing the pointer and _reorderActive is stuck on. Funnel the cleanup
+        // unconditionally.
+        try
+        {
+            _finishReorderDrag(e); // raises MoveTabRequested unless the drop is a no-op
+        }
+        catch (...)
+        {
+        }
         _endReorderDrag();
     }
 
@@ -1145,6 +1177,28 @@ namespace winrt::TerminalApp::implementation
             return; // the dragged tab was torn down mid-gesture
         }
 
+        // Workspaces #57: is the release inside THIS strip's own TabView bounds?
+        const auto local = e.GetCurrentPoint(TabView()).Position();
+        const auto w = TabView().ActualWidth();
+        const auto h = TabView().ActualHeight();
+        const bool withinSource = local.X >= 0.0 && local.X <= w && local.Y >= 0.0 && local.Y <= h;
+        if (!withinSource)
+        {
+            // Workspaces #57: released outside this strip — a potential cross-leaf
+            // drop. Raise the SOURCE-strip-local release point (`local`, already
+            // computed above) plus THIS strip's LeafId; the page transforms that
+            // point into the shared _workspacePaneTreeRoot ancestor space, hit-tests
+            // every leaf strip there, and dispatches moveTab (or no-ops if over no
+            // strip). We deliberately do NOT use GetCurrentPoint(nullptr) /
+            // window coords — under XAML-island hosting they do not share an origin
+            // with the strips' TransformToVisual(nullptr) rects, so the point landed
+            // in no strip's rect and the move silently no-op'd. NOT a tear-out
+            // (that's #60) — a point over no strip is simply ignored.
+            MoveTabToPointRequested.raise(vm.Id(), LeafId(), static_cast<double>(local.X), static_cast<double>(local.Y));
+            return;
+        }
+
+        // Within-leaf reorder path (#55) — unchanged.
         const auto items = TabView().TabItems();
         std::optional<uint32_t> srcIdx{ std::nullopt };
         for (uint32_t i = 0; i < items.Size(); ++i)
@@ -1201,6 +1255,13 @@ namespace winrt::TerminalApp::implementation
         DragOverlay().IsHitTestVisible(false);
         DragOverlay().Visibility(Visibility::Collapsed);
         DragOverlay().ReleasePointerCaptures();
+
+        // Workspaces #57 slice 2: this is the single funnel for all drag-end paths
+        // (drop / capture-loss / Escape / failed capture), so raise DragHoverEnded
+        // here once so the page clears any cross-leaf preview indicator on the TARGET
+        // strip. (A target strip's own indicator is driven externally by the page, not
+        // by this strip's local teardown above.)
+        DragHoverEnded.raise();
     }
 
     // #56 drag ghost: snapshot the live dragged TabViewItem to a RenderTargetBitmap and
@@ -1308,5 +1369,96 @@ namespace winrt::TerminalApp::implementation
             return std::nullopt;
         }
         return gap > srcIdx ? gap - 1 : gap;
+    }
+
+    // Workspaces #57: this strip's live geometry for the page's cross-leaf drop
+    // hit-test — the strip's TabView bounds expressed in `relativeTo`'s coordinate
+    // space plus its tab boxes in strip-local X. The page passes the shared pane-tree
+    // ancestor (_workspacePaneTreeRoot) as `relativeTo` so every sibling strip's rect
+    // AND the transformed source release point all live in ONE concrete coordinate
+    // space — NOT the nullptr window root, whose origin is unreliable across
+    // XAML-island-hosted visuals here (the #57 silent no-op). NOT headless-testable
+    // (needs layout); the PURE consumer is _resolveCrossLeafDrop.
+    TabStripView::StripExtent TabStripView::CurrentStripExtent(winrt::Windows::UI::Xaml::UIElement const& relativeTo)
+    {
+        StripExtent ext{};
+        ext.leafId = LeafId();
+        const auto tabView = TabView();
+        // Bounds of the strip's TabView in `relativeTo`'s space. The pane tree is
+        // translation-only (no rotation/scale), so a TransformBounds rect +
+        // (ancestorX - left) is a valid ancestor->local mapping for the gap math.
+        const auto toAncestor = tabView.TransformToVisual(relativeTo);
+        const auto rect = toAncestor.TransformBounds({ 0.0f, 0.0f, static_cast<float>(tabView.ActualWidth()), static_cast<float>(tabView.ActualHeight()) });
+        ext.left = rect.X;
+        ext.top = rect.Y;
+        ext.width = rect.Width;
+        ext.height = rect.Height;
+        double top = 0.0, height = 0.0;
+        ext.tabs = _currentTabLayout(top, height);
+        return ext;
+    }
+
+    // Workspaces #57: map a point in THIS strip's TabView-local space into `ancestor`'s
+    // space, so the page can compare the source release point against sibling strips'
+    // rects in one common, concrete coordinate space (the shared _workspacePaneTreeRoot)
+    // — NOT the nullptr window root, which is unreliable under XAML-island hosting.
+    winrt::Windows::Foundation::Point TabStripView::LocalPointToAncestor(winrt::Windows::UI::Xaml::UIElement const& ancestor, double x, double y)
+    {
+        return TabView().TransformToVisual(ancestor).TransformPoint({ static_cast<float>(x), static_cast<float>(y) });
+    }
+
+    // Workspaces #57 slice 2: the page calls this on a NON-dragging strip to preview a
+    // cross-leaf drop. Show/position this strip's InsertionIndicator at `gap` (an
+    // insertion index in [0, tabCount]) WITHOUT capturing the pointer (the source strip
+    // owns capture for the whole drag) — so the DragOverlay is made Visible but stays
+    // IsHitTestVisible=false, otherwise this target would steal the capture. The line X
+    // is derived from this strip's OWN live tab layout (the same _currentTabLayout the
+    // within-leaf adorner uses), so it tracks the pointer within the target as the page
+    // re-calls on every move. No-op while this strip is itself the active dragger (its
+    // line is managed locally by _updateReorderAdorner).
+    void TabStripView::ShowExternalInsertionIndicator(uint32_t gap)
+    {
+        if (_reorderActive)
+        {
+            return; // this strip is the active dragger; its own line is managed locally
+        }
+        double top = 0.0, height = 0.0;
+        const auto tabs = _currentTabLayout(top, height);
+        const auto n = static_cast<uint32_t>(tabs.size());
+        const double lineX = (n == 0) ? 0.0 : (gap < n ? tabs[gap].left : tabs[n - 1].left + tabs[n - 1].width);
+        DragOverlay().Visibility(Visibility::Visible);
+        const auto line = InsertionIndicator();
+        Canvas::SetLeft(line, lineX);
+        Canvas::SetTop(line, top);
+        line.Height(height);
+        line.Visibility(Visibility::Visible);
+    }
+
+    void TabStripView::HideExternalInsertionIndicator()
+    {
+        if (_reorderActive)
+        {
+            return;
+        }
+        InsertionIndicator().Visibility(Visibility::Collapsed);
+        DragOverlay().Visibility(Visibility::Collapsed);
+    }
+
+    // Workspaces #57 (PURE): find the leaf strip under a window-space release point
+    // and the visual gap within it. Cross-leaf inserts into a DIFFERENT collection,
+    // so the gap IS the moveTab dstIdx directly (no erase-then-insert adjustment —
+    // that's only for the within-leaf path in _dstIndexFromGap). First containing
+    // strip wins; nullopt if over no strip.
+    std::optional<std::pair<uint64_t, uint32_t>> TabStripView::_resolveCrossLeafDrop(double px, double py, const std::vector<StripExtent>& strips)
+    {
+        for (const auto& s : strips)
+        {
+            if (px >= s.left && px <= s.left + s.width && py >= s.top && py <= s.top + s.height)
+            {
+                const auto gap = _dropGapFromGeometry(px - s.left, s.tabs);
+                return std::make_pair(s.leafId, gap);
+            }
+        }
+        return std::nullopt;
     }
 }

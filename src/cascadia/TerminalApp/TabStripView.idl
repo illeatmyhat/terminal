@@ -3,13 +3,36 @@
 
 namespace TerminalApp
 {
-    // Workspaces #55/#57 (ADR-001): the strip-level move-intent payload — the
-    // dragged VM's stable Id and the destination index. The destination leaf is
-    // the raising strip's own LeafId (carried separately on the control), so the
-    // page resolves moveTab(state, tabId, strip.LeafId(), dstIdx) at dispatch time.
-    // Raised by the custom within-leaf reorder gesture (#55) and, later, the
-    // custom cross-leaf move (#57).
+    // Workspaces #55 (ADR-001): the WITHIN-leaf move-intent payload — the dragged
+    // VM's stable Id and the destination index. The destination leaf is the
+    // raising strip's own LeafId (carried separately on the control), so the page
+    // resolves moveTab(state, tabId, strip.LeafId(), dstIdx) at dispatch time.
+    // Raised by the custom within-leaf reorder gesture (#55) only; the cross-leaf
+    // move (#57) uses MoveTabToPointRequested (below) instead.
     delegate void MoveTabRequestedEventArgs(UInt64 tabId, UInt32 dstIdx);
+
+    // Workspaces #57 (ADR-001): the cross-leaf move INTENT. The custom drag gesture
+    // captures the pointer on the SOURCE strip the whole time, so the target strip
+    // never sees pointer events — the OLD M6b "drop-target strip raises
+    // MoveTabRequested" reuse does NOT apply to the custom gesture. Instead the
+    // SOURCE strip raises this on release OUTSIDE its own bounds, carrying the
+    // dragged VM's Id, the SOURCE strip's LeafId, and the release point in the
+    // SOURCE strip's OWN TabView-LOCAL coordinates (GetCurrentPoint(TabView())).
+    // The source strip can reliably produce a point in its own visual space but
+    // cannot reach the shared pane-tree ancestor; so it hands the page a
+    // source-local point + the source LeafId, and the PAGE (which holds every
+    // strip) transforms that point into the shared _workspacePaneTreeRoot ancestor
+    // space — a single concrete coordinate space in which it can hit-test all
+    // sibling strips' rects. This deliberately AVOIDS window/nullptr coordinates,
+    // which do NOT share an origin across XAML-island-hosted visuals here (the
+    // GetCurrentPoint(nullptr)/TransformToVisual(nullptr) mix silently missed every
+    // strip — the #57 silent no-op bug). The page then dispatches
+    // moveTab(state, tabId, dstLeafId, dstIdx).
+    // args = (tabId, srcLeafId, srcLocalX, srcLocalY).
+    delegate void MoveTabToPointRequestedEventArgs(UInt64 tabId, UInt64 srcLeafId, Double srcLocalX, Double srcLocalY);
+
+    delegate void DragHoverRequestedEventArgs(UInt64 srcLeafId, Double srcLocalX, Double srcLocalY);
+    delegate void DragHoverEndedEventArgs();
 
     // Workspaces M1 (#54, ADR-001): the per-leaf tab strip now hosts the REAL
     // MUX TabView (Microsoft.UI.Xaml.Controls.TabView — the same control the
@@ -47,23 +70,39 @@ namespace TerminalApp
 
         // Workspaces M6 Stage 0 (#54, ADR-001): the model PaneId (LeafId.v) of the
         // leaf this strip projects. The page sets it in _projectLeafContainer next
-        // to ItemsSource. The within-leaf reorder gesture (#55) and the cross-leaf
-        // move (#57) both raise MoveTabRequested carrying THIS strip's own LeafId as
-        // the move destination — so the page can dispatch moveTab(state, tabId,
-        // LeafId, dstIdx) without re-deriving the leaf from the gesture site.
+        // to ItemsSource. The within-leaf reorder gesture (#55) raises
+        // MoveTabRequested carrying THIS strip's own LeafId as the move destination
+        // — so the page can dispatch moveTab(state, tabId, LeafId, dstIdx) without
+        // re-deriving the leaf from the gesture site. (The cross-leaf move (#57)
+        // instead resolves the destination leaf by hit-testing the release point,
+        // so it does NOT use this strip's LeafId — see MoveTabToPointRequested.)
         // APPENDED after TabViewControl (the IDL vtable trap — never insert
         // mid-runtimeclass).
         UInt64 LeafId;
 
-        // Workspaces #55 (ADR-001): a STRIP-LEVEL move INTENT. The custom within-leaf
-        // reorder gesture maps the drop position to a destination index and raises
-        // this, carrying the dragged VM's Id and that index; the destination leaf is
-        // implicitly THIS strip's LeafId. The page subscribes it in
-        // _projectLeafContainer and dispatches moveTab(state, tabId, LeafId, dstIdx)
-        // → _applyWorkspaceAction (the M4 SetColorRequested dispatch shape). The
-        // cross-leaf move (#57) will reuse the SAME intent (the drop-target strip
-        // raises it). args = (tabId, dstIdx). APPENDED after LeafId for the
-        // vtable-slot reason.
+        // Workspaces #55 (ADR-001): the WITHIN-leaf move INTENT. The custom
+        // within-leaf reorder gesture maps the drop position to a destination index
+        // and raises this, carrying the dragged VM's Id and that index; the
+        // destination leaf is implicitly THIS strip's LeafId. The page subscribes it
+        // in _projectLeafContainer and dispatches moveTab(state, tabId, LeafId,
+        // dstIdx) → _applyWorkspaceAction (the M4 SetColorRequested dispatch shape).
+        // Cross-leaf moves use MoveTabToPointRequested (below), NOT this intent —
+        // the custom gesture's source strip captures the pointer for the whole drag,
+        // so no drop-target strip ever raises an event. args = (tabId, dstIdx).
+        // APPENDED after LeafId for the vtable-slot reason.
         event MoveTabRequestedEventArgs MoveTabRequested;
+
+        // Workspaces #57 (ADR-001): cross-leaf move intent (see the delegate doc
+        // above). APPENDED after MoveTabRequested for the vtable-slot reason.
+        event MoveTabToPointRequestedEventArgs MoveTabToPointRequested;
+
+        // Workspaces #57 slice 2: per-move cross-leaf hover. The SOURCE strip raises
+        // this every pointer move during a drag, carrying its LeafId + the pointer in
+        // its OWN TabView-local coords; the page hit-tests all strips and shows the
+        // insertion indicator on the strip under the pointer. DragHoverEnded clears it
+        // on drop/cancel. (Same source-local + page-transforms-via-_workspacePaneTreeRoot
+        // approach as MoveTabToPointRequested — avoids unreliable nullptr/window coords.)
+        event DragHoverRequestedEventArgs DragHoverRequested;
+        event DragHoverEndedEventArgs DragHoverEnded;
     }
 }

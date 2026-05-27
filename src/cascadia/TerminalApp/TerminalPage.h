@@ -1008,6 +1008,19 @@ namespace winrt::TerminalApp::implementation
         // so the hosts are invisible this slice.
         std::unordered_map<::WorkspaceModel::PaneId, winrt::Windows::UI::Xaml::Controls::Grid> _paneContentHosts;
 
+        // Workspaces #57: the per-leaf TabStripView instances, by PaneId — the cross-
+        // leaf drop hit-test needs to reach sibling strips' geometry. Mirrors
+        // _paneContentHosts' lifecycle: cleared at the top of the rebuild, re-registered
+        // per surviving leaf in _projectLeafContainer.
+        std::unordered_map<::WorkspaceModel::PaneId, winrt::TerminalApp::TabStripView> _paneTabStripViews;
+
+        // Workspaces #57 slice 2: the leaf currently showing a cross-leaf preview
+        // insertion indicator (the strip last hit-tested under the dragged pointer),
+        // or nullopt when none. Tracked so a move to a new target / drag-end hides the
+        // PRIOR target's indicator before showing the next. A transient VISUAL adorner
+        // hint driven from the gesture — NOT model state.
+        std::optional<::WorkspaceModel::PaneId> _dragHoverLeaf;
+
         // Big-flip per-pane strip Slice 1 (#54): the inline PaneTabStrip
         // template-source ListView (and the _paneTabStrip field that held it)
         // was removed — each projected leaf builds its own TabStripView
@@ -1053,6 +1066,31 @@ namespace winrt::TerminalApp::implementation
         // parented into. The content host is recorded in _paneContentHosts by
         // PaneId so a fresh rebuild re-registers each leaf's host.
         winrt::Windows::UI::Xaml::FrameworkElement _projectLeafContainer(::WorkspaceModel::PaneId leaf);
+
+        // Workspaces #57: handle a strip's MoveTabToPointRequested cross-leaf move
+        // intent. The source strip hands its OWN LeafId + the release point in its
+        // own TabView-local coords; lift that point into the shared
+        // _workspacePaneTreeRoot ancestor space, hit-test every leaf strip's geometry
+        // (also taken relative to that ancestor) against it, and if it lands over a
+        // strip dispatch moveTab to that leaf + index (a point over no strip is a
+        // no-op — NOT a tear-out, that's #60).
+        void _resolveCrossLeafTabDrop(uint64_t tabId, uint64_t srcLeafId, double srcLocalX, double srcLocalY);
+
+        // Workspaces #57 slice 2: the shared hit-test used by both the cross-leaf DROP
+        // (_resolveCrossLeafTabDrop) and the per-move cross-leaf HOVER preview
+        // (_onDragHover). Lifts the source-local point into the shared
+        // _workspacePaneTreeRoot ancestor space, gathers every leaf strip's geometry in
+        // that same space, and runs the PURE _resolveCrossLeafDrop. Returns
+        // {dstLeafId, gap} of the strip under the point, or nullopt (no source strip /
+        // no pane-tree root / over no strip).
+        std::optional<std::pair<uint64_t, uint32_t>> _hitTestCrossLeaf(uint64_t srcLeafId, double srcLocalX, double srcLocalY);
+
+        // Workspaces #57 slice 2: drive the TARGET strip's cross-leaf preview insertion
+        // indicator from the source strip's per-move DragHoverRequested. _onDragHover
+        // hit-tests the pointer and shows the indicator on the strip under it (hiding
+        // the prior target on a change); _onDragHoverEnded clears it on drop/cancel.
+        void _onDragHover(uint64_t srcLeafId, double srcLocalX, double srcLocalY);
+        void _onDragHoverEnded();
 
         // Big-flip Slice F-0 (#54): parent `contentRoot` into the per-leaf
         // content host for `leaf` as its SOLE child. This is the per-leaf
