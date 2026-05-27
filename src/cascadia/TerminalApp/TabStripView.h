@@ -40,7 +40,16 @@
 // gesture, then a transparent overlay Canvas (above the TabView) CAPTURES the
 // pointer (the overlay, NOT the TabViewItem — MUX's TabView internally
 // CapturePointer()s its items un-refcounted and would steal/lose our capture; see
-// TabManagement.cpp:1081) and hosts a 2px insertion-line adorner. On release the
+// TabManagement.cpp:1081) and hosts a 2px insertion-line adorner + a translucent
+// drag-ghost in a Popup that follows the pointer (#56): a true RenderTargetBitmap
+// snapshot of the LIVE dragged TabViewItem. RTB works in this XAML-island hosting as
+// long as the source element is connected to the visible tree — the dragged tab always
+// is, so the snapshot succeeds (an earlier attempt that captured a not-yet-connected
+// strip threw a CATCHABLE E_INVALIDARG "content not connected", which looked like a
+// "blank"; it is NOT a failfast and human-drag smoke confirms no crash). The MUX TabView
+// only delegates its OWN drag image to the framework's shell drag (the CoreDragOperation
+// that failfasts here), so an in-process RTB snapshot is how we get a pixel-exact ghost.
+// On release the
 // gesture raises the SAME MoveTabRequested(tabId, dstIdx) intent the page
 // dispatches as moveTab; the model diff re-projects the strip. The gesture NEVER
 // optimistically mutates TabItems — pure model-as-truth (no accept-then-reconcile).
@@ -151,6 +160,9 @@ namespace winrt::TerminalApp::implementation
         bool _reorderActive{ false };
         winrt::Windows::Foundation::Point _reorderStart{};
         winrt::weak_ref<winrt::TerminalApp::PaneTabViewModel> _reorderVm{ nullptr };
+        // The dragged TabViewItem itself (weak), captured at press so the #56 ghost can
+        // snapshot it at drag-start. Weak: a mid-gesture rebuild can replace the item.
+        winrt::weak_ref<winrt::Microsoft::UI::Xaml::Controls::TabViewItem> _reorderItem{ nullptr };
         uint32_t _reorderLastGap{ UINT32_MAX };
         winrt::Windows::UI::Core::CoreWindow::KeyDown_revoker _reorderEscRevoker{};
 
@@ -239,6 +251,13 @@ namespace winrt::TerminalApp::implementation
         void _updateReorderAdorner(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void _finishReorderDrag(const winrt::Windows::UI::Xaml::Input::PointerRoutedEventArgs& e);
         void _endReorderDrag();
+
+        // #56 drag ghost: snapshot the live dragged TabViewItem to a RenderTargetBitmap
+        // (a true pixel image — RTB works here once the element is connected to the
+        // visible tree, which the dragged item always is) and show it in the ghost Popup,
+        // scaled to the tab's DIP size. Async (RenderAsync); the ghost fills in within a
+        // frame or two of the drag starting. Failure is a non-crashing no-op (empty ghost).
+        winrt::fire_and_forget _renderDragGhost(winrt::Microsoft::UI::Xaml::Controls::TabViewItem item);
 
         // Gather the live laid-out box of every projected tab, in projection order,
         // expressed in DragOverlay coordinates (so the X's line up with Canvas.Left

@@ -72,6 +72,29 @@
                 </Border.Background>
             </Border>
         </Canvas>
+
+        <!--
+            Workspaces #56 drag ghost: a translucent, pixel-exact snapshot of the
+            dragged tab that follows the pointer. TabStripView.cpp captures the live
+            dragged TabViewItem to a RenderTargetBitmap at drag-start (RTB works in this
+            XAML-island hosting as long as the source element is connected to the
+            visible tree — the dragged tab always is) and assigns it to this Image. It
+            lives in a POPUP (NOT a Canvas child) so it renders in the top-level overlay
+            layer ABOVE all page content and is not clipped by the ~32px strip row;
+            ShouldConstrainToRootBounds="False" lets it float beyond the window bounds.
+            IsOpen + HorizontalOffset/VerticalOffset + the Image Source/Width/Height are
+            all driven from TabStripView.cpp. Stretch="Fill" + the DIP Width/Height draw
+            the physical-pixel bitmap crisp at 1:1. (We can't use the shell-drag OS drag
+            image — that arms the CoreDragOperation that fails 0xc000027b here.)
+        -->
+        <Popup x:Name="DragGhostPopup"
+               ShouldConstrainToRootBounds="False"
+               IsHitTestVisible="False">
+            <Image x:Name="DragGhostImage"
+                   Opacity="0.85"
+                   Stretch="Fill"
+                   IsHitTestVisible="False" />
+        </Popup>
     </Grid>
 
 </UserControl>

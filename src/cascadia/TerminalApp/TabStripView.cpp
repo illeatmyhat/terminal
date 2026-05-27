@@ -23,8 +23,12 @@
 // VisualTreeHelper to walk a pressed element up to its TabViewItem.
 #include <winrt/Windows.UI.Xaml.Input.h>
 #include <winrt/Windows.UI.Xaml.Media.h>
+#include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Core.h>
 #include <winrt/Windows.System.h>
+
+// Workspaces #56 (drag ghost): RenderTargetBitmap snapshot of the dragged TabViewItem.
+#include <winrt/Windows.UI.Xaml.Media.Imaging.h>
 
 #include "TabStripView.g.cpp"
 
@@ -966,11 +970,13 @@ namespace winrt::TerminalApp::implementation
         }
 
         winrt::TerminalApp::PaneTabViewModel vm{ nullptr };
+        MUXC::TabViewItem pressedItem{ nullptr };
         auto node = e.OriginalSource().try_as<DependencyObject>();
         while (node)
         {
             if (const auto item = node.try_as<MUXC::TabViewItem>())
             {
+                pressedItem = item;
                 vm = _vmFromItem(item);
                 break;
             }
@@ -983,6 +989,7 @@ namespace winrt::TerminalApp::implementation
 
         _reorderCandidate = true;
         _reorderVm = winrt::make_weak(vm);
+        _reorderItem = winrt::make_weak(pressedItem); // #56: snapshot source at drag-start
         _reorderStart = e.GetCurrentPoint(TabView()).Position();
     }
 
@@ -1041,6 +1048,18 @@ namespace winrt::TerminalApp::implementation
             });
         }
 
+        // #56: open the ghost Popup and kick the RenderTargetBitmap snapshot of the live
+        // dragged tab. The capture is async (RenderAsync), so the ghost image fills in
+        // within a frame or two — the insertion line gives immediate drag feedback in the
+        // meantime. The MUX TabView delegates its OWN drag image to the framework's native
+        // (shell) drag, which is the CoreDragOperation that fails here — so an in-process
+        // RTB snapshot is the way we get a true pixel ghost.
+        DragGhostPopup().IsOpen(true);
+        if (const auto item = _reorderItem.get())
+        {
+            _renderDragGhost(item);
+        }
+
         _updateReorderAdorner(e);
     }
 
@@ -1056,7 +1075,16 @@ namespace winrt::TerminalApp::implementation
             return;
         }
 
-        const auto pointerX = static_cast<double>(e.GetCurrentPoint(TabView()).Position().X);
+        const auto pointerPos = e.GetCurrentPoint(TabView()).Position();
+        const auto pointerX = static_cast<double>(pointerPos.X);
+
+        // #56: the ghost follows the pointer on EVERY move (not gap-gated), offset
+        // down-right so the pointer and the insertion line stay visible. The Popup's
+        // offsets are relative to its anchor (this control's origin) — the same space
+        // as the TabView-relative pointer X/Y.
+        DragGhostPopup().HorizontalOffset(pointerX + 14.0);
+        DragGhostPopup().VerticalOffset(static_cast<double>(pointerPos.Y) + 10.0);
+
         const auto gap = _dropGapFromGeometry(pointerX, tabs);
         if (gap == _reorderLastGap)
         {
@@ -1164,12 +1192,57 @@ namespace winrt::TerminalApp::implementation
         _reorderCandidate = false;
         _reorderLastGap = UINT32_MAX;
         _reorderVm = nullptr;
+        _reorderItem = nullptr;
         _reorderEscRevoker.revoke();
 
         InsertionIndicator().Visibility(Visibility::Collapsed);
+        DragGhostPopup().IsOpen(false); // #56
+        DragGhostImage().Source(nullptr); // #56: drop the snapshot so the next drag re-captures
         DragOverlay().IsHitTestVisible(false);
         DragOverlay().Visibility(Visibility::Collapsed);
         DragOverlay().ReleasePointerCaptures();
+    }
+
+    // #56 drag ghost: snapshot the live dragged TabViewItem to a RenderTargetBitmap and
+    // show it (translucent) in the ghost Popup. The item is always connected + laid out at
+    // drag-start, which is exactly what RTB needs in this XAML-island hosting (a snapshot
+    // of a disconnected element throws E_INVALIDARG; a connected one renders fine). RTB
+    // captures at the rasterization scale, so PixelWidth/Height are physical pixels; we
+    // size the Image to the tab's DIP extent and Stretch=Fill so it draws crisp at 1:1.
+    // Fully self-contained + failure-tolerant: any throw is a catchable hresult (NOT a
+    // failfast), so the catch(...) leaves the ghost empty (the insertion line still tracks
+    // the drag) — no crash (smoke-confirmed).
+    winrt::fire_and_forget TabStripView::_renderDragGhost(MUXC::TabViewItem item)
+    {
+        auto strongThis = get_strong();
+
+        // Size the ghost to the tab's DIP extent up front (independent of the async
+        // render) so the bitmap lands at the right size with no relayout flicker.
+        const auto dipW = item.ActualWidth();
+        const auto dipH = item.ActualHeight();
+        if (dipW > 0.0 && dipH > 0.0)
+        {
+            DragGhostImage().Width(dipW);
+            DragGhostImage().Height(dipH);
+        }
+
+        try
+        {
+            winrt::Windows::UI::Xaml::Media::Imaging::RenderTargetBitmap rtb{};
+            co_await rtb.RenderAsync(item);
+
+            // The drag may have ended (or a new one started) while we awaited — only
+            // apply if this capture is still the active one and the gesture is live.
+            if (_reorderActive && _reorderItem.get() == item)
+            {
+                DragGhostImage().Source(rtb);
+            }
+        }
+        catch (...)
+        {
+            // RTB failed (e.g. the item left the tree mid-capture). Leave the ghost
+            // empty — the insertion line still gives drag feedback. Non-fatal.
+        }
     }
 
     // Gather every projected tab's strip-relative box, in projection order, in
