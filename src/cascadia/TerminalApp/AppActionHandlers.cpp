@@ -371,28 +371,35 @@ namespace winrt::TerminalApp::implementation
                !_hasUnmodelledNewTabFields(terminalArgs);
     }
 
-    // Detects the "default profile, no duplicate, simple cardinal
-    // direction" shape of a SplitPane action. Slice 5 routes only this
-    // case through the WorkspaceView. Any explicit-profile / duplicate
-    // / Automatic-direction case stays on the classic path.
+    // Detects the SplitPane shapes the flag-on WorkspaceView can drive through
+    // the model's splitPane action: a simple Right/Down split. We ALSO accept
+    // Duplicate-mode splits here — the default split shortcuts (alt+shift+- and
+    // alt+shift+plus) are bound to DuplicatePaneDown / DuplicatePaneRight, and in
+    // workspace mode they must split the focused leaf, NOT fall through to the
+    // classic path (which, with no classic focused tab in flag-on mode, ends up
+    // creating a whole stray workspace — the reported bug). A Duplicate split is
+    // treated as a plain model split that opens the DEFAULT profile in the new
+    // leaf (matching the working palette "Split pane, split: right/down"
+    // commands); true profile-duplication in the new leaf is not yet modelled.
+    // Still deferred to the classic path: explicit/unmodelled NEW profiles, and
+    // Up/Left/Automatic directions (the model splitPane only plants the new
+    // sibling on the right/bottom — Up/Left/Automatic need a new action or
+    // pre-rotation).
     static bool _isDefaultProfileSplit(const SplitPaneArgs& args) noexcept
     {
         if (args == nullptr)
         {
             return false;
         }
-        if (args.SplitMode() == SplitType::Duplicate)
-        {
-            return false;
-        }
         const auto dir = args.SplitDirection();
         if (dir != SplitDirection::Right && dir != SplitDirection::Down)
         {
-            // Phase 1's model-side splitPane action plants the new
-            // sibling on the right/bottom; Up/Left/Automatic routing
-            // would need either a new model action or pre-rotation,
-            // both deferred.
             return false;
+        }
+        if (args.SplitMode() == SplitType::Duplicate)
+        {
+            // Routed to the model as a default-profile split (see above).
+            return true;
         }
         return _isDefaultProfileNewTab(args.ContentArgs());
     }
