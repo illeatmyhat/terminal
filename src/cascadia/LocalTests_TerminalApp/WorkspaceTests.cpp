@@ -120,6 +120,7 @@ namespace TerminalAppLocalTests
         // Slice 5: split + resize + identity-preserving move.
         TEST_METHOD(SplitPane_FlagOn_GrowsActiveWorkspaceTree);
         TEST_METHOD(SplitPane_FlagOn_GrowsActiveWorkspaceTree_Horizontal);
+        TEST_METHOD(SplitPane_FlagOn_DuplicateInheritsSourceProfile);
         TEST_METHOD(SplitPane_FlagOff_GrowsClassicPaneTreeWithoutModel);
         TEST_METHOD(ResizePane_FlagOn_UpdatesModelSplitRatio);
         TEST_METHOD(ResizePane_FlagOff_LeavesModelDormant);
@@ -3001,6 +3002,86 @@ namespace TerminalAppLocalTests
                            L"left (top) child must be a leaf in Phase 1");
             VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::LeafPane>(*split->right),
                            L"right (bottom) child must be a leaf in Phase 1");
+        });
+        VERIFY_SUCCEEDED(result);
+    }
+
+    // AC: a Duplicate split (the alt+shift+- / alt+shift+plus shortcuts bind to
+    // DuplicatePaneRight/Down) must open the SAME profile as the pane being split
+    // in the new leaf — true profile-duplication — not the default profile. Seed
+    // the active leaf's active tab with profile1 (non-default), fire a Duplicate
+    // Right split, and assert the new sibling leaf's tab carries profile1's GUID,
+    // NOT the zero-GUID default sentinel. Pins the _HandleSplitPane fix that
+    // resolves the source TerminalSpec instead of hardcoding a default spec.
+    void WorkspaceTests::SplitPane_FlagOn_DuplicateInheritsSourceProfile()
+    {
+        CascadiaSettings settings{ settingsJsonFlagOn, {} };
+        VERIFY_IS_NOT_NULL(settings);
+
+        winrt::com_ptr<winrt::TerminalApp::implementation::TerminalPage> page{ nullptr };
+        _initializeTerminalPageWithFlagOn(page, settings);
+
+        // Seed: add a profile1 tab to the active leaf. newTab makes the new tab
+        // active (activeTabIdx -> back), so the active tab now carries profile1 —
+        // a non-default profile, which is what makes this test meaningful (a
+        // default-sentinel source would pass even with the old hardcoded spec).
+        std::array<std::uint8_t, 16> sourceProfileBytes{};
+        auto result = RunOnUIThread([&page, &sourceProfileBytes]() {
+            VERIFY_ARE_EQUAL(1u, page->_workspaceModelState->workspaces_view().size());
+
+            NewTerminalArgs newTerminalArgs{};
+            newTerminalArgs.Profile(L"profile1");
+            NewTabArgs newTabArgs{ newTerminalArgs };
+            ActionEventArgs newTabEventArgs{ newTabArgs };
+            page->_HandleNewTab(nullptr, newTabEventArgs);
+
+            // Capture the active leaf's active-tab profile (the source of the
+            // duplicate). Assert it is non-default so the inheritance check below
+            // genuinely exercises the fix.
+            const auto leafOpt = page->_activeLeafModelId();
+            VERIFY_IS_TRUE(leafOpt.has_value());
+            const auto* node = page->_workspaceModelState->pane(*leafOpt);
+            VERIFY_IS_NOT_NULL(node);
+            const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(node);
+            VERIFY_IS_NOT_NULL(leaf);
+            VERIFY_ARE_EQUAL(2u, leaf->tabs.size(), L"the focused leaf grew from one tab to two");
+            VERIFY_IS_TRUE(leaf->activeTabIdx < leaf->tabs.size());
+            const auto& sourceDescription = leaf->tabs[leaf->activeTabIdx].description;
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(sourceDescription));
+            sourceProfileBytes = std::get<::WorkspaceModel::TerminalSpec>(sourceDescription).profile;
+            const ::WorkspaceModel::TerminalSpec defaultSentinel{};
+            VERIFY_IS_FALSE(std::get<::WorkspaceModel::TerminalSpec>(sourceDescription) == defaultSentinel,
+                            L"the seeded active tab must carry a non-default profile");
+        });
+        VERIFY_SUCCEEDED(result);
+
+        Log::Comment(L"Fire a Duplicate-mode Right SplitPane action (alt+shift+plus shape)");
+        result = RunOnUIThread([&page]() {
+            SplitPaneArgs splitArgs{ SplitType::Duplicate, SplitDirection::Right, 0.5f, NewTerminalArgs{} };
+            ActionEventArgs eventArgs{ splitArgs };
+            page->_HandleSplitPane(nullptr, eventArgs);
+        });
+        VERIFY_SUCCEEDED(result);
+
+        result = RunOnUIThread([&page, &sourceProfileBytes]() {
+            // The model root is now a SplitPane; the new sibling lives on the
+            // right (splitPane plants the new leaf on the right/bottom).
+            const auto& workspaces = page->_workspaceModelState->workspaces_view();
+            VERIFY_ARE_EQUAL(1u, workspaces.size());
+            const auto* split = std::get_if<::WorkspaceModel::SplitPane>(&workspaces[0].root);
+            VERIFY_IS_NOT_NULL(split, L"model root must be a SplitPane after the duplicate split");
+            VERIFY_IS_NOT_NULL(split->right);
+            const auto* newLeaf = std::get_if<::WorkspaceModel::LeafPane>(split->right.get());
+            VERIFY_IS_NOT_NULL(newLeaf, L"the new sibling must be a leaf");
+            VERIFY_ARE_EQUAL(1u, newLeaf->tabs.size(), L"the new sibling leaf has exactly one tab");
+
+            // THE ASSERTION: the duplicated leaf's tab carries the SOURCE pane's
+            // profile, not the zero-GUID default sentinel.
+            const auto& newDescription = newLeaf->tabs[0].description;
+            VERIFY_IS_TRUE(std::holds_alternative<::WorkspaceModel::TerminalSpec>(newDescription));
+            const auto newProfileBytes = std::get<::WorkspaceModel::TerminalSpec>(newDescription).profile;
+            VERIFY_IS_TRUE(newProfileBytes == sourceProfileBytes,
+                           L"a Duplicate split must inherit the source pane's profile in the new leaf");
         });
         VERIFY_SUCCEEDED(result);
     }

@@ -378,9 +378,10 @@ namespace winrt::TerminalApp::implementation
     // workspace mode they must split the focused leaf, NOT fall through to the
     // classic path (which, with no classic focused tab in flag-on mode, ends up
     // creating a whole stray workspace — the reported bug). A Duplicate split is
-    // treated as a plain model split that opens the DEFAULT profile in the new
-    // leaf (matching the working palette "Split pane, split: right/down"
-    // commands); true profile-duplication in the new leaf is not yet modelled.
+    // routed to the model split with the SOURCE pane's profile carried into the
+    // new leaf (true profile-duplication; see _HandleSplitPane), so it matches the
+    // pane being split rather than the default profile. Only the PROFILE is
+    // duplicated — commandline / cwd / title are not modelled on TerminalSpec yet.
     // Still deferred to the classic path: explicit/unmodelled NEW profiles, and
     // Up/Left/Automatic directions (the model splitPane only plants the new
     // sibling on the right/bottom — Up/Left/Automatic need a new action or
@@ -398,7 +399,8 @@ namespace winrt::TerminalApp::implementation
         }
         if (args.SplitMode() == SplitType::Duplicate)
         {
-            // Routed to the model as a default-profile split (see above).
+            // Routed to the model split; _HandleSplitPane carries the source
+            // pane's profile into the new leaf (see above).
             return true;
         }
         return _isDefaultProfileNewTab(args.ContentArgs());
@@ -433,7 +435,36 @@ namespace winrt::TerminalApp::implementation
                                           ? ::WorkspaceModel::Axis::Horizontal
                                           : ::WorkspaceModel::Axis::Vertical;
                     const auto ratio = static_cast<double>(realArgs.SplitSize());
+
+                    // For a Duplicate split (the alt+shift+- / alt+shift+plus
+                    // shortcuts bind to DuplicatePaneDown/Right) the new sibling
+                    // should open the SAME profile as the pane being split — true
+                    // profile-duplication — not the default profile. Resolve the
+                    // active leaf's active-tab TerminalSpec from the model and carry
+                    // its profile into the new leaf (mirroring _HandleDuplicateTab).
+                    // A zero-GUID source spec (default profile) carries through
+                    // unchanged, so a default pane still duplicates to default. Any
+                    // non-Duplicate split keeps the zero-GUID default sentinel. Only
+                    // the profile is duplicated — commandline / cwd / title are not
+                    // modelled on TerminalSpec yet, so this is not a full live-session
+                    // duplicate (the classic flag-off path is).
                     ::WorkspaceModel::TerminalSpec spec{};
+                    if (realArgs.SplitMode() == SplitType::Duplicate)
+                    {
+                        if (const auto* node = _workspaceModelState->pane(*activeLeafIdOpt))
+                        {
+                            if (const auto* leaf = std::get_if<::WorkspaceModel::LeafPane>(node);
+                                leaf && leaf->activeTabIdx < leaf->tabs.size())
+                            {
+                                const auto& sourceDescription = leaf->tabs[leaf->activeTabIdx].description;
+                                if (std::holds_alternative<::WorkspaceModel::TerminalSpec>(sourceDescription))
+                                {
+                                    spec = std::get<::WorkspaceModel::TerminalSpec>(sourceDescription);
+                                }
+                            }
+                        }
+                    }
+
                     auto result = ::WorkspaceModel::splitPane(_workspaceModelState,
                                                               *activeLeafIdOpt,
                                                               axis,
